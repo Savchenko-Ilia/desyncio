@@ -57,3 +57,11 @@ The `integration` → `main` PR must flag this. Open follow-up: `pyproject.toml`
 - Rename `run.py` → `runners.py`, done as LOOP-04b in batch 5. The `desyncio.run` function shadows a submodule of the same name: `mock.patch("desyncio.run.X")` silently patches the function, and `import desyncio.run as m` returns the function. LOOP-04b also adds the `run` overloads, the `license-files` fix from D009, and the infinite-background-task test.
 - LOOP-11 (real-time mode) also owns `loop.py`/`tests/test_loop.py`, because scaled real time changes how the loop waits. It runs in batch 6, after LOOP-07. LOOP-05 and LOOP-11 now also depend on LOOP-04b, so they build on `runners.py`.
 - Batch 5 = LOOP-07, LOOP-04b, DOC-01 (no file overlap).
+
+## D006 — amended (batch 5)
+LOOP-07 is merged. `run_in_executor`, `set_default_executor` and therefore `asyncio.to_thread` now raise `RealIOError`, so the deadlock/time-jump consequence above applies only to:
+- a `threading.Thread` the user starts, which then calls `call_soon_threadsafe`;
+- a `concurrent.futures` executor used directly with `asyncio.wrap_future`. This is a known, documented gap and is not refused.
+
+## D011 — Lead promoted a SHOULD to MUST on DOC-01 (batch 5)
+The DOC-01 reviewer rated as SHOULD that §4 still said `to_thread` and `run_in_executor` deadlock and "LOOP-07 will refuse executors". LOOP-07 had already been merged into `integration`, so the merged doc would have stated something false, and the lead made it a MUST for fix round 1. Rule going forward: a docs claim that is false on the current `integration` is a MUST.

@@ -229,3 +229,98 @@ Branch: feat/LOOP-03 + fix/LOOP-03-1  ·  Merged: 8624c3f
 **Gotchas.** The private attributes in use are now `_scheduled`, `_when`, `_selector`, `_clock_resolution`, `_check_closed`, `_debug`, `_check_thread`, `_check_callback` and `_source_traceback`. Any CPython bump should run the full suite. At t ≈ 1e300, `t + 5 == t`, an inherent float limit.
 
 **Follow-ups.** The `license-files` fix in `pyproject.toml`, needed before any release. The SHOULDs above. AGENTS.md §3: flag the adapted code in the `integration` → `main` PR.
+
+## LOOP-04b — Run entry point follow-ups (2026-11-08, batch 5)
+Branch: feat/LOOP-04b  ·  Merged: 073e026
+
+**Approach.**
+- `git mv src/desyncio/run.py src/desyncio/runners.py`, with no shim; `__init__` now does `from desyncio.runners import run`. A test asserts four things: `desyncio.run` is the function, `find_spec("desyncio.run") is None`, `desyncio.runners.current_rng_streams` exists, and `mock.patch("desyncio.runners.current_rng_streams")` really patches the module.
+- Two `@overload`s: no `until` / `until=None` → `T`; `until: float` → `T | None`. Checked with `assert_type` in `tests/test_run.py`, plus a manual `uv run mypy tests/test_run.py`.
+- A new parametrized test: a `while True: await asyncio.sleep(1)` background task is cancelled cleanly both when main returns at 3.5 and at `until=10`, with warnings as errors.
+- `pyproject.toml`: `license-files = ["LICENSE", "LICENSES/*"]`. Verified with `uv build`: the wheel has `.dist-info/licenses/LICENSES/PSF.txt`, and the sdist has `LICENSES/PSF.txt`. `uv.lock` is unchanged.
+- The private `_check_seed` import was dropped; `RngStreams(seed)` validates.
+
+**asyncio internals.** In Python 3.13, `import a.b as m` resolves `m` with `getattr(a, "b")`, so a function named `b` in `a/__init__` wins over the submodule. That is why the module was renamed rather than worked around.
+
+**Trade-offs.** No third catch-all overload: mypy (and pyright) expand a `float | None` argument across the two overloads and infer `T | None` (reviewer probe).
+
+**Review findings.** PASS. Four existing `# type: ignore[arg-type]` comments became `[call-overload]`. Only the ignore codes changed, which the spec change permits.
+
+**Gotchas.** A deliberate bad-argument call to `run` in a test now needs `# type: ignore[call-overload]`.
+
+**Follow-ups.** None.
+
+## LOOP-07 — No real I/O guard (2026-11-08, batch 5)
+Branch: feat/LOOP-07  ·  Merged: dc234c0
+
+**Approach.** `src/desyncio/guards.py` defines `RealIOError(RuntimeError)` and `RealIOGuardMixin`. The loop is now `class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop)`; the mixin comes first in the method resolution order, so its overrides win.
+- **Refused:** 28 public methods (`GUARDED_METHODS`) raise at call time. They cover readers, writers and signals, `sock_*`, connection and server creation, pipes, `sendfile` and `start_tls`, `getaddrinfo`/`getnameinfo`, `subprocess_*`, `run_in_executor` and `set_default_executor`.
+- **Messages:** each names the method and suggests modelling the delay with a timer.
+- **No-ops:** `remove_reader`, `remove_writer` and `remove_signal_handler` return False (`SAFE_NOOP_METHODS`), so ordinary-asyncio cleanup code doesn't mask the real error.
+- **Classification test:** a test requires every public `AbstractEventLoop` method to be classified as guarded, no-op or explicitly allowed. The reviewer confirmed it fails when a fake method is monkeypatched in.
+- **D007 carry-overs:**
+  - the in-loop thread test was renamed to `test_threadsafe_wakeup_from_loop_thread_is_polled`;
+  - `test_worker_thread_wakeup_is_a_deadlock` was added (D006);
+  - `_JumpingSelector`'s docstring now says cross-thread wake-ups are unsupported.
+
+**asyncio internals.**
+- The loop's self-pipe (a `socketpair` that lets other threads wake `select()`) is registered via the private `_add_reader` in `_make_self_pipe` and removed via `_remove_reader` in `_close_self_pipe`. The public `add_reader` is a thin wrapper, so overriding only public names leaves the loop working.
+- `Runner.close()` awaits `shutdown_default_executor()`, which returns at once because no executor can ever be created.
+- `Runner` installs SIGINT with `signal.signal` + `set_wakeup_fd`, not `add_signal_handler`, so it is unaffected.
+- The guards are plain `def`s, even where asyncio's method is a coroutine. They raise before returning, so a forgotten `await` can't hide the error and no un-awaited coroutine leaks. `asyncio.to_thread` (itself a coroutine function) raises when awaited.
+
+**Trade-offs.**
+- `RuntimeError`, not `OSError`, as the base, so that network retry/ignore logic can't swallow it.
+- `add_signal_handler` is refused: signal delivery time is real-world and nondeterministic.
+
+**Review findings.** PASS. Probed bypasses:
+- `loop._add_reader` (private API) is not refused. Accepted.
+- `signal.set_wakeup_fd` (stdlib) is not refused. Accepted.
+- A `concurrent.futures` executor used directly with `asyncio.wrap_future` is not refused (medium-low). It behaves like a user thread (D006); documented in DOC-01 §4.
+
+SHOULD:
+- `test_worker_thread_wakeup_is_a_deadlock` sleeps 0.3 s of real time and asserts `elapsed < 0.25`. Replace both with a `threading.Event` gate, because the wall-clock bound could flake on slow CI.
+- List the known bypasses in the `guards.py` docstring.
+- Make the `_refuse` messages more specific for signals and DNS.
+
+**Gotchas.** A refused `to_thread` reports `run_in_executor()` in its message, because that is the primitive that does the I/O.
+
+**Follow-ups.** The SHOULDs above. The `threading.Event` gate is the most important, given CI.
+
+## DOC-01 — How the loop works (2026-11-08, batch 5)
+Branch: feat/DOC-01 + fix/DOC-01-1  ·  Merged: 30fcc79
+
+**Approach.** `docs/how-the-loop-works.md`, about 400 lines, is linked from a new README "Documentation" section. It covers:
+- `_run_once`'s five steps;
+- the timer heap and why ties need the `(when, priority, sequence)` key;
+- the `_clock_resolution` window;
+- `_JumpingSelector` and the deadlock rule;
+- the full `sleep(3600)` → `call_later` → `call_at` → heap → `set_result` → `call_soon` → task step path;
+- how `until` and cleanup freezing work;
+- a table of private attributes and the PSF-adapted part;
+- a worked example (tasks A, B, C) whose iteration table was produced by an instrumented `VirtualTimeLoop` subclass. The reviewer reproduced it independently.
+
+**asyncio internals.**
+- Step 5 runs only `ntodo = len(_ready)` handles, so a task woken by a timer runs one iteration after the timer fires; the clock doesn't move in between.
+- Stock heapq tie order depends on the heap's history. Pushing b..f at `when=1` and then a at 2 pops `b, d, c, e, f, a`. Pushing a first pops `b, c, f, e, d, a`.
+
+**Trade-offs.** CPython links point at the `3.13` branch, without line anchors: they drift slowly, and functions are named instead.
+
+**Review findings.**
+- Round 0 FAILED with one MUST: the quoted stock-heapq output didn't match the stated push order.
+- The lead promoted a second finding to MUST (D011): once LOOP-07 merged, §4's claim that `to_thread` and `run_in_executor` deadlock was false.
+- Fix round 1:
+  - re-ran the heap experiment and quoted the real outputs for both orders;
+  - rewrote §4: executors raise `RealIOError`; D006 now applies only to user-created threads; `wrap_future` is a known gap;
+  - added `guards.py` to the sources, a §7 row for the self-pipe's private `_add_reader`/`_remove_reader`, and `test_guards.py` to §9.
+- Re-review: PASS.
+- SHOULD:
+  - Say `to_thread` raises when awaited, not "at the call".
+  - "Deadlock immediately" holds only if the thread hasn't yet written to the self-pipe.
+  - §2's timeout omits the 24 h `MAXIMUM_SELECT_TIMEOUT` clamp and the negative → 0 rule.
+  - In debug mode, step 5 also reads `time()`.
+  - Say "the main changes" rather than "three changes" from `call_at`.
+
+**Gotchas.** The doc has to change whenever loop internals change. Add "update docs/how-the-loop-works.md" to the review checklist for any feature that owns `loop.py`.
+
+**Follow-ups.** The SHOULDs above.
