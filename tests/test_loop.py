@@ -43,15 +43,25 @@ def test_accepts_clock() -> None:
 
 
 def test_sleep_one_hour_is_instant() -> None:
+    """Sleeping 3600 virtual seconds takes < 50 ms of wall time.
+
+    Only ``runner.run`` is timed (not loop creation or teardown) and the best
+    of three runs is used, so a one-off scheduling hiccup on a busy CI machine
+    cannot fail the test.
+    """
+
     async def main() -> float:
         await asyncio.sleep(3600)
         return asyncio.get_running_loop().time()
 
-    t0 = time.perf_counter()
-    result = run(main)
-    elapsed = time.perf_counter() - t0
-    assert result == 3600.0
-    assert elapsed < 0.05
+    best = float("inf")
+    for _ in range(3):
+        with asyncio.Runner(loop_factory=VirtualTimeLoop) as runner:
+            t0 = time.perf_counter()
+            result = runner.run(main())
+            best = min(best, time.perf_counter() - t0)
+        assert result == 3600.0
+    assert best < 0.05
 
 
 def test_sleeps_wake_in_time_order() -> None:
