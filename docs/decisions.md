@@ -25,3 +25,12 @@ This cloud session pushes the session branch `claude/setup-batch-1-5bb5vp`. Per 
 ## D005 — CI-01 and LOOP-01b added (owner approved)
 - **CI-01:** GitHub Actions runs on `pull_request` (+ manual `workflow_dispatch`) only, never on `push`. The owner asked for this to save minutes. One Ubuntu job on Python 3.13; superseded runs are cancelled. It uses the `astral-sh/setup-uv` action, which is CI tooling, not a project dependency.
 - **LOOP-01b:** the LOOP-01 review SHOULDs on input handling, promoted to a feature. It runs in batch 3 alongside LOOP-02. The two share no files, and LOOP-01b leaves the clock's public API unchanged (validation only).
+
+## D006 — LOOP-02: deadlock semantics and threads (lead, batch 3)
+- When nothing is ready, no timer is scheduled and no fd is ready, `VirtualTimeLoop` raises `SimulationDeadlock` immediately instead of blocking.
+- Consequence: a wake-up from a real thread (`call_soon_threadsafe` from a worker, `to_thread`, `run_in_executor`) is not waited for. It deadlocks, or, if a timer is pending, virtual time jumps past it.
+- The lead accepted this under principle 5 (no real I/O in a simulation); LOOP-07 will refuse executors explicitly. The owner may overrule. Supporting threads would need a real-time wait, which breaks determinism.
+- The selector-wrapping approach was chosen over overriding `_run_once`, to avoid copying CPython code (no PSF notice needed).
+
+## D007 — File ownership gap for LOOP-03 and LOOP-07 (open, for the owner)
+LOOP-03 (tie-breaking) has to change how timers are ordered. That lives in `VirtualTimeLoop` (`call_at` / `_scheduled`). LOOP-07 (I/O guards) has to override loop methods (`add_reader`, `sock_*`, `subprocess_*`, `run_in_executor`). Both are listed as owning only their own new files, but both realistically need `src/desyncio/loop.py`. The suggested batch 4 (LOOP-03, LOOP-04, LOOP-07) therefore overlaps on `loop.py`. Owner decision pending.
