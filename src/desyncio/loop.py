@@ -14,11 +14,13 @@ Every iteration of ``BaseEventLoop._run_once`` does roughly this:
    ``_scheduled`` to ``_ready``.
 5. Run everything in ``_ready``.
 
-A simulation must never wait in step 3. :class:`VirtualTimeLoop` therefore
-(a) answers ``time()`` from a :class:`~desyncio.clock.VirtualClock`, and
+A simulation must not wait for the real world in step 3. :class:`VirtualTimeLoop`
+therefore (a) answers ``time()`` from a :class:`~desyncio.clock.VirtualClock`, and
 (b) swaps the selector for :class:`_JumpingSelector`, whose ``select`` moves
-the clock to the earliest timer instead of sleeping. Step 4 then sees that
-timer as due and the loop carries on, having skipped the wait entirely.
+the clock to the earliest timer. In fast mode it does so at once, skipping the
+wait entirely. In real-time mode (a :class:`~desyncio.realtime.RealTimePacer`)
+it first waits ``virtual_dt / speed`` of wall time, interruptibly. Step 4 then
+sees the timer as due and the loop carries on.
 
 Same-time ordering and the resolution window
 --------------------------------------------
@@ -54,6 +56,7 @@ from typing import Any
 
 from desyncio.clock import VirtualClock
 from desyncio.guards import RealIOGuardMixin
+from desyncio.realtime import RealTimePacer
 from desyncio.scheduling import (
     DEFAULT_PRIORITY,
     PriorityTimerHandle,
@@ -70,7 +73,7 @@ class SimulationDeadlock(RuntimeError):
 
 
 class _JumpingSelector(selectors.BaseSelector):
-    """Wraps a real selector; ``select`` advances virtual time, never sleeps.
+    """Wraps a real selector; ``select`` advances virtual time.
 
     The real selector is still used for registration and is still polled
     (with timeout 0) on every call. That matters because the loop's
@@ -79,11 +82,17 @@ class _JumpingSelector(selectors.BaseSelector):
     loop's own thread (the byte is already in the pipe) is seen on the next
     iteration.
 
-    This does **not** support wake-ups from other threads. The poll never
-    waits, so if the loop is idle it jumps the clock or raises
-    :class:`SimulationDeadlock` before a real thread can write its byte
-    (D006). Real threads are unsupported; ``run_in_executor`` and
-    ``to_thread`` are refused by :mod:`desyncio.guards`.
+    **Fast mode** (no pacer, or speed ``inf``): the poll never waits. If the
+    loop is idle it jumps the clock or raises :class:`SimulationDeadlock`
+    before a real thread can write its byte, so wake-ups from other threads
+    are not waited for (D006). ``run_in_executor`` and ``to_thread`` are
+    refused by :mod:`desyncio.guards`.
+
+    **Real-time mode** (a pacer with finite speed): an idle ``select`` first
+    waits on the real selector for ``(when - now) / speed`` seconds, so a
+    byte in the self-pipe (speed change, pause, resume, or a user thread's
+    ``call_soon_threadsafe``) ends the wait early. The deadlock rule is
+    unchanged unless the pacer is paused.
     """
 
     def __init__(self, real: selectors.BaseSelector, loop: "VirtualTimeLoop") -> None:
@@ -112,10 +121,53 @@ class _JumpingSelector(selectors.BaseSelector):
     def close(self) -> None:
         self._real.close()
 
+    def _select_paced(
+        self, pacer: RealTimePacer
+    ) -> list[tuple[selectors.SelectorKey, int]] | None:
+        """Real-time mode's idle step. ``None`` means "use the fast path".
+
+        Called only when idle (nothing ready, no events). Steps:
+
+        1. Paused: wait with no timeout for a wake-up; virtual time stays put.
+        2. Else wait ``(min(when, limit) - now) / speed`` real seconds. The
+           limit is a ``_BoundedClock``'s ``until``, so we never wait for
+           time beyond it.
+        3. Full wait: ``advance_to(when)`` (a bounded clock raises there if
+           ``when`` is past ``until``). Interrupted wait: advance only by
+           ``elapsed * speed``, capped at the target, and return the events.
+        """
+        loop = self._loop
+        clock = loop.clock
+        now = clock.now
+        # ``limit`` exists on runners._BoundedClock. When the runner freezes
+        # it at ``now`` for cleanup, real-time pacing must not apply: cleanup
+        # either needs no time to pass or fails exactly as in fast mode.
+        limit: float = getattr(clock, "limit", math.inf)
+        if limit <= now:
+            return None
+        speed, paused = pacer.snapshot()
+        wall = pacer.wall_clock
+        if paused:
+            return wall.wait(None, self._real)
+        scheduled = loop._scheduled  # type: ignore[attr-defined]  # noqa: SLF001
+        if speed == math.inf or not scheduled:
+            return None  # fast mode, or deadlock (raised by the fast path)
+        when: float = scheduled[0]._when
+        target = min(when, limit)
+        real_timeout = (target - now) / speed
+        started = wall.monotonic()
+        events = wall.wait(real_timeout, self._real) if real_timeout > 0 else []
+        if not events:
+            clock.advance_to(when)  # waited the full time
+            return events
+        elapsed = wall.monotonic() - started
+        clock.advance_to(min(target, now + elapsed * speed))
+        return events
+
     def select(
         self, timeout: float | None = None
     ) -> list[tuple[selectors.SelectorKey, int]]:
-        """Poll real fds without blocking; if idle, jump to the next timer.
+        """Poll real fds; if idle, advance to the next timer.
 
         ``_run_once`` passes ``timeout == 0`` when callbacks are ready (or the
         loop is stopping): then we only poll. Otherwise it is positive or
@@ -124,6 +176,13 @@ class _JumpingSelector(selectors.BaseSelector):
         events = self._real.select(0)
         if events or timeout == 0:
             return events
+
+        pacer = self._loop.pacer
+        if pacer is not None:
+            paced = self._select_paced(pacer)
+            if paced is not None:
+                return paced
+            # None: fast behaviour applies (speed inf, frozen, or no timers).
 
         # _run_once already popped cancelled timers off the head of the heap
         # before computing the timeout, so [0] is a live timer. Cancelled
@@ -152,7 +211,8 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     Use it with ``asyncio.Runner(loop_factory=VirtualTimeLoop)``. Timers
     (``sleep``, ``call_later``, ``call_at``, ``timeout``) are measured on the
     virtual clock, and whenever the loop would otherwise wait it jumps the
-    clock straight to the earliest pending timer.
+    clock straight to the earliest pending timer (or, with a ``pacer``, waits
+    the scaled real time first).
 
     Real I/O (sockets, subprocesses, executors, signals) is refused with
     :class:`~desyncio.guards.RealIOError`; see :mod:`desyncio.guards` for
@@ -160,12 +220,19 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     comes first in the bases so its overrides win.
     """
 
-    def __init__(self, start: float = 0.0, clock: VirtualClock | None = None) -> None:
+    def __init__(
+        self,
+        start: float = 0.0,
+        clock: VirtualClock | None = None,
+        pacer: RealTimePacer | None = None,
+    ) -> None:
         """Create the loop.
 
         Args:
             start: initial simulation time; ignored if ``clock`` is given.
             clock: an existing clock to drive instead of a fresh one.
+            pacer: if given, run in scaled real time under this pacer
+                (see :mod:`desyncio.realtime`); ``None`` is fast mode.
         """
         # Set before super().__init__: the base constructor may call time().
         self.clock = clock if clock is not None else VirtualClock(start)
@@ -174,6 +241,9 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         # self-pipe on it. Wrap it so the registrations carry over.
         self._selector = _JumpingSelector(self._selector, self)  # type: ignore[has-type]
         self._sequence = SequenceCounter()
+        self.pacer = pacer
+        if pacer is not None:
+            pacer.bind(self)
 
     @property
     def _clock_resolution(self) -> float:

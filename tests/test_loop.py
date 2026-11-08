@@ -163,12 +163,15 @@ def test_threadsafe_wakeup_from_loop_thread_is_polled() -> None:
 def test_worker_thread_wakeup_is_a_deadlock() -> None:
     """D006: a real thread's ``call_soon_threadsafe`` is not waited for.
 
-    The worker sleeps 0.3 s of real time, then wakes the loop. But main awaits a
-    future with no timers pending, so the loop sees nothing to do and raises
-    ``SimulationDeadlock`` at once rather than waiting for the thread.
+    The worker is blocked on a ``threading.Event`` that the test only sets
+    *after* ``run`` has raised. So the worker provably has not woken the loop
+    when the loop gives up: main awaits a future with no timers pending, the
+    loop sees nothing to do and raises ``SimulationDeadlock`` at once instead
+    of waiting for the thread. No sleeps, no wall-clock bounds.
     """
     import threading
 
+    release = threading.Event()
     worker_done = threading.Event()
     threads: list[threading.Thread] = []
 
@@ -177,7 +180,7 @@ def test_worker_thread_wakeup_is_a_deadlock() -> None:
         fut: asyncio.Future[int] = loop.create_future()
 
         def worker() -> None:
-            time.sleep(0.3)
+            release.wait()
             try:
                 loop.call_soon_threadsafe(fut.set_result, 1)
             except RuntimeError:
@@ -189,11 +192,12 @@ def test_worker_thread_wakeup_is_a_deadlock() -> None:
         t.start()
         return await fut
 
-    t0 = time.perf_counter()
-    with pytest.raises(SimulationDeadlock):
-        run(main)
-    assert time.perf_counter() - t0 < 0.25  # failed before the worker woke
-    threads[0].join()
+    try:
+        with pytest.raises(SimulationDeadlock):
+            run(main)
+    finally:
+        release.set()  # only now may the worker proceed
+        threads[0].join()
     assert worker_done.is_set()
 
 
