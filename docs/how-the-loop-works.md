@@ -94,12 +94,16 @@ as interchangeable and pops them in whatever order its internal swaps left them.
 `call_later`'s own docstring says so: "If two callbacks are scheduled for exactly the
 same time, it is undefined which will be called first."
 
-Real output on 3.13 (stock `TimerHandle`, pushed in the order b, c, d, e, f, all at
-`when=1`, plus `a` at 2):
+Real output on 3.13. Five stock `TimerHandle`s `b, c, d, e, f`, all at `when=1`, are
+pushed with `heapq.heappush` in that order, then `a` at `when=2`; then the heap is
+emptied with `heapq.heappop`:
 
 ```
-pop order: b, c, f, e, d, a        # not b, c, d, e, f
+pop order: b, d, c, e, f, a        # not b, c, d, e, f
 ```
+
+The tied order also depends on what else is in the heap: pushing `a` *first* and then
+`b`…`f` gives `b, c, f, e, d, a`.
 
 A simulation where same-time events run in an arbitrary order cannot give the same trace
 twice, and AGENTS.md makes determinism mandatory.
