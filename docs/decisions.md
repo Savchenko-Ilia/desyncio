@@ -82,3 +82,10 @@ The DOC-01 reviewer rated as SHOULD that §4 still said `to_thread` and `run_in_
 
 ## D013 — CI made manual-only (owner request)
 The owner has no GitHub Actions credits. The two runs on PR #2 failed within ~3 s without running any steps. CI-02 removes the `pull_request` trigger and keeps only `workflow_dispatch`. `scripts/gate.sh` remains the verification for every merge. LOOP-10's "runs in CI on every PR" becomes "runs in `scripts/gate.sh`". Restore the `pull_request` trigger when credits are available.
+
+## D014 — LOOP-11 fix round: ownership exception and promoted SHOULD (lead, batch 6)
+- The fixer was allowed to edit the `src/desyncio/guards.py` module docstring only, to fix the "never waits" claim LOOP-11 had made false (D011). That file is owned by LOOP-07.
+- The lead promoted the reviewer's SHOULD "failed `pacer.bind` leaks a half-built loop (ResourceWarnings)" to a MUST: it is a resource leak on an error path, and small to fix.
+
+## D006 — amended again (batch 6, LOOP-11)
+In real-time mode, a paused pacer waits in real time with no timeout until `resume()`, which comes from another thread or a wall-clock hook. That holds even with no timers. Unpaused, the deadlock rule is unchanged: no timers and nothing ready raises `SimulationDeadlock`, and real-time mode does not wait for threads either.

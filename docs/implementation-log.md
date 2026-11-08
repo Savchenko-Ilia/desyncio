@@ -326,7 +326,7 @@ Branch: feat/DOC-01 + fix/DOC-01-1  ·  Merged: 30fcc79
 **Follow-ups.** The SHOULDs above.
 
 ## CI-02 — CI manual-only (2026-11-08, batch 6, owner request)
-Branch: feat/CI-02  ·  Merged: (this commit's parent merge)
+Branch: feat/CI-02  ·  Merged: 29e5222
 
 **Approach.** `.github/workflows/ci.yml` now has only `workflow_dispatch` under `on:`; `pull_request` was removed. The header comment explains why (no Actions credits, D013), names `scripts/gate.sh` as the merge check, and says how to re-enable. The job, steps, permissions and concurrency are unchanged.
 
@@ -342,3 +342,73 @@ Branch: feat/CI-02  ·  Merged: (this commit's parent merge)
 **Gotchas.** The two failed runs on PR #2 (about 3 s each, no steps run) were caused by billing, not by test failures.
 
 **Follow-ups.** Restore `pull_request:` when credits are available.
+
+## LOOP-05 — Sim facade (2026-11-08, batch 6)
+Branch: feat/LOOP-05  ·  Merged: 6a3920c
+
+**Approach.** `src/desyncio/sim.py` has a `Sim` class and the singleton `sim`, exported as `from desyncio import sim` (D012). Every member looks up the running loop each time. If there is no running `VirtualTimeLoop`, it raises `RuntimeError` saying to use it inside `desyncio.run(...)`.
+- `sim.now` is `loop.time()`.
+- `await sim.timeout(dt, value=None)` is `asyncio.sleep(dt, value)` with validation: `dt` must be finite, `>= 0`, and not a bool. It is an `async def`, so the check happens at `await`.
+- `sim.spawn(coro, name=None)` calls `loop.create_task(coro, name=...)`. Default names are `proc-N`, from a per-loop counter in a `WeakKeyDictionary` (loop.py wasn't owned). Bad input closes the coroutine before raising.
+- `sim.rng(name)` is `current_rng_streams().stream(name)`.
+
+**asyncio internals.**
+- asyncio names tasks `Task-N` from a counter shared by the whole process, so a second run in the same process gets different names. That is why spawn has its own counter.
+- Tasks copy the current context when created, which is how `sim.rng` reaches the run's `RngStreams`.
+- The loop keeps only weak references to tasks, so callers must keep the `Task` that `spawn` returns.
+
+**Trade-offs.** A singleton plus a running-loop lookup, rather than passing a `Sim` into `main`. It reads like asyncio's own functions.
+
+**Review findings.** PASS. SHOULD:
+- **Fresh context:** a task created with `loop.create_task(..., context=contextvars.Context())` gets a misleading "no simulation is running" from `sim.rng`. Fall back to the loop, or improve the message.
+- **Names only for `sim.spawn`:** only spawned tasks get deterministic names. `asyncio.create_task`, `TaskGroup` and the main task keep the process-wide `Task-N`. LOOP-09 should install a task factory so all names are deterministic.
+- **More tests:** spawn order with simultaneous spawns; the log line for a failed task nobody awaited; an un-awaited `sim.timeout(-1)`; checking that the re-raised exception is the same object.
+- **Non-str `name`:** accepted and converted with `str()`.
+
+**Gotchas.** Validation in `timeout` only happens when it is awaited.
+
+**Follow-ups.** The task-factory note is for LOOP-09. The other SHOULDs above.
+
+## LOOP-11 — Scaled real-time mode (2026-11-08, batch 6)
+Branch: feat/LOOP-11 + fix/LOOP-11-1  ·  Merged: 2d06d94
+
+**Approach.**
+- `src/desyncio/realtime.py` has three pieces:
+  - `RealTimePacer(speed=1.0, wall_clock=None)`, with `speed` (get/set), `pause()`, `resume()` and `paused`, all behind a lock;
+  - a `WallClock` Protocol with `monotonic()` and `wait(timeout, selector)`;
+  - `SystemWallClock`, which waits by calling the real `selector.select(timeout)`.
+- The pacer is wired in through `VirtualTimeLoop(..., pacer=None)` and `desyncio.run(..., speed=None, pacer=None)`. `speed=x` is shorthand for `pacer=RealTimePacer(x)`, and giving both raises `TypeError`.
+- When the loop is idle, `_JumpingSelector._select_paced` waits `(min(when, until) - now) / speed` of real time, through the wall clock:
+  - **Full wait:** it calls `advance_to(when)`, so `_BoundedClock` still stops at `until`.
+  - **Interrupted wait** (a byte arrives on the self-pipe): it advances by `elapsed*speed`, capped, and returns the events.
+  - **Paused:** it waits with no timeout until resumed. Virtual time doesn't move.
+- **Fast mode** (no pacer, `speed=inf`, or the cleanup freeze) uses exactly the old code path.
+- **Thread safety:** every `speed=`, `pause()` and `resume()` calls `loop.call_soon_threadsafe(noop)` to wake the loop.
+
+**asyncio internals.** The self-pipe makes the real-time wait interruptible. A thread's `call_soon_threadsafe` writes one byte, which ends `select(timeout)` early. From inside the loop thread, the same call lands in `_ready`, so the next `_run_once` uses timeout 0 and no wait is interrupted. Stock asyncio caps select timeouts at `MAXIMUM_SELECT_TIMEOUT` (24 h) for the same overflow reason as the fix below.
+
+**Trade-offs.**
+- Waits are relative per timer, not anchored to a start time. Real time can drift a little behind the ideal schedule, by the time callbacks take to run.
+- With no timers and not paused, the loop still raises `SimulationDeadlock` (consistent with D006). While paused, it waits.
+
+**Review findings.**
+- Round 0 FAILED with two MUSTs, and the lead promoted a third (D014):
+  - the real wait wasn't capped: `select` raises `OverflowError` above ~9.2e9 s, e.g. `speed=1e-300` or a `1e10` timer;
+  - the `guards.py` docstring said "never waits", now false (D011);
+  - (promoted) a failed `pacer.bind` leaked the half-built loop and its sockets.
+- Fix round 1:
+  - `MAX_REAL_WAIT = 86400`. A cut-short chunk advances by `elapsed*speed`, or at least one float step so it can't spin forever.
+  - The loop closes itself if `bind` fails. `run()` builds the loop inside its validation block, so `main` is closed on failure.
+  - The `guards.py` docstring is qualified.
+  - Re-review: PASS. The reviewer checked chunked runs under every `until` value against fast-mode traces and found them identical. There were no ResourceWarnings on any `run()` path under `-X dev -W error`.
+- SHOULD:
+  - `pause()` from inside the simulation, with no other thread, blocks forever. Add a one-line warning to the `pause()` and `run()` docstrings.
+  - A pacer reused after a run that ended paused starts the next run paused.
+  - If the float-step floor regresses, `test_chunk_below_one_float_step_still_makes_progress` hangs instead of failing. Bound its fake wall clock.
+  - Add a comment explaining the floor's effect: at most one float step per day, only for absurdly small speeds.
+
+**Gotchas.**
+- `_select_paced` reads `getattr(clock, "limit", inf)`, a light coupling to `runners._BoundedClock`.
+- The `run()` tests for `speed` and `pacer` are in `tests/test_realtime.py`, not `tests/test_run.py`.
+
+**Follow-ups.** The SHOULDs above. Time anchoring, for long real-time runs.
