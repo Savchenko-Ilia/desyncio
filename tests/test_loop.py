@@ -144,7 +144,13 @@ def test_deadlock_raises_instead_of_blocking() -> None:
         run(main)
 
 
-def test_threadsafe_wakeup_is_still_polled() -> None:
+def test_threadsafe_wakeup_from_loop_thread_is_polled() -> None:
+    """call_soon_threadsafe from the loop's own thread works.
+
+    This does NOT test cross-thread wake-ups; those are unsupported (D006), see
+    ``test_worker_thread_wakeup_is_a_deadlock``.
+    """
+
     async def main() -> int:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[int] = loop.create_future()
@@ -152,6 +158,43 @@ def test_threadsafe_wakeup_is_still_polled() -> None:
         return await fut
 
     assert run(main) == 42
+
+
+def test_worker_thread_wakeup_is_a_deadlock() -> None:
+    """D006: a real thread's ``call_soon_threadsafe`` is not waited for.
+
+    The worker sleeps 0.3 s of real time, then wakes the loop. But main awaits a
+    future with no timers pending, so the loop sees nothing to do and raises
+    ``SimulationDeadlock`` at once rather than waiting for the thread.
+    """
+    import threading
+
+    worker_done = threading.Event()
+    threads: list[threading.Thread] = []
+
+    async def main() -> int:
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[int] = loop.create_future()
+
+        def worker() -> None:
+            time.sleep(0.3)
+            try:
+                loop.call_soon_threadsafe(fut.set_result, 1)
+            except RuntimeError:
+                pass  # loop already closed: expected, the deadlock came first
+            worker_done.set()
+
+        t = threading.Thread(target=worker)
+        threads.append(t)
+        t.start()
+        return await fut
+
+    t0 = time.perf_counter()
+    with pytest.raises(SimulationDeadlock):
+        run(main)
+    assert time.perf_counter() - t0 < 0.25  # failed before the worker woke
+    threads[0].join()
+    assert worker_done.is_set()
 
 
 def test_cpython_adapted_code_carries_psf_notice() -> None:
