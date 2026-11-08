@@ -14,7 +14,8 @@ numbers drift):
 - [`Lib/asyncio/futures.py`](https://github.com/python/cpython/blob/3.13/Lib/asyncio/futures.py): `_set_result_unless_cancelled`
 
 desyncio sources: [`clock.py`](../src/desyncio/clock.py), [`loop.py`](../src/desyncio/loop.py),
-[`scheduling.py`](../src/desyncio/scheduling.py), and the runner behind `desyncio.run(...)`.
+[`scheduling.py`](../src/desyncio/scheduling.py), [`guards.py`](../src/desyncio/guards.py),
+and the runner behind `desyncio.run(...)`.
 
 ## 1. The idea in one paragraph
 
@@ -199,17 +200,25 @@ model is a bug, and failing loudly is better than hanging.
 Consequence for threads (decision D006): the loop does not wait for them. A thread
 resolves work by calling `call_soon_threadsafe`, which writes a byte to the self-pipe,
 and the loop would have to *wait* for that byte. The poll is `select(0)`, which does not
-wait. So:
+wait. So, for a `threading.Thread` you start yourself that later calls
+`loop.call_soon_threadsafe(...)`:
 
 - no timers pending: the loop raises `SimulationDeadlock` immediately, before the thread
   has a chance to report;
 - a timer pending: virtual time jumps to it, past whenever the thread would have
   finished.
 
-This covers `asyncio.to_thread`, `run_in_executor`, and `call_soon_threadsafe` from
-another thread. Supporting them would need a real-time wait, which breaks determinism.
-This is in line with AGENTS.md principle 5 (no real I/O inside a simulation); LOOP-07
-will refuse executors explicitly.
+Supporting real threads would need a real-time wait, which breaks determinism. The
+loop's own executor entry points never get that far: `loop.run_in_executor` (and so
+`asyncio.to_thread`, which is a thin wrapper over it) and `loop.set_default_executor`
+raise `desyncio.guards.RealIOError` at the call, before any thread starts. One known gap:
+a `concurrent.futures` executor you create and submit to directly, then await with
+`asyncio.wrap_future`, bypasses the loop's methods, so it is not refused and behaves like
+the user thread above.
+
+- [`guards.py`](../src/desyncio/guards.py) lists everything the loop refuses with
+  `RealIOError` (sockets, subprocesses, executors, DNS, signals) and explains why, in line
+  with AGENTS.md principle 5 (no real I/O inside a simulation).
 
 ## 5. `asyncio.sleep(3600)` becomes a timer
 
@@ -297,6 +306,7 @@ state. If a CPython release changes any of these, the tests in `tests/` fail.
 | `loop._check_closed`, `_debug`, `_check_thread`, `_check_callback` | `_schedule` | same validation as stock `call_at` |
 | `Handle._source_traceback` | `PriorityTimerHandle.drop_creation_frame` | debug-mode creation stack trim |
 | `TimerHandle._scheduled` | `mark_scheduled` | lets `cancel()` count cancelled timers in the heap |
+| `BaseSelectorEventLoop._add_reader`, `_remove_reader` | not called; `RealIOGuardMixin` relies on them | the loop registers its own self-pipe through these private methods, so refusing the public `add_reader` does not break the loop |
 
 ### The PSF-adapted part (D009)
 
@@ -388,6 +398,8 @@ it is instrumentation only and lives outside the repository.)
   behaviour above, as executable specs.
 - [`tests/test_ordering.py`](../tests/test_ordering.py): tie-breaking and the resolution window.
 - [`tests/test_run.py`](../tests/test_run.py): `until`, cleanup freezing and seeds.
+- [`tests/test_guards.py`](../tests/test_guards.py): which loop methods raise
+  `RealIOError`, and that every `AbstractEventLoop` method is classified.
 - [`docs/decisions.md`](decisions.md): D006 (deadlock and threads), D008 (`until` and
   priority semantics), D009 (PSF-adapted code).
 - [`docs/implementation-log.md`](implementation-log.md): how each piece was built.
