@@ -89,3 +89,13 @@ The owner has no GitHub Actions credits. The two runs on PR #2 failed within ~3 
 
 ## D006 — amended again (batch 6, LOOP-11)
 In real-time mode, a paused pacer waits in real time with no timeout until `resume()`, which comes from another thread or a wall-clock hook. That holds even with no timers. Unpaused, the deadlock rule is unchanged: no timers and nothing ready raises `SimulationDeadlock`, and real-time mode does not wait for threads either.
+
+## D015 — Batch 7 scope (owner said "go" to the lead's recommendations)
+- **LOOP-09 ownership:** besides `trace.py`/`test_trace.py`, LOOP-09 owns:
+  - `loop.py` and `test_loop.py`, to install the task factory and hooks;
+  - `sim.py` and `test_sim.py`, so `sim.spawn` shares the loop's naming;
+  - `runners.py` and `test_run.py`, for the `trace=` argument of `desyncio.run` and the main task's name;
+  - `docs/how-the-loop-works.md`, for a tracing section and a short "What desyncio reuses from asyncio" section (asked by the owner), plus any claims LOOP-09 makes stale (D011).
+  LOOP-06 owns only `tests/test_asyncio_compat.py`, so there is no overlap.
+- **Deterministic names for every task:** a task created on a `VirtualTimeLoop` without an explicit name gets `proc-N` from one per-loop counter. That covers `asyncio.create_task`, `TaskGroup` and `sim.spawn`. The main task created by `desyncio.run` is named `main`. Explicit names are kept. Naming applies whether or not tracing is on.
+- **Trace record:** `(t, seq, task_name, kind)`, with `kind` one of `start`, `resume`, `finish`, `cancel` (spec). A task that ends with an exception records `finish`. `seq` is a per-run counter. The sink is any callable that takes one record. It is off by default, and when off no tracing code runs per task step (naming still applies).
