@@ -59,7 +59,9 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
 
 - **Python 3.13+**, `asyncio`. Use newer asyncio features freely: `Queue.shutdown()`,
   `as_completed()` as an async iterator, current `TaskGroup`/cancellation behaviour.
-- `src/` layout, `pyproject.toml`, `[dev]` extra.
+- **uv** for Python, environments and dependencies: `uv sync`, `uv run ...`, `uv add`.
+  Never use pip directly. `uv.lock` is committed; dev tools live in `[dependency-groups] dev`.
+- `src/` layout, `pyproject.toml`.
 - pytest, pytest-asyncio, hypothesis for property tests; ruff; mypy.
 - Runtime dependencies: none, unless agreed with the owner.
 
