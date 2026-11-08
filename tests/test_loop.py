@@ -152,3 +152,23 @@ def test_threadsafe_wakeup_is_still_polled() -> None:
         return await fut
 
     assert run(main) == 42
+
+
+def test_cpython_adapted_code_carries_psf_notice() -> None:
+    """AGENTS.md §3: code adapted from CPython keeps the PSF notice."""
+    import inspect
+    from pathlib import Path
+
+    import desyncio.loop as loop_module
+
+    notice = Path(__file__).resolve().parent.parent / "LICENSES" / "PSF.txt"
+    assert notice.is_file()
+    assert "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2" in notice.read_text(
+        encoding="utf-8"
+    )
+
+    assert "LICENSES/PSF.txt" in inspect.getsource(loop_module)
+
+    doc = loop_module.__doc__ or ""
+    assert "No CPython code is copied" not in doc
+    assert "not a substantive copy" not in doc

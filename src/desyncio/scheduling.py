@@ -102,6 +102,11 @@ class PriorityTimerHandle(TimerHandle):
         when: float = self._when  # type: ignore[attr-defined]
         return (when, self._priority, self._sequence)
 
+    # Adapted from CPython (Python 3.13) Lib/asyncio/base_events.py,
+    # BaseEventLoop.call_at, and Lib/asyncio/events.py, TimerHandle.__init__
+    # (the ``if ..._source_traceback: del ..._source_traceback[-1]`` trim).
+    # Copyright (c) 2001 Python Software Foundation. Licensed under the PSF
+    # License Agreement v2; see LICENSES/PSF.txt. Changed: moved into a method.
     def drop_creation_frame(self) -> None:
         """Remove the innermost frame of the debug-mode creation traceback.
 

@@ -33,15 +33,15 @@ time share an instant.
 
 Private-API dependency
 ----------------------
-No CPython code is copied (so no PSF notice is needed), but the selector
-trick reads private attributes of ``BaseEventLoop``: ``_scheduled`` (a
+``VirtualTimeLoop._schedule`` is adapted from CPython's
+``BaseEventLoop.call_at`` (``Lib/asyncio/base_events.py``, Python 3.13) and
+is under the PSF License Agreement; see ``LICENSES/PSF.txt``. The rest of
+this module only subclasses and overrides. The selector trick and
+``_schedule`` read private attributes of ``BaseEventLoop``: ``_scheduled`` (a
 heap of ``TimerHandle``), ``TimerHandle._when``, ``_selector`` and
-``_clock_resolution``. ``call_at`` re-implements five lines of
-``BaseEventLoop.call_at`` (closed/debug checks, ``heappush``,
-``_scheduled = True``); this is the minimum needed to push our own handle
-class, and is not a substantive copy of CPython. They are
-stable across 3.13 but not public; if a future Python changes them, the tests
-in ``tests/test_loop.py`` will fail loudly.
+``_clock_resolution``. They are stable across 3.13 but not public; if a
+future Python changes them, the tests in ``tests/test_loop.py`` will fail
+loudly.
 """
 
 import asyncio
@@ -233,6 +233,15 @@ class VirtualTimeLoop(asyncio.SelectorEventLoop):
         timer.drop_creation_frame()
         return timer
 
+    # Adapted from CPython Lib/asyncio/base_events.py, BaseEventLoop.call_at
+    # (Python 3.13). Copyright (c) 2001 Python Software Foundation. Licensed
+    # under the PSF License Agreement v2; see LICENSES/PSF.txt.
+    # Changes from the original: builds a PriorityTimerHandle (keyed by
+    # when, priority, sequence) instead of events.TimerHandle; takes a
+    # priority and assigns the next per-loop sequence number; takes the
+    # caller's api_name for _check_callback instead of the literal 'call_at';
+    # takes args as a tuple; uses drop_creation_frame()/mark_scheduled()
+    # helpers for the traceback trim and the _scheduled flag.
     def _schedule(
         self,
         when: float,
