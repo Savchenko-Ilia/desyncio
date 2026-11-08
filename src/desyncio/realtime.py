@@ -67,6 +67,13 @@ from typing import Protocol
 
 Events = list[tuple[selectors.SelectorKey, int]]
 
+#: Longest single real wait, in seconds (one day). ``select`` raises
+#: ``OverflowError`` for timeouts above ~9.2e9 s, which a slow speed easily
+#: reaches (``1 / 1e-12``). asyncio caps its own waits the same way
+#: (``MAXIMUM_SELECT_TIMEOUT`` in ``base_events.py``). A longer wait is done
+#: in chunks; see ``_JumpingSelector._select_paced``.
+MAX_REAL_WAIT = 86400.0
+
 
 class WallClock(Protocol):
     """What the pacer needs from a wall clock (so tests can fake it)."""

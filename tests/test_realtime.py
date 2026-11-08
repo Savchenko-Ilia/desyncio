@@ -18,7 +18,7 @@ import pytest
 
 import desyncio
 from desyncio.loop import SimulationDeadlock, VirtualTimeLoop
-from desyncio.realtime import RealTimePacer, SystemWallClock
+from desyncio.realtime import MAX_REAL_WAIT, RealTimePacer, SystemWallClock
 
 Events = list[tuple[selectors.SelectorKey, int]]
 Trace = list[tuple[float, float]]
@@ -397,3 +397,117 @@ def test_determinism_same_trace_as_fast_mode_and_same_wall_series() -> None:
     assert t1 == fast  # same events, same order, same virtual times
     assert (t1, waits1, end1) == (t2, waits2, end2)
     assert end1 == 3.0  # 6 virtual seconds at speed 2
+
+
+
+def _switch_to_fast_after(wall: FakeWall, pacer: RealTimePacer, n: int) -> None:
+    """After ``n`` full timed waits, the "user" sets speed to inf mid-wait.
+
+    Without this the tiny-speed tests would wait for (fake) eons.
+    """
+
+    def interrupt(timeout: float) -> tuple[float, Callable[[], None]] | None:
+        if len(wall.waits) > n:
+            return 0.5, lambda: setattr(pacer, "speed", math.inf)
+        return None
+
+    wall.interrupt = interrupt
+
+
+class SelectLimitWall(FakeWall):
+    """A fake that, like a real ``select``, overflows on huge timeouts.
+
+    It also records the virtual time at each timed wait.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.virtual_at_wait: list[float] = []
+
+    def wait(self, timeout: float | None, selector: selectors.BaseSelector) -> Events:
+        if timeout is not None:
+            if timeout > 9.2e9:
+                raise OverflowError("timestamp out of range for C PyTime_t")
+            self.virtual_at_wait.append(asyncio.get_event_loop().time())
+        return super().wait(timeout, selector)
+
+
+def test_tiny_speed_waits_in_chunks_without_overflow() -> None:
+    # 1 virtual s at speed 1e-300 is 1e300 real s, far beyond what select()
+    # accepts (~9.2e9 s). Each wall wait must be at most one chunk.
+    wall = SelectLimitWall()
+    pacer = RealTimePacer(1e-300, wall_clock=wall)
+    _switch_to_fast_after(wall, pacer, 3)
+    trace: Trace = []
+    desyncio.run(sleeps([1], trace, wall), pacer=pacer)
+    assert wall.waits[:3] == [MAX_REAL_WAIT] * 3
+    assert all(w is not None and 0 < w <= MAX_REAL_WAIT for w in wall.waits)
+    # A chunk is not a full wait: the clock moved by elapsed * speed only
+    # (strictly forward, tiny), and never jumped to the timer.
+    seen = wall.virtual_at_wait
+    assert seen[0] == 0.0
+    assert all(a < b < 1e-290 for a, b in zip(seen, seen[1:], strict=False))
+    assert trace[0][0] == 1.0
+
+
+def test_slow_speed_long_wait_is_chunked_and_exact() -> None:
+    # speed 1e-6: 1 virtual s is 1e6 real s, i.e. 11 full days + a remainder.
+    durations = [1]
+    fast: Trace = []
+    desyncio.run(sleeps(durations, fast, FakeWall()))
+    wall, trace = run_fake(durations, 1e-6)
+    assert len(wall.waits) == 12
+    assert wall.waits[:11] == [MAX_REAL_WAIT] * 11
+    assert all(w is not None and w <= MAX_REAL_WAIT for w in wall.waits)
+    assert wall.t == pytest.approx(1e6)
+    assert [v for v, _ in trace] == [v for v, _ in fast] == [1.0]
+
+
+def test_far_timer_at_speed_one_does_not_overflow() -> None:
+    wall = SelectLimitWall()
+    pacer = RealTimePacer(1, wall_clock=wall)
+    _switch_to_fast_after(wall, pacer, 3)
+    fired: list[float] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+
+        def fire() -> None:
+            fired.append(loop.time())
+            done.set_result(None)
+
+        loop.call_later(1e10, fire)
+        await done
+
+    desyncio.run(main(), pacer=pacer)
+    assert all(w is not None and w <= MAX_REAL_WAIT for w in wall.waits)
+    assert fired == [1e10]
+
+
+def test_speed_1e_minus_12_does_not_overflow() -> None:
+    wall = SelectLimitWall()
+    pacer = RealTimePacer(1e-12, wall_clock=wall)
+    _switch_to_fast_after(wall, pacer, 2)
+    trace: Trace = []
+    desyncio.run(sleeps([1], trace, wall), pacer=pacer)
+    assert all(w is not None and w <= MAX_REAL_WAIT for w in wall.waits)
+    assert trace[0][0] == 1.0
+
+
+def test_chunk_below_one_float_step_still_makes_progress() -> None:
+    # At t = 2**60 one float step is 256 s. At speed 1e-30 a one-day chunk is
+    # 8.64e-26 virtual s, which rounds away (now + tiny == now). The clock
+    # must still move (one float step per chunk) so the loop terminates.
+    wall = FakeWall()
+    pacer = RealTimePacer(math.inf, wall_clock=wall)
+
+    async def main() -> float:
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(2.0**60)  # fast: no waiting
+        pacer.speed = 1e-30
+        await asyncio.sleep(math.ulp(2.0**60))
+        return loop.time()
+
+    assert desyncio.run(main(), pacer=pacer) == 2.0**60 + 256
+    assert wall.waits == [MAX_REAL_WAIT]  # one chunk, then the timer is due

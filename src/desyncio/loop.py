@@ -56,7 +56,7 @@ from typing import Any
 
 from desyncio.clock import VirtualClock
 from desyncio.guards import RealIOGuardMixin
-from desyncio.realtime import RealTimePacer
+from desyncio.realtime import MAX_REAL_WAIT, RealTimePacer
 from desyncio.scheduling import (
     DEFAULT_PRIORITY,
     PriorityTimerHandle,
@@ -135,6 +135,11 @@ class _JumpingSelector(selectors.BaseSelector):
         3. Full wait: ``advance_to(when)`` (a bounded clock raises there if
            ``when`` is past ``until``). Interrupted wait: advance only by
            ``elapsed * speed``, capped at the target, and return the events.
+
+        A real wait longer than ``MAX_REAL_WAIT`` (one day) is cut to one
+        chunk. A chunk that ends with no events is *not* a full wait: the
+        clock advances by ``elapsed * speed`` (capped at the target), we
+        return ``[]`` and ``_run_once`` comes back for the next chunk.
         """
         loop = self._loop
         clock = loop.clock
@@ -155,13 +160,26 @@ class _JumpingSelector(selectors.BaseSelector):
         when: float = scheduled[0]._when
         target = min(when, limit)
         real_timeout = (target - now) / speed
+        # select() overflows above ~9.2e9 s, so wait at most one chunk.
+        chunked = real_timeout > MAX_REAL_WAIT
+        if chunked:
+            real_timeout = MAX_REAL_WAIT
         started = wall.monotonic()
         events = wall.wait(real_timeout, self._real) if real_timeout > 0 else []
-        if not events:
+        if not events and not chunked:
             clock.advance_to(when)  # waited the full time
             return events
         elapsed = wall.monotonic() - started
-        clock.advance_to(min(target, now + elapsed * speed))
+        advanced = now + elapsed * speed
+        if chunked and not events:
+            # A whole chunk passed but the timer is still ahead. If
+            # ``elapsed * speed`` is below half a float step of ``now`` the
+            # sum rounds back to ``now`` and the loop would never progress;
+            # move at least one float step instead.
+            advanced = max(advanced, math.nextafter(now, math.inf))
+        # Returning [] (chunk) or the events makes _run_once iterate again;
+        # the next idle select waits the next chunk (or the rest).
+        clock.advance_to(min(target, advanced))
         return events
 
     def select(
