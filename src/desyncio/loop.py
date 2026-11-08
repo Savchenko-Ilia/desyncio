@@ -53,6 +53,7 @@ from contextvars import Context
 from typing import Any
 
 from desyncio.clock import VirtualClock
+from desyncio.guards import RealIOGuardMixin
 from desyncio.scheduling import (
     DEFAULT_PRIORITY,
     PriorityTimerHandle,
@@ -74,7 +75,15 @@ class _JumpingSelector(selectors.BaseSelector):
     The real selector is still used for registration and is still polled
     (with timeout 0) on every call. That matters because the loop's
     self-pipe, which ``call_soon_threadsafe`` writes to, is a real file
-    descriptor.
+    descriptor. Polling it means a ``call_soon_threadsafe`` made from the
+    loop's own thread (the byte is already in the pipe) is seen on the next
+    iteration.
+
+    This does **not** support wake-ups from other threads. The poll never
+    waits, so if the loop is idle it jumps the clock or raises
+    :class:`SimulationDeadlock` before a real thread can write its byte
+    (D006). Real threads are unsupported; ``run_in_executor`` and
+    ``to_thread`` are refused by :mod:`desyncio.guards`.
     """
 
     def __init__(self, real: selectors.BaseSelector, loop: "VirtualTimeLoop") -> None:
@@ -137,13 +146,18 @@ class _JumpingSelector(selectors.BaseSelector):
         )
 
 
-class VirtualTimeLoop(asyncio.SelectorEventLoop):
+class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     """A ``SelectorEventLoop`` whose ``time()`` is a virtual clock.
 
     Use it with ``asyncio.Runner(loop_factory=VirtualTimeLoop)``. Timers
     (``sleep``, ``call_later``, ``call_at``, ``timeout``) are measured on the
     virtual clock, and whenever the loop would otherwise wait it jumps the
     clock straight to the earliest pending timer.
+
+    Real I/O (sockets, subprocesses, executors, signals) is refused with
+    :class:`~desyncio.guards.RealIOError`; see :mod:`desyncio.guards` for
+    which entry points and why. :class:`~desyncio.guards.RealIOGuardMixin`
+    comes first in the bases so its overrides win.
     """
 
     def __init__(self, start: float = 0.0, clock: VirtualClock | None = None) -> None:
