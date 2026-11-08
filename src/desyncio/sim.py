@@ -1,0 +1,164 @@
+"""The ``sim`` facade: the everyday API for writing simulation processes.
+
+Usage::
+
+    from desyncio import sim
+
+    async def customer():
+        await sim.timeout(5)          # wait 5 units of virtual time
+        print(sim.now)                # 5.0
+
+    async def main():
+        task = sim.spawn(customer())  # start a process
+        await task                    # wait for it, get its result
+
+    desyncio.run(main())
+
+``sim`` is a module-level singleton. Nothing is passed into ``main``;
+instead every attribute looks up the *running* loop each time it is used,
+the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
+``desyncio.run(...)`` (or on a plain asyncio loop) it raises ``RuntimeError``.
+"""
+
+import asyncio
+import itertools
+import math
+import random
+import weakref
+from collections.abc import Coroutine
+from typing import Any
+
+from desyncio.loop import VirtualTimeLoop
+from desyncio.runners import current_rng_streams
+
+_NOT_RUNNING = (
+    "desyncio.sim can only be used inside desyncio.run(...), on a "
+    "VirtualTimeLoop; there is no such loop running here"
+)
+
+# Per-loop counter for default task names.
+#
+# asyncio names tasks "Task-N" from a counter shared by the whole process, so
+# a second desyncio.run() in the same process would get different names than
+# the first. We keep one counter per loop instead. It lives here (not on the
+# loop object) because loop.py is not ours to edit. A WeakKeyDictionary keyed
+# by the loop means the entry disappears when the loop is garbage collected,
+# so closed loops do not leak and a new loop always starts at 1.
+_proc_counters: weakref.WeakKeyDictionary[
+    VirtualTimeLoop, "itertools.count[int]"
+] = weakref.WeakKeyDictionary()
+
+
+def _loop() -> VirtualTimeLoop:
+    """Return the running VirtualTimeLoop or raise RuntimeError."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        raise RuntimeError(_NOT_RUNNING) from None
+    if not isinstance(loop, VirtualTimeLoop):
+        raise RuntimeError(_NOT_RUNNING)
+    return loop
+
+
+def _check_delay(dt: object) -> float:
+    """Validate ``dt``: a finite real number >= 0 (bool is rejected)."""
+    if isinstance(dt, bool) or not isinstance(dt, (int, float)):
+        raise TypeError(f"dt must be a real number, got {type(dt).__name__}")
+    try:
+        value = float(dt)
+    except OverflowError:
+        raise ValueError("dt must be finite, got an int too large") from None
+    if not math.isfinite(value):
+        raise ValueError(f"dt must be finite, got {value!r}")
+    if value < 0.0:
+        raise ValueError(f"dt must be >= 0, got {value!r}")
+    return value
+
+
+class Sim:
+    """Facade over the running simulation; use the singleton ``desyncio.sim``."""
+
+    @property
+    def now(self) -> float:
+        """The current virtual time (``loop.time()``).
+
+        Raises:
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        return _loop().time()
+
+    async def timeout(self, dt: float, value: object = None) -> Any:
+        """Wait ``dt`` units of virtual time, then return ``value`` (default None).
+
+        ``value`` mirrors SimPy's ``timeout(delay, value)``. ``dt == 0`` yields
+        to the loop once (other ready callbacks run first), like
+        ``asyncio.sleep(0)``. Under the hood this is ``asyncio.sleep``, which
+        schedules a timer on the loop, so cancelling the awaiting task cancels
+        the timer.
+
+        Raises:
+            TypeError: ``dt`` is not a real number (``bool`` is rejected).
+            ValueError: ``dt`` is NaN, infinite or negative.
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        # Checks run when the coroutine is awaited, not when it is created.
+        _loop()
+        return await asyncio.sleep(_check_delay(dt), value)
+
+    def spawn[T](
+        self, coro: Coroutine[Any, Any, T], name: str | None = None
+    ) -> asyncio.Task[T]:
+        """Start ``coro`` as a new task (process) and return the Task.
+
+        The task is scheduled on the running loop and starts at the next loop
+        iteration; ``spawn`` itself does not wait. The Task is awaitable:
+        ``await task`` returns the coroutine's result, or re-raises the
+        exception it ended with. If nobody awaits a failed task, asyncio logs
+        "Task exception was never retrieved" when it is garbage collected, so
+        await your tasks (or use ``asyncio.TaskGroup``).
+
+        The loop keeps only a weak reference to tasks: keep the returned Task
+        in a variable if the process must not be garbage collected.
+
+        Args:
+            coro: a coroutine object (``worker()``, not ``worker``).
+            name: the task's name (``task.get_name()``). Default
+                ``"proc-N"`` with N counting from 1 per run, so names are
+                identical in every run of the same model. Trace consumers
+                should read ``Task.get_name()``.
+
+        Raises:
+            TypeError: ``coro`` is not a coroutine object.
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        try:
+            loop = _loop()
+            if not asyncio.iscoroutine(coro):
+                raise TypeError(
+                    f"spawn() needs a coroutine object, got {type(coro).__name__} "
+                    "(did you forget to call it?)"
+                )
+        except BaseException:
+            # Close it so Python does not warn "coroutine was never awaited".
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise
+        if name is None:
+            counter = _proc_counters.setdefault(loop, itertools.count(1))
+            name = f"proc-{next(counter)}"
+        return loop.create_task(coro, name=name)
+
+    def rng(self, name: str) -> random.Random:
+        """Return the named random stream of this run (same object each call).
+
+        Streams derive from the ``seed`` given to ``desyncio.run``: the same
+        seed gives the same sequence, a different seed a different one.
+
+        Raises:
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        _loop()
+        return current_rng_streams().stream(name)
+
+
+sim = Sim()
