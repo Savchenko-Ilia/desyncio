@@ -378,3 +378,35 @@ def test_traced_task_repr_and_stack_work() -> None:
 
     run_traced(main)
     assert "main" in out[0]
+
+
+# --- docs claims (D011) ---------------------------------------------------
+
+
+def _loop_doc_section(number: int) -> str:
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parent.parent / "docs" / "how-the-loop-works.md"
+    text = doc.read_text(encoding="utf-8")
+    start = text.index(f"\n## {number}. ")
+    end = text.index("\n## ", start + 1)
+    return text[start:end]
+
+
+def test_docs_zero_cost_claim_is_the_measured_one() -> None:
+    """Section 10 must describe the real cost of tracing off (D011)."""
+    section = _loop_doc_section(10)
+    # The old claim was false: create_task is a Python-level override that
+    # also names the task, and the extra loop attributes slowed every step.
+    assert "one\n`is None` check" not in section
+    assert "is None` check in `create_task`" not in section
+    assert "per task" in section
+    assert "per step" in section
+    assert "instance dict" in section
+    assert "µs" in section
+
+
+def test_docs_private_attribute_table_lists_create_task() -> None:
+    section = _loop_doc_section(8)
+    row = next(line for line in section.splitlines() if "`loop._check_closed`" in line)
+    assert "create_task" in row

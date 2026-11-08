@@ -369,7 +369,7 @@ state. If a CPython release changes any of these, the tests in `tests/` fail.
 | `TimerHandle._when` | `_JumpingSelector.select`, `PriorityTimerHandle.sort_key` | the timer's due time |
 | `loop._selector` | `VirtualTimeLoop.__init__` | swap in `_JumpingSelector` |
 | `loop._clock_resolution` | property override | width of step 4's due window |
-| `loop._check_closed`, `_debug`, `_check_thread`, `_check_callback` | `_schedule` | same validation as stock `call_at` |
+| `loop._check_closed`, `_debug`, `_check_thread`, `_check_callback` | `_schedule`; `create_task` (`_check_closed` only) | same validation as stock `call_at` / `create_task` |
 | `Handle._source_traceback` | `PriorityTimerHandle.drop_creation_frame` | debug-mode creation stack trim |
 | `TimerHandle._scheduled` | `mark_scheduled` | lets `cancel()` count cancelled timers in the heap |
 | `BaseSelectorEventLoop._add_reader`, `_remove_reader` | not called; `RealIOGuardMixin` relies on them | the loop registers its own self-pipe through these private methods, so refusing the public `add_reader` does not break the loop |
@@ -482,9 +482,27 @@ true and the C `Task` accepts it). It records `start` on the first call, `resume
 ones, and `finish` / `cancel` when the inner call raises `StopIteration` / an exception.
 Records are made inside the step, so `t` is the virtual time the step runs at.
 
-**Zero cost when off.** With `trace=None` nothing is wrapped: `task.get_coro()` is your own
-coroutine object and no tracing code runs per step. The only per-loop difference is one
-`is None` check in `create_task`, once per task, not per step.
+**What tracing off costs.** With `trace=None` nothing is wrapped: `task.get_coro()` is your
+own coroutine object and no tracing code runs per step, so the per-step cost is zero.
+There is a per-task cost, with or without tracing: `VirtualTimeLoop.create_task` is a
+Python-level override that names the task (`proc-N`) and checks for a tracer before
+calling the stock `create_task`. It runs once per task, never per step. Measured on
+CPython 3.13 (100,000 `loop.create_task` calls, best of 7, one machine): about 2.2 to
+2.8 µs per task before LOOP-09 and about 2.5 to 2.9 µs with it, so the override adds
+roughly 0.3 µs to a call that already cost about 2.5 µs.
+
+*Instance-dict layout.* The first version of LOOP-09 stored its state as three new loop
+attributes. That alone made every step slower: CPython 3.13 keeps an object's attributes
+inline in the object (keys shared by every instance of the class) only up to a fixed
+count, and the loop already has 28. Past it the loop gets an ordinary instance dict and
+the attribute loads in the stock `_run_once` (`self._ready`, `self._scheduled`, ...) lose
+their specialised fast path. Measured with 100,000 `await asyncio.sleep(0.001)` under
+`desyncio.run`, tracing off, best of 7 (lowest of six interleaved rounds): 0.732 s before
+LOOP-09, 0.819 s with the three attributes (31 entries in `vars(loop)`), 0.737 s now. All of
+desyncio's per-loop state (timer sequence counter, name counter, one-shot name, tracer)
+therefore lives in one `__slots__` object, `loop._state`, and `vars(loop)` has 28 entries
+as before. `test_loop_instance_dict_is_not_larger_than_before_loop_09` guards the count;
+it is deterministic, unlike a timing test.
 
 **Names.** Without an explicit name, a task created on a `VirtualTimeLoop` is `proc-N`
 from one per-loop counter, whoever creates it (`asyncio.create_task`, `TaskGroup`,
