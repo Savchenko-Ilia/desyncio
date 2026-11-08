@@ -4,8 +4,9 @@ This module is named ``runners`` (like ``asyncio.runners``, which holds
 ``asyncio.run``) so that no submodule called ``run`` shadows the function
 ``desyncio.run``.
 
-``desyncio.run(main(), until=None, seed=0)`` is the simulation counterpart of
-``asyncio.run``. Three things are worth understanding here.
+``desyncio.run(main(), until=None, seed=0, speed=None, pacer=None)`` is the
+simulation counterpart of ``asyncio.run``. Three things are worth
+understanding here (real-time pacing is covered in :mod:`desyncio.realtime`).
 
 Task lifetimes and shutdown
 ---------------------------
@@ -62,6 +63,7 @@ from typing import Any, overload
 
 from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
+from desyncio.realtime import RealTimePacer
 from desyncio.rng import RngStreams
 
 _rng_streams: contextvars.ContextVar[RngStreams] = contextvars.ContextVar(
@@ -128,16 +130,30 @@ def _check_until(until: object) -> float:
 
 
 @overload
-def run[T](main: Coroutine[Any, Any, T], *, until: None = None, seed: int = 0) -> T: ...
+def run[T](
+    main: Coroutine[Any, Any, T],
+    *,
+    until: None = None,
+    seed: int = 0,
+    speed: float | None = None,
+    pacer: RealTimePacer | None = None,
+) -> T: ...
 @overload
 def run[T](
-    main: Coroutine[Any, Any, T], *, until: float, seed: int = 0
+    main: Coroutine[Any, Any, T],
+    *,
+    until: float,
+    seed: int = 0,
+    speed: float | None = None,
+    pacer: RealTimePacer | None = None,
 ) -> T | None: ...
 def run[T](
     main: Coroutine[Any, Any, T],
     *,
     until: float | None = None,
     seed: int = 0,
+    speed: float | None = None,
+    pacer: RealTimePacer | None = None,
 ) -> T | None:
     """Run ``main`` on a fresh virtual-time loop and return its result.
 
@@ -146,6 +162,12 @@ def run[T](
         until: stop at this virtual time. Timers due at ``t <= until`` run;
             nothing runs after. ``None`` means run until ``main`` finishes.
         seed: master seed for :func:`current_rng_streams`.
+        speed: run in scaled real time at this speed (virtual seconds per
+            real second); shorthand for ``pacer=RealTimePacer(speed)``.
+            ``None`` (default) is fast mode; ``math.inf`` is the same.
+        pacer: a :class:`~desyncio.realtime.RealTimePacer`, for changing
+            speed or pausing mid-run, or for an injected wall clock. Give
+            ``speed`` or ``pacer``, not both.
 
     Returns:
         ``main``'s result, or ``None`` if ``until`` was reached first (the
@@ -153,10 +175,11 @@ def run[T](
         ``main``, are cancelled during close; see the module docstring).
 
     Raises:
-        TypeError: ``main`` is not a coroutine, or ``until`` / ``seed`` has
-            the wrong type.
+        TypeError: ``main`` is not a coroutine, ``until`` / ``seed`` /
+            ``speed`` / ``pacer`` has the wrong type, or both ``speed`` and
+            ``pacer`` are given.
         ValueError: ``until`` is NaN, infinite or negative; ``seed`` is
-            negative.
+            negative; ``speed`` is not > 0.
         RuntimeError: called from inside a running event loop.
         SimulationDeadlock: every task is blocked and no timer is pending.
         SimulationCleanupError: a cancellation handler needed time to pass.
@@ -178,17 +201,29 @@ def run[T](
             raise RuntimeError("run() cannot be called from a running event loop")
         limit = math.inf if until is None else _check_until(until)
         streams = RngStreams(seed)  # validates seed
+        if speed is not None and pacer is not None:
+            raise TypeError("give either speed= or pacer=, not both")
+        if speed is not None:
+            pacer = RealTimePacer(speed)  # validates speed
+        elif pacer is not None and not isinstance(pacer, RealTimePacer):
+            raise TypeError(
+                f"pacer must be a RealTimePacer, got {type(pacer).__name__}"
+            )
+        clock = _BoundedClock(limit)
+        # Build the loop here, not lazily inside Runner.run: binding the pacer
+        # can fail (it is bound to another live loop), and Runner.run would
+        # then raise without closing ``main``.
+        loop = VirtualTimeLoop(clock=clock, pacer=pacer)
     except BaseException:
         main.close()
         raise
 
-    clock = _BoundedClock(limit)
     # A fresh Context: the ContextVar set below is visible to main and to all
     # tasks it creates (each task copies the current context), and nowhere else.
     context = contextvars.Context()
     context.run(_rng_streams.set, streams)
 
-    runner = asyncio.Runner(loop_factory=lambda: VirtualTimeLoop(clock=clock))
+    runner = asyncio.Runner(loop_factory=lambda: loop)
     try:
         try:
             return runner.run(main, context=context)
@@ -206,3 +241,7 @@ def run[T](
                 f"beyond {clock.now!r} (the end of the simulation, `until` or "
                 "when main finished); cleanup code may not advance the clock"
             ) from None
+        finally:
+            # Runner.close() is a no-op if the runner never used the loop.
+            if not loop.is_closed():
+                loop.close()

@@ -15,6 +15,7 @@ numbers drift):
 
 desyncio sources: [`clock.py`](../src/desyncio/clock.py), [`loop.py`](../src/desyncio/loop.py),
 [`scheduling.py`](../src/desyncio/scheduling.py), [`guards.py`](../src/desyncio/guards.py),
+[`realtime.py`](../src/desyncio/realtime.py),
 and the runner behind `desyncio.run(...)`.
 
 ## 1. The idea in one paragraph
@@ -22,7 +23,8 @@ and the runner behind `desyncio.run(...)`.
 An asyncio loop does not know about wall-clock time except through two things: it
 asks `self.time()` what time it is, and it waits in exactly one place, the selector's
 `select(timeout)`. desyncio replaces `time()` with a virtual clock and replaces the
-selector with one whose `select` moves the clock forward instead of waiting. Everything
+selector with one whose `select` moves the clock forward instead of waiting (in
+real-time mode, section 7: after waiting a scaled amount of real time). Everything
 else (tasks, futures, `sleep`, `Queue`, `TaskGroup`) is untouched stock asyncio.
 
 ## 2. `_run_once`: one iteration of the loop
@@ -157,7 +159,9 @@ property depends on `now` and is recomputed on each read. The setter discards th
 
 ## 4. Jumping the clock
 
-A virtual-time loop has two jobs: answer `time()` from a clock, and never wait.
+A virtual-time loop has two jobs: answer `time()` from a clock, and not wait for the
+real world. This section describes fast mode (no pacer, the default); section 7 adds
+the optional real-time wait.
 
 - [`VirtualClock`](../src/desyncio/clock.py) holds a float. `now` reads it, `advance_to(t)`
   moves it forward. It refuses to go backwards, and `t == now` is a no-op. It has no
@@ -166,7 +170,7 @@ A virtual-time loop has two jobs: answer `time()` from a clock, and never wait.
 - After `super().__init__()` has built the real selector and registered the loop's
   self-pipe on it, `VirtualTimeLoop` wraps it: `self._selector = _JumpingSelector(...)`.
 
-### `_JumpingSelector.select`
+### `_JumpingSelector.select` (fast mode)
 
 Because step 3 is the one place a loop waits, it is the one place to intervene.
 `select(timeout)` does this:
@@ -197,7 +201,9 @@ virtual loop must not block, because blocking means waiting on the real world, w
 the opposite of a simulation. So `select` raises `SimulationDeadlock`. A deadlock in a
 model is a bug, and failing loudly is better than hanging.
 
-Consequence for threads (decision D006): the loop does not wait for them. A thread
+(While a real-time pacer is *paused* the loop does wait; see section 7.)
+
+Consequence for threads (decision D006): in fast mode the loop does not wait for them. A thread
 resolves work by calling `call_soon_threadsafe`, which writes a byte to the self-pipe,
 and the loop would have to *wait* for that byte. The poll is `select(0)`, which does not
 wait. So, for a `threading.Thread` you start yourself that later calls
@@ -292,7 +298,65 @@ and the runner converts it to `SimulationCleanupError`. The loop is still closed
 The same freeze applies when `main` finishes normally: the limit becomes the finish
 time.
 
-## 7. Private attributes desyncio depends on, and PSF-adapted code
+## 7. Real-time mode
+
+Fast mode jumps the clock. Real-time mode (`desyncio.run(main(), speed=2)` or
+`pacer=RealTimePacer(...)`, in [`realtime.py`](../src/desyncio/realtime.py)) is the same
+`select`, with one extra step: **wait first, then advance**. `real_dt = virtual_dt / speed`.
+
+```
+events = real_selector.select(0)
+if events or timeout == 0:  return events
+(speed, paused) = pacer.snapshot()
+if paused:        return wall.wait(None, real_selector)     # until woken
+if speed is inf or no timer:  -> fast path (jump, or SimulationDeadlock)
+target = min(next_timer.when, until)
+real_timeout = (target - now) / speed
+chunked = real_timeout > MAX_REAL_WAIT                       # one day
+events = wall.wait(min(real_timeout, MAX_REAL_WAIT), real_selector)
+if no events and not chunked:  clock.advance_to(next_timer.when)   # full wait
+else:          clock.advance_to(min(target, now + elapsed_real * speed))
+return events
+```
+
+**Chunked waits.** `select` overflows above ~9.2e9 s, so a longer wait (slow speed or a
+far timer) is split into one-day chunks (`MAX_REAL_WAIT`, like asyncio's
+`MAXIMUM_SELECT_TIMEOUT`); a chunk that ends with no events advances the clock by
+`elapsed * speed` only (at least one float step) and the loop comes back for the next chunk.
+
+**The wait is the real selector's `select(real_timeout)`.** That is the one call a stock
+loop blocks in, and it returns early when a registered fd becomes readable. The
+self-pipe is such an fd: `loop.call_soon_threadsafe` writes a byte to it. So any thread
+(or the simulation itself) that changes the pacer wakes the loop at once, even in the
+middle of a one-hour wait.
+
+**Interrupted waits.** If the wait ends early after `elapsed` real seconds, virtual time
+advances by `elapsed * speed`, capped at the timer, and the events are returned. The woken
+callback runs, and the next idle `select` re-reads speed and pause state, so a new speed
+applies to the *rest* of the wait. Virtual time therefore always matches the real time
+that actually passed.
+
+**Pause and resume.** `pacer.pause()` sets a flag and pokes the self-pipe. While paused
+an idle `select` waits with no timeout, so virtual time cannot move; `resume()` pokes the
+pipe again. Ready callbacks still run while paused (they take no virtual time). Calls are
+safe from inside the simulation and from other threads. A pause issued inside the
+simulation can only be undone from another thread, because virtual time is frozen.
+
+**Deadlock rule.** Not paused, no timers, nothing ready: `SimulationDeadlock`, exactly as
+in fast mode (D006: real-time mode does not wait for threads). Paused: wait for resume.
+
+**`until`.** `_BoundedClock` exposes its `limit`. The wait covers only
+`min(next_timer, until) - now`, so real time is never spent on virtual time beyond
+`until`; after the full wait, `advance_to(next_timer)` raises `_LimitReached` as before.
+Once the runner freezes the limit for cleanup (section 6), pacing is skipped.
+
+**Wall clock seam.** `WallClock` has `monotonic()` and `wait(timeout, selector)`.
+`SystemWallClock` calls `selector.select(timeout)`; tests inject a fake whose `wait` adds
+to a fake time and returns, so they never sleep. The event order is identical at every
+speed; only wall time differs. Time spent running callbacks is not subtracted, so real
+time can drift slightly behind the ideal schedule.
+
+## 8. Private attributes desyncio depends on, and PSF-adapted code
 
 desyncio overrides and wraps rather than copying `_run_once`, but it still reads private
 state. If a CPython release changes any of these, the tests in `tests/` fail.
@@ -322,7 +386,7 @@ it is marked with comments in the source and the license text is in
 [`LICENSES/PSF.txt`](../LICENSES/PSF.txt). Everything else only subclasses and overrides.
 `test_cpython_adapted_code_carries_psf_notice` guards this.
 
-## 8. Worked example
+## 9. Worked example
 
 Three tasks, run on `VirtualTimeLoop` via `asyncio.Runner(loop_factory=...)`:
 
@@ -392,11 +456,13 @@ with asyncio.Runner(loop_factory=Traced) as runner:
 (The full script used to produce the table also patches `Handle._run` to record what ran;
 it is instrumentation only and lives outside the repository.)
 
-## 9. Where to read next
+## 10. Where to read next
 
 - [`tests/test_loop.py`](../tests/test_loop.py): the jumping, deadlock and cancelled-timer
   behaviour above, as executable specs.
 - [`tests/test_ordering.py`](../tests/test_ordering.py): tie-breaking and the resolution window.
+- [`tests/test_realtime.py`](../tests/test_realtime.py): pacing, speed changes, pause/resume,
+  `until` with real time, all on a fake wall clock.
 - [`tests/test_run.py`](../tests/test_run.py): `until`, cleanup freezing and seeds.
 - [`tests/test_guards.py`](../tests/test_guards.py): which loop methods raise
   `RealIOError`, and that every `AbstractEventLoop` method is classified.

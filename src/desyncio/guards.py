@@ -2,10 +2,12 @@
 
 Why a simulation must not do real I/O
 -------------------------------------
-:class:`~desyncio.loop.VirtualTimeLoop` never waits: when nothing is ready it
-jumps the virtual clock to the next timer. Real I/O needs the opposite. A
-socket read completes when a remote machine decides, a subprocess when the OS
-schedules it, an executor job when a worker thread finishes. None of these are
+:class:`~desyncio.loop.VirtualTimeLoop` never waits for the real world in fast
+mode; in real-time mode it waits only scaled virtual time, never for I/O. When
+nothing is ready it moves the virtual clock to the next timer. Real I/O needs
+the opposite. A socket read completes when a remote machine decides, a
+subprocess when the OS schedules it, an executor job when a worker thread
+finishes. None of these are
 on the virtual clock, so the loop would either skip past them (virtual time
 leaps ahead while the real operation is still pending) or declare a deadlock
 (see D006 and :class:`~desyncio.loop.SimulationDeadlock`). Either way the
