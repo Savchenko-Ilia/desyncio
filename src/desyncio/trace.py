@@ -35,13 +35,27 @@ coroutine object and no tracing code is on any path (zero cost).
 
 Sink errors
 -----------
-The sink is called synchronously inside the step. If it raises, the exception
-propagates out of ``send``/``throw`` like any exception from the task's code:
-that task ends with the sink's exception (for ``desyncio.run``'s main task,
-``run`` raises it). It is not swallowed. Because asyncio only re-raises
-``KeyboardInterrupt``/``SystemExit`` out of a step, a sink error in a child
-task surfaces when that task is awaited (or as "exception was never
-retrieved"). Keep sinks simple and non-raising.
+The sink is called synchronously inside a task's step, but an exception from
+it must not change the simulation (AGENTS.md principle 4): if it escaped
+``send``/``throw`` it would replace the task's result, its exception or its
+``CancelledError``, and so change what ``TaskGroup``, ``timeout()`` and
+anything awaiting that task see. So :meth:`Tracer.emit` catches the first
+exception the sink raises (any ``BaseException``) and never lets it reach the
+task. It then:
+
+1. stops tracing: the sink is never called again, in this run;
+2. records the exception and calls the tracer's ``on_error`` callback.
+
+:class:`~desyncio.loop.VirtualTimeLoop` passes a callback that calls
+``loop.stop()``. Like any ``stop()``, that lets the current loop iteration
+finish (the rest of the callbacks already in ``_ready`` run, exactly as
+they would have) and then ends ``run_forever``, which raises the sink's
+exception (the same object). The model is therefore unchanged up to the
+end of the iteration in which the sink failed, and nothing runs after it.
+``desyncio.run`` then closes the loop as usual (leftover tasks are cancelled,
+untraced) and the exception propagates out of ``run``. A sink that fails
+during that cleanup does not stop the loop again; ``run`` raises its
+exception after the loop is closed.
 """
 
 import asyncio
@@ -77,15 +91,50 @@ class ListSink:
 
 
 class Tracer:
-    """Stamps records with virtual time and a per-run sequence number."""
+    """Stamps records with virtual time and a per-run sequence number.
 
-    def __init__(self, sink: TraceSink, time: Callable[[], float]) -> None:
-        self._sink = sink
+    Args:
+        sink: called with each :class:`TraceRecord`.
+        time: returns the current virtual time.
+        on_error: called once, with the exception, the first time ``sink``
+            raises (see "Sink errors" in the module docstring).
+    """
+
+    def __init__(
+        self,
+        sink: TraceSink,
+        time: Callable[[], float],
+        on_error: Callable[[BaseException], object] | None = None,
+    ) -> None:
+        self._sink: TraceSink | None = sink
         self._time = time
         self._seq = itertools.count()
+        self._on_error = on_error
+        self.error: BaseException | None = None
+        """The first exception the sink raised, or ``None``."""
 
     def emit(self, task_name: str, kind: Kind) -> None:
-        self._sink(TraceRecord(self._time(), next(self._seq), task_name, kind))
+        """Send one record to the sink; never raises.
+
+        Runs inside a task's step, so an exception here would become the
+        task's outcome. The first sink exception is caught instead: tracing
+        is switched off and ``on_error`` is told.
+        """
+        sink = self._sink
+        if sink is None:
+            return  # switched off by an earlier sink error
+        record = TraceRecord(self._time(), next(self._seq), task_name, kind)
+        try:
+            sink(record)
+        except BaseException as exc:
+            # BaseException on purpose: a sink raising CancelledError (or
+            # anything else) must not cancel or fail the task either.
+            # KeyboardInterrupt / SystemExit are not lost: run() re-raises
+            # them once the loop has stopped.
+            self._sink = None
+            self.error = exc
+            if self._on_error is not None:
+                self._on_error(exc)
 
 
 class _TracedCoroutine(collections.abc.Coroutine[Any, Any, Any]):

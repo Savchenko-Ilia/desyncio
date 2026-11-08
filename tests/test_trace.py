@@ -306,6 +306,189 @@ def test_sink_exception_propagates_from_run() -> None:
         desyncio.run(main(), trace=sink)
 
 
+class SinkBoom(Exception):
+    pass
+
+
+class RaisingSink:
+    """Raises ``SinkBoom`` (one object, kept in ``error``) on one record."""
+
+    def __init__(self, task_name: str, kind: str) -> None:
+        self.target = (task_name, kind)
+        self.error = SinkBoom(task_name, kind)
+        self.records: list[TraceRecord] = []
+
+    def __call__(self, rec: TraceRecord) -> None:
+        self.records.append(rec)
+        if (rec.task_name, rec.kind) == self.target:
+            raise self.error
+
+
+def _run_sink_case(
+    kind: str,
+) -> tuple[RaisingSink, "asyncio.Task[Any]", list[str], VirtualTimeLoop]:
+    """Run a model whose sink raises on ``kind`` of the task named ``child``.
+
+    ``child`` logs what its own code sees; the model never awaits it, so its
+    outcome is only what the model itself gives it (nothing a sink did).
+    """
+    sink = RaisingSink("child", kind)
+    seen: list[str] = []
+    box: dict[str, Any] = {}
+
+    async def child() -> int:
+        seen.append("ran")
+        try:
+            if kind == "finish":
+                return 42
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            seen.append("cancelled")
+            raise
+        seen.append("woke")
+        return 0
+
+    async def main() -> str:
+        box["loop"] = asyncio.get_running_loop()
+        task = asyncio.create_task(child(), name="child")
+        box["task"] = task
+        await asyncio.sleep(0)  # child starts (and, for "finish", ends)
+        if kind == "cancel":
+            task.cancel()
+            await asyncio.sleep(0)  # child handles its CancelledError
+        seen.append("main went on")
+        await asyncio.sleep(1)
+        seen.append("main done")
+        return "main result"
+
+    with pytest.raises(SinkBoom) as excinfo:
+        desyncio.run(main(), trace=sink)
+    assert excinfo.value is sink.error
+    return sink, box["task"], seen, box["loop"]
+
+
+def test_sink_error_on_child_start_does_not_touch_the_child() -> None:
+    sink, task, seen, loop = _run_sink_case("start")
+    # The child's first step ran normally. So did main's step, which was in
+    # the same loop iteration (both were already in _ready). The loop then
+    # stopped: main never reached t=1. run()'s cleanup cancelled the child,
+    # as it does any leftover task. The child never saw SinkBoom.
+    assert seen == ["ran", "main went on", "cancelled"]
+    assert task.cancelled()
+    assert loop.is_closed()
+    # Tracing stopped at the failing record: no later sink calls.
+    assert sink.records[-1][2:] == ("child", "start")
+
+
+def test_sink_error_on_child_finish_keeps_its_result() -> None:
+    sink, task, seen, loop = _run_sink_case("finish")
+    assert seen == ["ran", "main went on"]  # same iteration; no "main done"
+    assert task.result() == 42
+    assert loop.is_closed()
+    assert sink.records[-1][2:] == ("child", "finish")
+
+
+def test_sink_error_on_child_cancel_keeps_it_cancelled() -> None:
+    sink, task, seen, loop = _run_sink_case("cancel")
+    # Main's step in the iteration of the failing cancel record still ran;
+    # nothing after that iteration did (no "main done").
+    assert seen == ["ran", "cancelled", "main went on"]
+    assert task.cancelled()  # cancelled, not failed with SinkBoom
+    assert loop.is_closed()
+    assert sink.records[-1][2:] == ("child", "cancel")
+
+
+@pytest.mark.parametrize("kind", ["start", "resume", "finish"])
+def test_sink_error_for_main_task_is_raised_by_run(kind: str) -> None:
+    sink = RaisingSink("main", kind)
+    seen: list[str] = []
+
+    async def main() -> int:
+        seen.append("start")
+        await asyncio.sleep(1)
+        seen.append("resumed")
+        return 7
+
+    with pytest.raises(SinkBoom) as excinfo:
+        desyncio.run(main(), trace=sink)
+    assert excinfo.value is sink.error
+    assert sink.records[-1][2:] == ("main", kind)
+    # main's own code was not interrupted by the sink in its step.
+    assert seen == (["start"] if kind == "start" else ["start", "resumed"])
+
+
+def test_sink_error_does_not_change_taskgroup_semantics() -> None:
+    sink = RaisingSink("worker", "finish")
+    results: list[object] = []
+
+    async def worker() -> int:
+        await asyncio.sleep(1)
+        return 5
+
+    async def main() -> None:
+        async with asyncio.TaskGroup() as tg:
+            t = tg.create_task(worker(), name="worker")
+        results.append(t.result())
+
+    with pytest.raises(SinkBoom) as excinfo:
+        desyncio.run(main(), trace=sink)
+    assert excinfo.value is sink.error
+    # Not an ExceptionGroup: the TaskGroup never saw the sink's error.
+    assert type(excinfo.value) is SinkBoom
+
+
+def test_sink_error_during_cleanup_is_raised_after_close() -> None:
+    """A sink failing on a leftover task's cleanup ``cancel`` record."""
+    sink = RaisingSink("left", "cancel")
+    box: dict[str, Any] = {}
+
+    async def left() -> None:
+        await asyncio.sleep(100)
+
+    async def main() -> str:
+        box["loop"] = asyncio.get_running_loop()
+        box["task"] = asyncio.create_task(left(), name="left")
+        await asyncio.sleep(1)
+        return "done"
+
+    with pytest.raises(SinkBoom) as excinfo:
+        desyncio.run(main(), trace=sink)
+    assert excinfo.value is sink.error
+    assert box["task"].cancelled()
+    assert box["loop"].is_closed()
+
+
+def test_sink_errors_leave_no_warnings_under_w_error() -> None:
+    """Run the sink-error cases in a fresh interpreter with ``-W error``.
+
+    An unclosed loop, a task destroyed while pending or a never-awaited
+    coroutine would print to stderr (or fail) there.
+    """
+    code = """
+import asyncio, gc, sys
+sys.path.insert(0, sys.argv[1])
+import test_trace as t
+for kind in ("start", "finish", "cancel"):
+    t._run_sink_case(kind)
+for kind in ("start", "resume", "finish"):
+    t.test_sink_error_for_main_task_is_raised_by_run(kind)
+t.test_sink_error_does_not_change_taskgroup_semantics()
+t.test_sink_error_during_cleanup_is_raised_after_close()
+gc.collect()
+print("ok")
+"""
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    out = subprocess.run(
+        [sys.executable, "-W", "error", "-X", "dev", "-c", code, tests_dir],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+    assert out.stderr == ""
+
+
 # --- with until= and speed= ----------------------------------------------
 
 

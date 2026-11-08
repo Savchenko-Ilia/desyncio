@@ -245,15 +245,30 @@ class _LoopState:
         tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
             are wrapped with, or ``None`` (tracing off, or switched off for
             new tasks by ``stop_tracing_new_tasks``).
+        closing: set by ``stop_tracing_new_tasks``; a sink error from then
+            on no longer stops the loop.
+        trace_error: the first exception the trace sink raised, or ``None``.
+        trace_error_pending: ``trace_error`` has not been raised yet.
     """
 
-    __slots__ = ("next_task_name", "sequence", "task_names", "tracer")
+    __slots__ = (
+        "closing",
+        "next_task_name",
+        "sequence",
+        "task_names",
+        "trace_error",
+        "trace_error_pending",
+        "tracer",
+    )
 
-    def __init__(self, tracer: Tracer | None) -> None:
+    def __init__(self) -> None:
         self.sequence = SequenceCounter()
         self.task_names = itertools.count(1)
         self.next_task_name: str | None = None
-        self.tracer = tracer
+        self.tracer: Tracer | None = None
+        self.closing = False
+        self.trace_error: BaseException | None = None
+        self.trace_error_pending = False
 
 
 class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
@@ -305,9 +320,9 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         # _LoopState for why (instance-dict size and _run_once speed). Task
         # naming (D015) uses one counter per loop, so names do not depend on
         # how many tasks other loops (or plain asyncio) created before.
-        self._state = _LoopState(
-            Tracer(trace, self.time) if trace is not None else None
-        )
+        self._state = _LoopState()
+        if trace is not None:
+            self._state.tracer = Tracer(trace, self.time, self._on_trace_error)
         self.pacer = pacer
         if pacer is not None:
             try:
@@ -447,8 +462,60 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         executor shutdown), which are not part of the model and would only
         add noise to the trace. Tasks that are still pending keep their
         wrapper, so their cleanup ``cancel`` records are still emitted.
+
+        It also marks the start of shutdown: a sink error after this call no
+        longer stops the loop (stopping would abandon the cleanup and leave
+        tasks pending); it is only recorded, for :meth:`pop_trace_error`.
         """
         self._state.tracer = None
+        self._state.closing = True
+
+    @property
+    def trace_error(self) -> BaseException | None:
+        """The first exception the trace sink raised, or ``None``."""
+        return self._state.trace_error
+
+    def pop_trace_error(self) -> BaseException | None:
+        """Return the sink's exception if it has not been raised yet, once.
+
+        ``desyncio.run`` calls this after closing the loop, to raise a sink
+        error that happened during cleanup.
+        """
+        state = self._state
+        if not state.trace_error_pending:
+            return None
+        state.trace_error_pending = False
+        return state.trace_error
+
+    def _on_trace_error(self, exc: BaseException) -> None:
+        """The tracer's ``on_error``: record the sink's exception, stop the loop.
+
+        Called from inside a task's step, so it must not raise. ``stop()``
+        only sets a flag: the current ``_run_once`` iteration finishes (every
+        callback already in ``_ready`` runs, as it would have anyway) and
+        then ``run_forever`` returns, and our override raises ``exc``. This
+        is the same "unwind at an iteration boundary" idea as ``until``
+        (``runners._LimitReached``), which unwinds from the clock jump.
+        """
+        state = self._state
+        state.trace_error = exc
+        state.trace_error_pending = True
+        if not state.closing:
+            self.stop()
+
+    def run_forever(self) -> None:
+        """Run the loop; raise the trace sink's exception if it stopped it.
+
+        ``run_until_complete`` (and so ``asyncio.Runner.run``) call this, so
+        the sink's exception also comes out of those, instead of "Event loop
+        stopped before Future completed".
+        """
+        super().run_forever()
+        state = self._state
+        if state.trace_error_pending and not state.closing:
+            error = self.pop_trace_error()
+            assert error is not None
+            raise error
 
     def create_task[T](
         self,

@@ -513,9 +513,21 @@ counter is process-global, so two runs in one process would differ. Mechanism:
 creates housekeeping tasks (async-generator and executor shutdown); `desyncio.run`
 stops wrapping new tasks before closing so they do not appear in the trace.
 
-**If the sink raises**, the exception propagates out of `send`/`throw` as if the task's
-own code had raised it (so `run` raises it for the main task; for a child it surfaces when
-that task is awaited). It is not swallowed.
+**If the sink raises**, the simulation is not changed (principle 4, D016). The sink runs
+inside a task's step, so letting its exception out of `send`/`throw` would replace the
+task's result, exception or `CancelledError`, and with it what `TaskGroup`, `timeout()` and
+any awaiter see. Instead `Tracer.emit` catches the first exception (any `BaseException`),
+switches tracing off for the rest of the run and tells the loop, which calls
+`loop.stop()`. Like every `stop()`, that lets the current `_run_once` iteration finish:
+the callbacks already in `_ready` run exactly as they would have. Then `run_forever`
+returns, and `VirtualTimeLoop.run_forever` raises the sink's exception (the same object).
+So the model is unchanged up to the end of the iteration in which the sink failed, and
+nothing runs after it. This is the same idea as `until`, which unwinds the loop at an
+iteration boundary from the clock jump (`_LimitReached`, section 6). `desyncio.run` then
+closes the loop as usual (leftover tasks are cancelled, without tracing) and the
+exception comes out of `run`. A sink that fails during that cleanup (on a leftover task's
+`cancel` record) does not stop the loop, which would leave tasks pending; `run` raises
+its exception after the loop is closed. `loop.trace_error` keeps the first sink error.
 
 ## 11. What desyncio reuses from asyncio
 

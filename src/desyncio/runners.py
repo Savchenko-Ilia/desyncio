@@ -175,7 +175,9 @@ def run[T](
         trace: a callable taking one :class:`~desyncio.trace.TraceRecord`, called
             for every task start, resume, finish and cancel (see
             :mod:`desyncio.trace`). Off by default (``None``); when off no
-            tracing code runs. If it raises, the error propagates.
+            tracing code runs. If it raises, the task is not affected:
+            tracing stops, the loop stops at the end of that iteration, and
+            ``run`` raises the sink's exception after closing the loop.
 
     Returns:
         ``main``'s result, or ``None`` if ``until`` was reached first (the
@@ -255,3 +257,8 @@ def run[T](
             # Runner.close() is a no-op if the runner never used the loop.
             if not loop.is_closed():
                 loop.close()
+            # A trace sink that failed during cleanup did not stop the loop
+            # (see desyncio.trace, "Sink errors"); raise its error now.
+            trace_error = loop.pop_trace_error()
+            if trace_error is not None:
+                raise trace_error
