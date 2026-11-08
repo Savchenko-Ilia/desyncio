@@ -225,6 +225,37 @@ class _JumpingSelector(selectors.BaseSelector):
         )
 
 
+class _LoopState:
+    """desyncio's own per-loop state, kept off the loop's instance dict.
+
+    Why a separate object: CPython 3.13 stores an instance's attributes
+    inline (keys shared by all instances, values in the object) only up to a
+    small fixed count. ``BaseEventLoop`` and its subclasses already use 28;
+    adding more made the loop fall back to a real per-instance dict, and the
+    attribute loads in the stock ``_run_once`` (``self._ready``,
+    ``self._scheduled``, ...) lost their specialised fast path, which cost
+    ~10% per ``asyncio.sleep`` even with tracing off. So the loop has exactly
+    one attribute of ours, ``_state``, and everything else lives here.
+    ``tests/test_loop.py`` guards the count.
+
+    Attributes:
+        sequence: the timer tie-break counter (see :mod:`desyncio.scheduling`).
+        task_names: the ``proc-N`` counter for default task names (D015).
+        next_task_name: one-shot name for the next unnamed task, or ``None``.
+        tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
+            are wrapped with, or ``None`` (tracing off, or switched off for
+            new tasks by ``stop_tracing_new_tasks``).
+    """
+
+    __slots__ = ("next_task_name", "sequence", "task_names", "tracer")
+
+    def __init__(self, tracer: Tracer | None) -> None:
+        self.sequence = SequenceCounter()
+        self.task_names = itertools.count(1)
+        self.next_task_name: str | None = None
+        self.tracer = tracer
+
+
 class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     """A ``SelectorEventLoop`` whose ``time()`` is a virtual clock.
 
@@ -270,12 +301,13 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         # The base constructor created the real selector and registered the
         # self-pipe on it. Wrap it so the registrations carry over.
         self._selector = _JumpingSelector(self._selector, self)  # type: ignore[has-type]
-        self._sequence = SequenceCounter()
-        # Task naming (D015): one counter per loop, so names do not depend on
+        # All of desyncio's per-loop state is in one attribute; see
+        # _LoopState for why (instance-dict size and _run_once speed). Task
+        # naming (D015) uses one counter per loop, so names do not depend on
         # how many tasks other loops (or plain asyncio) created before.
-        self._task_name_counter = itertools.count(1)
-        self._next_task_name: str | None = None
-        self._tracer = Tracer(trace, self.time) if trace is not None else None
+        self._state = _LoopState(
+            Tracer(trace, self.time) if trace is not None else None
+        )
         self.pacer = pacer
         if pacer is not None:
             try:
@@ -391,7 +423,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             self._check_thread()  # type: ignore[attr-defined]
             self._check_callback(callback, api_name)  # type: ignore[attr-defined]
         timer = PriorityTimerHandle(
-            when, priority, self._sequence.next(), callback, args, self, context
+            when, priority, self._state.sequence.next(), callback, args, self, context
         )
         timer.drop_creation_frame()
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]
@@ -405,7 +437,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         because ``asyncio.Runner`` creates that task itself and cannot pass a
         name.
         """
-        self._next_task_name = name
+        self._state.next_task_name = name
 
     def stop_tracing_new_tasks(self) -> None:
         """Stop wrapping tasks created from now on (existing ones keep tracing).
@@ -416,7 +448,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         add noise to the trace. Tasks that are still pending keep their
         wrapper, so their cleanup ``cancel`` records are still emitted.
         """
-        self._tracer = None
+        self._state.tracer = None
 
     def create_task[T](
         self,
@@ -442,13 +474,15 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         Otherwise the user's coroutine goes to the Task untouched.
         """
         self._check_closed()  # type: ignore[attr-defined]
+        state = self._state
         if name is None:
-            if self._next_task_name is not None:
-                name, self._next_task_name = self._next_task_name, None
+            if state.next_task_name is not None:
+                name, state.next_task_name = state.next_task_name, None
             else:
-                name = f"proc-{next(self._task_name_counter)}"
-        if self._tracer is not None and asyncio.iscoroutine(coro):
-            coro = _TracedCoroutine(coro, str(name), self._tracer)
+                name = f"proc-{next(state.task_names)}"
+        tracer = state.tracer
+        if tracer is not None and asyncio.iscoroutine(coro):
+            coro = _TracedCoroutine(coro, str(name), tracer)
         if eager_start is None:  # 3.13's create_task has no such keyword
             return super().create_task(coro, name=name, context=context)
         return super().create_task(

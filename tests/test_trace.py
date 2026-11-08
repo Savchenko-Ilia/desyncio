@@ -6,7 +6,6 @@ import os
 import selectors
 import subprocess
 import sys
-import time
 from typing import Any
 
 import pytest
@@ -172,27 +171,11 @@ def test_trace_must_be_callable() -> None:
         desyncio.run(m(), trace="no")  # type: ignore[call-overload]
 
 
-def test_benchmark_loose_sanity() -> None:
-    """Tracing off must not be slower than a plain loop run (loose bound).
-
-    Both sides run the same sleeps on a VirtualTimeLoop; the baseline is the
-    loop driven directly by ``asyncio.Runner``, so the only difference is the
-    code in ``desyncio.run``. The bound is deliberately generous to avoid
-    flakes. Real numbers are in the implementation log.
-    """
-
-    async def work() -> None:
-        for _ in range(20_000):
-            await asyncio.sleep(0.001)
-
-    start = time.perf_counter()
-    desyncio.run(work(), trace=None)
-    off = time.perf_counter() - start
-    with asyncio.Runner(loop_factory=VirtualTimeLoop) as runner:
-        start = time.perf_counter()
-        runner.run(work())
-        plain = time.perf_counter() - start
-    assert off < plain * 3 + 0.5
+# Tracing off must cost nothing per step. The old timing test here compared
+# two VirtualTimeLoop runs, so it could not see a slowdown of the loop itself;
+# it was removed. The deterministic guard is
+# tests/test_loop.py::test_loop_instance_dict_is_not_larger_than_before_loop_09
+# and the measured numbers are in docs/how-the-loop-works.md section 10.
 
 
 # --- naming ---------------------------------------------------------------
