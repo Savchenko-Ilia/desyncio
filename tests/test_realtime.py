@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 import desyncio
+import desyncio.guards
 from desyncio.loop import SimulationDeadlock, VirtualTimeLoop
 from desyncio.realtime import MAX_REAL_WAIT, RealTimePacer, SystemWallClock
 
@@ -546,3 +547,12 @@ def test_failed_bind_leaks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         live.close()
     assert unraisable == []
+
+
+def test_guards_docstring_does_not_claim_the_loop_never_waits() -> None:
+    # D011: a paced loop does wait (scaled virtual time), so the guards
+    # module must not say "never waits" without qualifying it.
+    doc = " ".join((desyncio.guards.__doc__ or "").split())
+    assert "VirtualTimeLoop` never waits:" not in doc
+    assert "never waits for the real world in fast mode" in doc
+    assert "real-time mode" in doc

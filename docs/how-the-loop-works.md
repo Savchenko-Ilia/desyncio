@@ -311,11 +311,18 @@ if events or timeout == 0:  return events
 if paused:        return wall.wait(None, real_selector)     # until woken
 if speed is inf or no timer:  -> fast path (jump, or SimulationDeadlock)
 target = min(next_timer.when, until)
-events = wall.wait((target - now) / speed, real_selector)
-if no events:  clock.advance_to(next_timer.when)            # full wait
+real_timeout = (target - now) / speed
+chunked = real_timeout > MAX_REAL_WAIT                       # one day
+events = wall.wait(min(real_timeout, MAX_REAL_WAIT), real_selector)
+if no events and not chunked:  clock.advance_to(next_timer.when)   # full wait
 else:          clock.advance_to(min(target, now + elapsed_real * speed))
 return events
 ```
+
+**Chunked waits.** `select` overflows above ~9.2e9 s, so a longer wait (slow speed or a
+far timer) is split into one-day chunks (`MAX_REAL_WAIT`, like asyncio's
+`MAXIMUM_SELECT_TIMEOUT`); a chunk that ends with no events advances the clock by
+`elapsed * speed` only (at least one float step) and the loop comes back for the next chunk.
 
 **The wait is the real selector's `select(real_timeout)`.** That is the one call a stock
 loop blocks in, and it returns early when a registered fd becomes readable. The
