@@ -52,3 +52,8 @@ LOOP-03 (tie-breaking) has to change how timers are ordered. That lives in `Virt
 - marking comments added on the adapted parts.
 
 The `integration` → `main` PR must flag this. Open follow-up: `pyproject.toml` `license-files` must include `LICENSES/*` so the notice ships in wheels.
+
+## D010 — Batch 5 scope (owner said "go" without answering, so the lead's recommendations apply; owner may overrule)
+- Rename `run.py` → `runners.py`, done as LOOP-04b in batch 5. The `desyncio.run` function shadows a submodule of the same name: `mock.patch("desyncio.run.X")` silently patches the function, and `import desyncio.run as m` returns the function. LOOP-04b also adds the `run` overloads, the `license-files` fix from D009, and the infinite-background-task test.
+- LOOP-11 (real-time mode) also owns `loop.py`/`tests/test_loop.py`, because scaled real time changes how the loop waits. It runs in batch 6, after LOOP-07. LOOP-05 and LOOP-11 now also depend on LOOP-04b, so they build on `runners.py`.
+- Batch 5 = LOOP-07, LOOP-04b, DOC-01 (no file overlap).
