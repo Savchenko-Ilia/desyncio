@@ -324,3 +324,21 @@ Branch: feat/DOC-01 + fix/DOC-01-1  ·  Merged: 30fcc79
 **Gotchas.** The doc has to change whenever loop internals change. Add "update docs/how-the-loop-works.md" to the review checklist for any feature that owns `loop.py`.
 
 **Follow-ups.** The SHOULDs above.
+
+## CI-02 — CI manual-only (2026-11-08, batch 6, owner request)
+Branch: feat/CI-02  ·  Merged: (this commit's parent merge)
+
+**Approach.** `.github/workflows/ci.yml` now has only `workflow_dispatch` under `on:`; `pull_request` was removed. The header comment explains why (no Actions credits, D013), names `scripts/gate.sh` as the merge check, and says how to re-enable. The job, steps, permissions and concurrency are unchanged.
+
+**asyncio internals.** None.
+
+**Trade-offs.** The workflow was kept rather than deleted, so re-enabling it is a one-line change.
+
+**Review findings.** PASS. Notes from the reviewer (GitHub behaviour, from its knowledge, untested):
+- `pull_request` runs use the workflow from the PR's merge ref, so PR #2 stops triggering once this lands on `integration`. The two earlier failed runs stay in its history.
+- `workflow_dispatch` only appears in the Actions UI once the file is on the default branch (`main`), i.e. after PR #2 merges.
+- Make sure no branch-protection rule on `main` requires the `check` status, or the merge would be blocked.
+
+**Gotchas.** The two failed runs on PR #2 (about 3 s each, no steps run) were caused by billing, not by test failures.
+
+**Follow-ups.** Restore `pull_request:` when credits are available.
