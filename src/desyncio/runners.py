@@ -209,20 +209,21 @@ def run[T](
             raise TypeError(
                 f"pacer must be a RealTimePacer, got {type(pacer).__name__}"
             )
+        clock = _BoundedClock(limit)
+        # Build the loop here, not lazily inside Runner.run: binding the pacer
+        # can fail (it is bound to another live loop), and Runner.run would
+        # then raise without closing ``main``.
+        loop = VirtualTimeLoop(clock=clock, pacer=pacer)
     except BaseException:
         main.close()
         raise
 
-    clock = _BoundedClock(limit)
     # A fresh Context: the ContextVar set below is visible to main and to all
     # tasks it creates (each task copies the current context), and nowhere else.
     context = contextvars.Context()
     context.run(_rng_streams.set, streams)
 
-    def make_loop() -> VirtualTimeLoop:
-        return VirtualTimeLoop(clock=clock, pacer=pacer)
-
-    runner = asyncio.Runner(loop_factory=make_loop)
+    runner = asyncio.Runner(loop_factory=lambda: loop)
     try:
         try:
             return runner.run(main, context=context)
@@ -240,3 +241,7 @@ def run[T](
                 f"beyond {clock.now!r} (the end of the simulation, `until` or "
                 "when main finished); cleanup code may not advance the clock"
             ) from None
+        finally:
+            # Runner.close() is a no-op if the runner never used the loop.
+            if not loop.is_closed():
+                loop.close()

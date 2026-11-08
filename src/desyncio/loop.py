@@ -261,7 +261,15 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         self._sequence = SequenceCounter()
         self.pacer = pacer
         if pacer is not None:
-            pacer.bind(self)
+            try:
+                pacer.bind(self)
+            except BaseException:
+                # The base constructor already opened a selector and the
+                # self-pipe sockets; close them or they leak (ResourceWarning
+                # "unclosed event loop" when this half-built loop is freed).
+                self.pacer = None
+                self.close()
+                raise
 
     @property
     def _clock_resolution(self) -> float:

@@ -7,10 +7,13 @@ cross-thread tests); they synchronise with ``threading.Event``, not sleeps.
 """
 
 import asyncio
+import gc
 import math
 import selectors
+import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -511,3 +514,35 @@ def test_chunk_below_one_float_step_still_makes_progress() -> None:
 
     assert desyncio.run(main(), pacer=pacer) == 2.0**60 + 256
     assert wall.waits == [MAX_REAL_WAIT]  # one chunk, then the timer is due
+
+
+def test_failed_bind_leaks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A second loop on a bound pacer must not leave its selector and
+    # self-pipe sockets behind ("unclosed event loop" / ResourceWarning),
+    # and run() must close main (no "never awaited" warning). Those warnings
+    # are emitted from __del__, so they reach sys.unraisablehook rather than
+    # this frame; record them there.
+    unraisable: list[str] = []
+    monkeypatch.setattr(
+        sys, "unraisablehook", lambda u: unraisable.append(repr(u.exc_value))
+    )
+    pacer = RealTimePacer()
+    live = VirtualTimeLoop(pacer=pacer)
+
+    async def main() -> None: ...
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="already"):
+                VirtualTimeLoop(pacer=pacer)
+            gc.collect()
+            coro = main()
+            with pytest.raises(ValueError, match="already"):
+                desyncio.run(coro, pacer=pacer)
+            assert coro.cr_frame is None
+            del coro
+            gc.collect()
+    finally:
+        live.close()
+    assert unraisable == []
