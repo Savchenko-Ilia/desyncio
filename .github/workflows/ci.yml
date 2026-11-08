@@ -1,11 +1,10 @@
-# CI runs on pull requests (and manually) only. There is deliberately no `push`
-# trigger: the owner wants to save Actions minutes, and every change reaches a
-# branch through a PR anyway. Mirrors the commands in scripts/gate.env.
+# CI is manual-only. The owner has no GitHub Actions credits, so this workflow
+# runs only when started by hand (Actions -> CI -> Run workflow). The check used
+# for every merge is scripts/gate.sh (D013). To re-enable CI on pull requests,
+# add `pull_request:` back under `on:`. Mirrors the commands in scripts/gate.env.
 name: CI
 
 on:
-  # No branch filter: PRs into any branch (feature -> integration, integration -> main).
-  pull_request:
   workflow_dispatch:
 
 permissions:
