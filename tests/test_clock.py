@@ -3,7 +3,7 @@
 import math
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from desyncio.clock import VirtualClock
@@ -62,20 +62,14 @@ def test_non_finite_advance_rejected(bad: float) -> None:
 finite = st.floats(min_value=-1e9, max_value=1e9, allow_nan=False, allow_infinity=False)
 
 
-gaps = st.lists(st.floats(min_value=0, max_value=1e6), max_size=50)
+sorted_times = st.lists(finite, max_size=50).map(sorted)
 
 
-@given(start=finite, deltas=gaps)
+@given(start=finite, times=sorted_times)
 def test_advancing_through_sorted_times_ends_at_last(
-    start: float, deltas: list[float]
+    start: float, times: list[float]
 ) -> None:
-    times: list[float] = []
-    t = start
-    for d in deltas:
-        t += d
-        times.append(t)
-    times.sort()  # already non-decreasing; sort guards against float rounding
-
+    times = [max(t, start) for t in times]  # keep every target >= start
     clock = VirtualClock(start=start)
     previous = clock.now
     for t in times:
@@ -83,3 +77,59 @@ def test_advancing_through_sorted_times_ends_at_last(
         assert clock.now >= previous
         previous = clock.now
     assert clock.now == (times[-1] if times else start)
+
+
+@given(now=finite, t=finite)
+def test_advancing_backwards_raises_and_keeps_now(now: float, t: float) -> None:
+    assume(t < now)
+    clock = VirtualClock(start=now)
+    with pytest.raises(ValueError, match="backwards"):
+        clock.advance_to(t)
+    assert clock.now == now
+
+
+class _Int(int):
+    pass
+
+
+class _Float(float):
+    pass
+
+
+BAD_TYPES = ["5", b"5", True, False, None, 1 + 2j, object(), [1]]
+
+
+@pytest.mark.parametrize("bad", BAD_TYPES)
+def test_start_rejects_non_real(bad: object) -> None:
+    with pytest.raises(TypeError, match=rf"start.*{type(bad).__name__}"):
+        VirtualClock(start=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", BAD_TYPES)
+def test_advance_to_rejects_non_real(bad: object) -> None:
+    clock = VirtualClock(start=1.0)
+    with pytest.raises(TypeError, match=rf"advance_to.*{type(bad).__name__}"):
+        clock.advance_to(bad)  # type: ignore[arg-type]
+    assert clock.now == 1.0
+
+
+def test_int_and_float_subclasses_accepted() -> None:
+    assert VirtualClock(start=_Int(3)).now == 3.0
+    assert VirtualClock(start=_Float(2.5)).now == 2.5
+
+
+@pytest.mark.parametrize("big", [10**400, -(10**400)])
+def test_huge_int_raises_value_error(big: int) -> None:
+    with pytest.raises(ValueError):
+        VirtualClock(start=big)
+    clock = VirtualClock()
+    with pytest.raises(ValueError):
+        clock.advance_to(big)
+    assert clock.now == 0.0
+
+
+def test_negative_zero_normalised() -> None:
+    assert str(VirtualClock(-0.0).now) == "0.0"
+    clock = VirtualClock(start=-1.0)
+    clock.advance_to(-0.0)
+    assert str(clock.now) == "0.0"
