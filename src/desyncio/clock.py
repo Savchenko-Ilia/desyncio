@@ -24,6 +24,7 @@ class VirtualClock:
         """Create a clock at ``start`` (default 0.0).
 
         Raises:
+            TypeError: if ``start`` is not an ``int`` or ``float``.
             ValueError: if ``start`` is NaN or infinite.
         """
         self._now = self._check_finite(start, "start")
@@ -41,6 +42,7 @@ class VirtualClock:
         it already is.
 
         Raises:
+            TypeError: if ``t`` is not an ``int`` or ``float``.
             ValueError: if ``t`` is NaN/infinite, or earlier than the current
                 time (time never runs backwards).
         """
@@ -53,8 +55,27 @@ class VirtualClock:
 
     @staticmethod
     def _check_finite(value: float, what: str) -> float:
-        """Coerce to float and reject NaN and +/-infinity."""
-        result = float(value)
+        """Validate a real, finite number and return it as a float.
+
+        ``-0.0`` is normalised to ``0.0``.
+
+        Raises:
+            TypeError: if ``value`` is not an ``int`` or ``float`` (``bool``
+                is rejected too).
+            ValueError: if ``value`` is NaN, infinite, or an int too large
+                to represent as a float.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(
+                f"{what} must be a real number (int or float), "
+                f"got {type(value).__name__}"
+            )
+        try:
+            result = float(value)
+        except OverflowError:
+            raise ValueError(
+                f"{what} must be a finite number, got an int too large for a float"
+            ) from None
         if not math.isfinite(result):
             raise ValueError(f"{what} must be a finite number, got {result!r}")
-        return result
+        return result + 0.0  # -0.0 + 0.0 == 0.0
