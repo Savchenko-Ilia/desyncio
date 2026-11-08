@@ -1,5 +1,9 @@
 """The ``run`` entry point: run one coroutine on a fresh virtual-time loop.
 
+This module is named ``runners`` (like ``asyncio.runners``, which holds
+``asyncio.run``) so that no submodule called ``run`` shadows the function
+``desyncio.run``.
+
 ``desyncio.run(main(), until=None, seed=0)`` is the simulation counterpart of
 ``asyncio.run``. Three things are worth understanding here.
 
@@ -48,21 +52,17 @@ all tasks it spawns (directly or indirectly), see the same ``RngStreams``
 object. Setting the variable inside a private ``Context`` (rather than in the
 caller's) also means it never leaks into, or out of, the caller's code.
 Read it with :func:`current_rng_streams`.
-
-Note: importing ``run`` into ``desyncio/__init__`` makes ``desyncio.run`` the
-*function*, shadowing this submodule as an attribute. Import helpers with
-``from desyncio.run import current_rng_streams``.
 """
 
 import asyncio
 import contextvars
 import math
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, overload
 
 from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
-from desyncio.rng import RngStreams, _check_seed
+from desyncio.rng import RngStreams
 
 _rng_streams: contextvars.ContextVar[RngStreams] = contextvars.ContextVar(
     "desyncio_rng_streams"
@@ -127,6 +127,12 @@ def _check_until(until: object) -> float:
     return value
 
 
+@overload
+def run[T](main: Coroutine[Any, Any, T], *, until: None = None, seed: int = 0) -> T: ...
+@overload
+def run[T](
+    main: Coroutine[Any, Any, T], *, until: float, seed: int = 0
+) -> T | None: ...
 def run[T](
     main: Coroutine[Any, Any, T],
     *,
@@ -171,7 +177,7 @@ def run[T](
         else:
             raise RuntimeError("run() cannot be called from a running event loop")
         limit = math.inf if until is None else _check_until(until)
-        streams = RngStreams(_check_seed(seed))
+        streams = RngStreams(seed)  # validates seed
     except BaseException:
         main.close()
         raise
