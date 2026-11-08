@@ -159,3 +159,73 @@ The design depends on these private attributes: `loop._scheduled`, `TimerHandle.
 **Gotchas.** asyncio's `TimerHandle.__lt__` compares `_when` only, and `heapq` is not stable. So equal-time timers have no guaranteed order yet; that is LOOP-03's job.
 
 **Follow-ups.** The SHOULDs above, proposed to be folded into LOOP-03 (resolution, overdue and mid-heap tests, wall-time test) and LOOP-07 (thread/executor docs and tests).
+
+## LOOP-04 — Run entry point (2026-11-08, batch 4)
+Branch: feat/LOOP-04  ·  Merged: 6951557
+
+**Approach.** `desyncio.run(main, *, until=None, seed=0)` in `src/desyncio/run.py` is exported from `desyncio/__init__.py`. It builds `asyncio.Runner(loop_factory=lambda: VirtualTimeLoop(clock=clock))` and calls `runner.run(main, context=ctx)`. No `loop.py` change was needed.
+- **Stopping at `until`:** `_BoundedClock(VirtualClock)` has a `limit`. The loop advances the clock only when idle, so when it asks for a time past `limit` the clock sets itself to exactly `limit` and raises a private `_LimitReached`. That exception unwinds `select` → `_run_once` → `run_forever` → `Runner.run`, and `run` returns `None`. Everything due at `t <= until` has already run by then.
+- **Cleanup:** before `runner.close()`, the clock is frozen (`limit = now`). Close cancels leftover tasks, as `asyncio.run` does, and their `except`/`finally` blocks run in zero virtual time. A handler that awaits a later timer makes `run` raise `SimulationCleanupError`.
+- **Seed:** an `RngStreams(seed)` is stored in a `ContextVar` set inside a fresh `contextvars.Context`. Read it with `current_rng_streams()`, which raises `RuntimeError` outside `run`.
+- **Validation:** bad arguments close the coroutine first, so no "never awaited" warning appears. `run` refuses to start inside a running loop. Main's exceptions, and `SimulationDeadlock`, propagate after the loop closes.
+
+**asyncio internals.**
+- Every `Task` copies the context that is current when it is created (`contextvars.copy_context()`). So the main task and every task it spawns, transitively, see the same `RngStreams`, and the variable never leaks into the caller.
+- `asyncio.Runner(context=...)` only exists from 3.14. On 3.13 the context goes to `Runner.run(coro, context=...)`.
+- `Runner.close()` runs `_cancel_all_tasks`, `shutdown_asyncgens` and `shutdown_default_executor`, then `loop.close()` in a `finally`. If cancellation raises, the asyncgen and executor shutdowns are skipped, but the loop is still closed.
+- An exception raised from `select()` leaves the loop consistent: the running loop is reset and the SIGINT handler is restored (reviewer probe, no warnings under `-X dev -W error`).
+
+**Trade-offs.**
+- A clock subclass that raises, rather than scheduling `loop.stop()` at `until`. A stop callback would let other timers due at exactly `until` race with it, and it would need loop changes.
+- Freezing the clock during close keeps "nothing runs after `until`" strict. The cost is that cleanup code that sleeps is an error.
+
+**Review findings.** PASS. SHOULD:
+- Add `@overload`s, so that `until=None` returns `T` rather than `T | None`.
+- **Name shadowing:** `desyncio.run` is the function, which hides the `desyncio.run` module. `mock.patch("desyncio.run.current_rng_streams")` silently patches the function object. Recommend renaming the module to `runners.py`, as asyncio does, before LOOP-05 imports it.
+- Add a test for an infinite `while True: sleep(1)` background task. The reviewer probed it, and it is clean on both paths.
+- Document the "Task was destroyed but it is pending" message on the `SimulationCleanupError` path.
+- Drop the double seed validation, which uses the private `_check_seed` import.
+- The `until + 5e-10` resolution-window case is fixed by LOOP-03.
+
+**Gotchas.** Arguments are keyword-only (`run(main, *, until, seed)`). The start time is always 0.0.
+
+**Follow-ups.** The overloads and the module rename (owner decision, see the batch 4 report). Add the infinite-background-task test.
+
+## LOOP-03 — Deterministic tie-breaking (2026-11-08, batch 4)
+Branch: feat/LOOP-03 + fix/LOOP-03-1  ·  Merged: 8624c3f
+
+**Approach.**
+- `src/desyncio/scheduling.py` adds `PriorityTimerHandle(TimerHandle)`, whose comparisons use the key `(when, priority, sequence)`. It also adds a per-loop `SequenceCounter` and `DEFAULT_PRIORITY = 0`.
+- `VirtualTimeLoop.call_at` is overridden to build these handles with priority 0. `call_later` → `self.call_at`, `sleep` → `call_later`, and `asyncio.timeout` → `call_at` (all verified in the 3.13 source), so every stock timer is covered.
+- `loop.call_at_priority(when, priority, callback, *args, context=None)` sets an explicit priority; it must be an int, and bool is rejected.
+- `_clock_resolution` is a property returning `nextafter(now, inf) - now`, so only timers at exactly `now` share an instant.
+- The `max(when, now)` guard was removed, because it is unreachable: an overdue timer gives a timeout of 0.
+
+**asyncio internals.**
+- `loop._scheduled` is a `heapq` min-heap. `heapq` only uses `<`, and stock `TimerHandle.__lt__` compares `_when` alone. Equal times are "not less" than each other, so their pop order is whatever the swaps left; `heapq` is not stable. A unique key leaves exactly one valid pop order, so equal `(when, priority)` pairs pop FIFO. This also holds after `_run_once` rebuilds the heap with `heapify` once more than half of 100+ timers are cancelled.
+- `_run_once` treats a timer as due if `_when < time() + _clock_resolution` and runs all due timers with `time()` frozen. With the real ~1e-9 resolution, `1.0 + 5e-10` would observe `1.0`. A resolution of 0 would hang, because a timer at exactly `now` would never be due.
+- A `call_soon` made from a timer callback runs after the other timers due at that instant. That is stock behaviour, and priority does not affect `call_soon`.
+
+**Trade-offs.**
+- A handle subclass, rather than a parallel heap or a wrapper list. It keeps CPython's `_run_once` untouched.
+- `_schedule` had to re-create `BaseEventLoop.call_at`'s body, because `call_at` hardcodes `events.TimerHandle`. That is adapted PSF code (D009).
+
+**Review findings.**
+- Round 0 FAILED with one MUST. `_schedule` reproduces `BaseEventLoop.call_at` line for line: the same checks, the same error string, the traceback trim, `heappush` and `_scheduled = True`. That is adapted code under AGENTS.md §3, and the module docstring falsely claimed "no CPython code is copied".
+- Fix round 1 (`fix/LOOP-03-1`):
+  - added `LICENSES/PSF.txt`: a header listing the adapted portions, plus the verbatim PSF License v2, byte-identical to the local interpreter's `LICENSE.txt`;
+  - added marking comments, with a change summary, on `_schedule` and `PriorityTimerHandle.drop_creation_frame`;
+  - corrected the docstring;
+  - added `test_cpython_adapted_code_carries_psf_notice`.
+  Re-review: PASS.
+- SHOULD:
+  - `pyproject.toml`'s `license-files = ["LICENSE"]` does not ship `LICENSES/PSF.txt` in wheels. Add `"LICENSES/*"`; pyproject is outside LOOP-03's ownership.
+  - Use CPython's exact copyright wording, "2001-2024".
+  - Skip the notice test when `LICENSES/` is absent, e.g. when tests run from an installed package.
+  - The determinism tests run in-process only. Add a run in a subprocess with a different `PYTHONHASHSEED`.
+  - The inherited `__eq__` ignores priority and sequence.
+  - The `_clock_resolution` setter silently discards writes.
+
+**Gotchas.** The private attributes in use are now `_scheduled`, `_when`, `_selector`, `_clock_resolution`, `_check_closed`, `_debug`, `_check_thread`, `_check_callback` and `_source_traceback`. Any CPython bump should run the full suite. At t ≈ 1e300, `t + 5 == t`, an inherent float limit.
+
+**Follow-ups.** The `license-files` fix in `pyproject.toml`, needed before any release. The SHOULDs above. AGENTS.md §3: flag the adapted code in the `integration` → `main` PR.

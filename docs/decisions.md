@@ -45,3 +45,10 @@ LOOP-03 (tie-breaking) has to change how timers are ordered. That lives in `Virt
 - **`until` semantics (LOOP-04):** timers due at `t <= until` run; nothing runs at virtual time `> until`, including during cleanup. If `main` finishes first, `run` returns its result. If `until` is reached first, `run` returns `None` (as SimPy's `env.run(until=...)` does), and other tasks are left unfinished, as documented. What happens to them during loop close is the implementer's to document and test, under the constraint that the clock never passes `until`.
 - **`seed` (LOOP-04):** `run` validates `seed` with the same rules as `RngStreams`. It makes an `RngStreams(seed)` available to the running simulation by a documented mechanism, chosen by the implementer, that LOOP-05 can build `sim.rng()` on. It does not edit `loop.py`.
 - LOOP-04 may edit `src/desyncio/__init__.py`, only to export `run`, so that `desyncio.run(...)` works.
+
+## D009 — LOOP-03: adapted CPython code, fixed with a PSF notice (lead, batch 4)
+`VirtualTimeLoop._schedule` must re-create `BaseEventLoop.call_at`, because stock `call_at` hardcodes `events.TimerHandle`. The reviewer judged it adapted code under AGENTS.md §3. The lead chose the §3 route over an awkward rewrite to dodge it:
+- `LICENSES/PSF.txt` added (the fixer was allowed this one file outside the owned list);
+- marking comments added on the adapted parts.
+
+The `integration` → `main` PR must flag this. Open follow-up: `pyproject.toml` `license-files` must include `LICENSES/*` so the notice ships in wheels.
