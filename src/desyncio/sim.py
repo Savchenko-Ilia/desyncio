@@ -21,10 +21,8 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 """
 
 import asyncio
-import itertools
 import math
 import random
-import weakref
 from collections.abc import Coroutine
 from typing import Any
 
@@ -35,19 +33,6 @@ _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
     "VirtualTimeLoop; there is no such loop running here"
 )
-
-# Per-loop counter for default task names.
-#
-# asyncio names tasks "Task-N" from a counter shared by the whole process, so
-# a second desyncio.run() in the same process would get different names than
-# the first. We keep one counter per loop instead. It lives here (not on the
-# loop object) because loop.py is not ours to edit. A WeakKeyDictionary keyed
-# by the loop means the entry disappears when the loop is garbage collected,
-# so closed loops do not leak and a new loop always starts at 1.
-_proc_counters: weakref.WeakKeyDictionary[
-    VirtualTimeLoop, "itertools.count[int]"
-] = weakref.WeakKeyDictionary()
-
 
 def _loop() -> VirtualTimeLoop:
     """Return the running VirtualTimeLoop or raise RuntimeError."""
@@ -123,9 +108,10 @@ class Sim:
         Args:
             coro: a coroutine object (``worker()``, not ``worker``).
             name: the task's name (``task.get_name()``). Default
-                ``"proc-N"`` with N counting from 1 per run, so names are
-                identical in every run of the same model. Trace consumers
-                should read ``Task.get_name()``.
+                ``"proc-N"`` from the loop's one per-run counter, shared with
+                ``asyncio.create_task`` and ``TaskGroup`` (see
+                ``VirtualTimeLoop.create_task``), so names are identical in
+                every run of the same model.
 
         Raises:
             TypeError: ``coro`` is not a coroutine object.
@@ -143,9 +129,6 @@ class Sim:
             if asyncio.iscoroutine(coro):
                 coro.close()
             raise
-        if name is None:
-            counter = _proc_counters.setdefault(loop, itertools.count(1))
-            name = f"proc-{next(counter)}"
         return loop.create_task(coro, name=name)
 
     def rng(self, name: str) -> random.Random:

@@ -48,9 +48,10 @@ loudly.
 
 import asyncio
 import heapq
+import itertools
 import math
 import selectors
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextvars import Context
 from typing import Any
 
@@ -62,6 +63,7 @@ from desyncio.scheduling import (
     PriorityTimerHandle,
     SequenceCounter,
 )
+from desyncio.trace import Tracer, TraceSink, _TracedCoroutine
 
 
 class SimulationDeadlock(RuntimeError):
@@ -243,6 +245,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         start: float = 0.0,
         clock: VirtualClock | None = None,
         pacer: RealTimePacer | None = None,
+        trace: TraceSink | None = None,
     ) -> None:
         """Create the loop.
 
@@ -251,14 +254,28 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             clock: an existing clock to drive instead of a fresh one.
             pacer: if given, run in scaled real time under this pacer
                 (see :mod:`desyncio.realtime`); ``None`` is fast mode.
+            trace: a callable taking one :class:`~desyncio.trace.TraceRecord`;
+                it receives every task start, resume, finish and cancel (see
+                :mod:`desyncio.trace`). ``None`` (default) means no tracing
+                and no tracing code on any path.
         """
         # Set before super().__init__: the base constructor may call time().
         self.clock = clock if clock is not None else VirtualClock(start)
         super().__init__()
+        if trace is not None and not callable(trace):
+            self.close()  # the base constructor opened a selector and sockets
+            raise TypeError(
+                f"trace must be callable or None, got {type(trace).__name__}"
+            )
         # The base constructor created the real selector and registered the
         # self-pipe on it. Wrap it so the registrations carry over.
         self._selector = _JumpingSelector(self._selector, self)  # type: ignore[has-type]
         self._sequence = SequenceCounter()
+        # Task naming (D015): one counter per loop, so names do not depend on
+        # how many tasks other loops (or plain asyncio) created before.
+        self._task_name_counter = itertools.count(1)
+        self._next_task_name: str | None = None
+        self._tracer = Tracer(trace, self.time) if trace is not None else None
         self.pacer = pacer
         if pacer is not None:
             try:
@@ -380,6 +397,63 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]
         timer.mark_scheduled()
         return timer
+
+    def name_next_task(self, name: str) -> None:
+        """Give the next task created without an explicit name this ``name``.
+
+        One-shot. ``desyncio.run`` uses it to call the main task ``main``,
+        because ``asyncio.Runner`` creates that task itself and cannot pass a
+        name.
+        """
+        self._next_task_name = name
+
+    def stop_tracing_new_tasks(self) -> None:
+        """Stop wrapping tasks created from now on (existing ones keep tracing).
+
+        ``desyncio.run`` calls this before ``Runner.close()``: closing makes
+        the runner create its own housekeeping tasks (async-generator and
+        executor shutdown), which are not part of the model and would only
+        add noise to the trace. Tasks that are still pending keep their
+        wrapper, so their cleanup ``cancel`` records are still emitted.
+        """
+        self._tracer = None
+
+    def create_task[T](
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        name: object = None,
+        context: Context | None = None,
+        eager_start: bool | None = None,
+    ) -> asyncio.Task[T]:
+        """Create a task with a deterministic default name; trace it if enabled.
+
+        Every route that makes a task ends here: ``asyncio.create_task``,
+        ``TaskGroup.create_task``, ``gather``/``ensure_future`` on a coroutine,
+        ``sim.spawn`` and ``asyncio.Runner.run`` all call
+        ``loop.create_task``. (A ``Task(...)`` built by hand bypasses it.)
+
+        *Naming.* Without an explicit ``name`` the task is called ``proc-N``,
+        N counting from 1 on this loop (stock asyncio uses a process-global
+        ``Task-N``, which differs between runs in one process).
+
+        *Tracing.* If the loop has a trace sink, the coroutine is wrapped in a
+        :class:`~desyncio.trace._TracedCoroutine` (see :mod:`desyncio.trace`).
+        Otherwise the user's coroutine goes to the Task untouched.
+        """
+        self._check_closed()  # type: ignore[attr-defined]
+        if name is None:
+            if self._next_task_name is not None:
+                name, self._next_task_name = self._next_task_name, None
+            else:
+                name = f"proc-{next(self._task_name_counter)}"
+        if self._tracer is not None and asyncio.iscoroutine(coro):
+            coro = _TracedCoroutine(coro, str(name), self._tracer)
+        if eager_start is None:  # 3.13's create_task has no such keyword
+            return super().create_task(coro, name=name, context=context)
+        return super().create_task(
+            coro, name=name, context=context, eager_start=eager_start
+        )
 
     def time(self) -> float:
         """Return the current simulation time instead of ``time.monotonic()``."""

@@ -15,7 +15,7 @@ numbers drift):
 
 desyncio sources: [`clock.py`](../src/desyncio/clock.py), [`loop.py`](../src/desyncio/loop.py),
 [`scheduling.py`](../src/desyncio/scheduling.py), [`guards.py`](../src/desyncio/guards.py),
-[`realtime.py`](../src/desyncio/realtime.py),
+[`realtime.py`](../src/desyncio/realtime.py), [`trace.py`](../src/desyncio/trace.py),
 and the runner behind `desyncio.run(...)`.
 
 ## 1. The idea in one paragraph
@@ -25,7 +25,9 @@ asks `self.time()` what time it is, and it waits in exactly one place, the selec
 `select(timeout)`. desyncio replaces `time()` with a virtual clock and replaces the
 selector with one whose `select` moves the clock forward instead of waiting (in
 real-time mode, section 7: after waiting a scaled amount of real time). Everything
-else (tasks, futures, `sleep`, `Queue`, `TaskGroup`) is untouched stock asyncio.
+else (tasks, futures, `sleep`, `Queue`, `TaskGroup`) is stock asyncio. The one thing
+desyncio adds around tasks is `create_task`, which gives every task a deterministic
+name and, if tracing is on, wraps its coroutine (section 10).
 
 ## 2. `_run_once`: one iteration of the loop
 
@@ -456,7 +458,71 @@ with asyncio.Runner(loop_factory=Traced) as runner:
 (The full script used to produce the table also patches `Handle._run` to record what ran;
 it is instrumentation only and lives outside the repository.)
 
-## 10. Where to read next
+## 10. Tracing and task names
+
+`desyncio.run(main(), trace=sink)` (or `VirtualTimeLoop(trace=sink)`) calls
+`sink(TraceRecord(t, seq, task_name, kind))` for every task `start`, `resume`, `finish`
+and `cancel`. `t` is virtual time, `seq` counts 0, 1, 2... per run. A task that ends with
+an exception records `finish`; only a `CancelledError` escaping it records `cancel`.
+
+**How a task step works.** A `Task` is a callback, `Task.__step`. The loop runs it from
+`_ready`; it calls `coro.send(None)` (first step) or `coro.send(value)` / `coro.throw(exc)`
+(later steps) on your coroutine and looks at what comes back:
+
+- a future was *yielded*: the task is waiting, and `__step` registers itself as that
+  future's done-callback, so a later step resumes it;
+- `StopIteration(value)`: the coroutine returned, the task's result is `value`;
+- an exception: the task ends with it (`CancelledError` marks the task cancelled).
+
+`__step` is C code (`_asyncio`) and cannot be overridden, but `send` and `throw` are the
+whole interface it uses. So with tracing on, `VirtualTimeLoop.create_task` wraps your
+coroutine in `desyncio.trace._TracedCoroutine`, an object with `send`, `throw`, `close`
+and `__await__` (it subclasses `collections.abc.Coroutine`, so `asyncio.iscoroutine` is
+true and the C `Task` accepts it). It records `start` on the first call, `resume` on later
+ones, and `finish` / `cancel` when the inner call raises `StopIteration` / an exception.
+Records are made inside the step, so `t` is the virtual time the step runs at.
+
+**Zero cost when off.** With `trace=None` nothing is wrapped: `task.get_coro()` is your own
+coroutine object and no tracing code runs per step. The only per-loop difference is one
+`is None` check in `create_task`, once per task, not per step.
+
+**Names.** Without an explicit name, a task created on a `VirtualTimeLoop` is `proc-N`
+from one per-loop counter, whoever creates it (`asyncio.create_task`, `TaskGroup`,
+`gather`, `sim.spawn`); `desyncio.run`'s main task is `main`. Stock asyncio's `Task-N`
+counter is process-global, so two runs in one process would differ. Mechanism:
+`VirtualTimeLoop.create_task` is overridden; all of those paths call
+`loop.create_task`. Naming is always on, with or without tracing. `Runner.close()`
+creates housekeeping tasks (async-generator and executor shutdown); `desyncio.run`
+stops wrapping new tasks before closing so they do not appear in the trace.
+
+**If the sink raises**, the exception propagates out of `send`/`throw` as if the task's
+own code had raised it (so `run` raises it for the main task; for a child it surfaces when
+that task is awaited). It is not swallowed.
+
+## 11. What desyncio reuses from asyncio
+
+Stock, unmodified CPython code:
+
+- `run_forever` and `_run_once` (the five steps in section 2), the `_ready` deque and
+  `call_soon`, and the `_scheduled` heap with `heapq`;
+- `Task`, `Future`, `sleep`, `timeout`, `Queue`, `Lock`, `gather`, `TaskGroup`, and
+  `asyncio.Runner` (which `desyncio.run` drives; it only supplies the loop).
+
+Overridden or wrapped (our code, subclassing only):
+
+- `time()`, answered by the virtual clock;
+- the selector, wrapped by `_JumpingSelector` so that waiting becomes a clock jump;
+- `call_at` / `call_later`'s scheduling path, to key timers by `(when, priority, sequence)`;
+- the real-I/O entry points (sockets, subprocesses, executors, signals), which raise
+  `RealIOError`;
+- `create_task`, for deterministic names and optional tracing.
+
+Adapted from CPython (PSF License, D009): about ten lines, the body of
+`BaseEventLoop.call_at` re-created in `VirtualTimeLoop._schedule` because the stock method
+hardcodes `events.TimerHandle`. It is marked in the source and the license text is in
+[`LICENSES/PSF.txt`](../LICENSES/PSF.txt).
+
+## 12. Where to read next
 
 - [`tests/test_loop.py`](../tests/test_loop.py): the jumping, deadlock and cancelled-timer
   behaviour above, as executable specs.
@@ -464,8 +530,9 @@ it is instrumentation only and lives outside the repository.)
 - [`tests/test_realtime.py`](../tests/test_realtime.py): pacing, speed changes, pause/resume,
   `until` with real time, all on a fake wall clock.
 - [`tests/test_run.py`](../tests/test_run.py): `until`, cleanup freezing and seeds.
+- [`tests/test_trace.py`](../tests/test_trace.py): trace records, naming and zero cost.
 - [`tests/test_guards.py`](../tests/test_guards.py): which loop methods raise
   `RealIOError`, and that every `AbstractEventLoop` method is classified.
 - [`docs/decisions.md`](decisions.md): D006 (deadlock and threads), D008 (`until` and
-  priority semantics), D009 (PSF-adapted code).
+  priority semantics), D009 (PSF-adapted code), D015 (task names and tracing).
 - [`docs/implementation-log.md`](implementation-log.md): how each piece was built.

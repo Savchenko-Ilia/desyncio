@@ -4,7 +4,7 @@ This module is named ``runners`` (like ``asyncio.runners``, which holds
 ``asyncio.run``) so that no submodule called ``run`` shadows the function
 ``desyncio.run``.
 
-``desyncio.run(main(), until=None, seed=0, speed=None, pacer=None)`` is the
+``desyncio.run(main(), until=None, seed=0, speed=None, pacer=None, trace=None)`` is the
 simulation counterpart of ``asyncio.run``. Three things are worth
 understanding here (real-time pacing is covered in :mod:`desyncio.realtime`).
 
@@ -65,6 +65,7 @@ from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
 from desyncio.realtime import RealTimePacer
 from desyncio.rng import RngStreams
+from desyncio.trace import TraceSink
 
 _rng_streams: contextvars.ContextVar[RngStreams] = contextvars.ContextVar(
     "desyncio_rng_streams"
@@ -137,6 +138,7 @@ def run[T](
     seed: int = 0,
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
+    trace: TraceSink | None = None,
 ) -> T: ...
 @overload
 def run[T](
@@ -146,6 +148,7 @@ def run[T](
     seed: int = 0,
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
+    trace: TraceSink | None = None,
 ) -> T | None: ...
 def run[T](
     main: Coroutine[Any, Any, T],
@@ -154,6 +157,7 @@ def run[T](
     seed: int = 0,
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
+    trace: TraceSink | None = None,
 ) -> T | None:
     """Run ``main`` on a fresh virtual-time loop and return its result.
 
@@ -168,6 +172,10 @@ def run[T](
         pacer: a :class:`~desyncio.realtime.RealTimePacer`, for changing
             speed or pausing mid-run, or for an injected wall clock. Give
             ``speed`` or ``pacer``, not both.
+        trace: a callable taking one :class:`~desyncio.trace.TraceRecord`, called
+            for every task start, resume, finish and cancel (see
+            :mod:`desyncio.trace`). Off by default (``None``); when off no
+            tracing code runs. If it raises, the error propagates.
 
     Returns:
         ``main``'s result, or ``None`` if ``until`` was reached first (the
@@ -213,7 +221,8 @@ def run[T](
         # Build the loop here, not lazily inside Runner.run: binding the pacer
         # can fail (it is bound to another live loop), and Runner.run would
         # then raise without closing ``main``.
-        loop = VirtualTimeLoop(clock=clock, pacer=pacer)
+        loop = VirtualTimeLoop(clock=clock, pacer=pacer, trace=trace)
+        loop.name_next_task("main")
     except BaseException:
         main.close()
         raise
@@ -233,6 +242,7 @@ def run[T](
         # Freeze time where it is (== until if we stopped early, or when main
         # finished otherwise) before runner.close() cancels leftover tasks.
         clock.limit = clock.now
+        loop.stop_tracing_new_tasks()
         try:
             runner.close()  # always closes the loop, even if this raises
         except _LimitReached:
