@@ -6,14 +6,18 @@ must not be called from inside pytest-asyncio's running loop.
 
 import asyncio
 import gc
+import importlib
+import importlib.util
 import warnings
+from typing import assert_type
+from unittest import mock
 
 import pytest
 
 import desyncio
 from desyncio.loop import SimulationDeadlock
 from desyncio.rng import RngStreams
-from desyncio.run import SimulationCleanupError, current_rng_streams, run
+from desyncio.runners import SimulationCleanupError, current_rng_streams, run
 
 
 def test_exported_from_package() -> None:
@@ -225,7 +229,7 @@ def test_invalid_until_type(until: object) -> None:
     async def main() -> None: ...
 
     with pytest.raises(TypeError, match="until"):
-        run(main(), until=until)  # type: ignore[arg-type]
+        run(main(), until=until)  # type: ignore[call-overload]
 
 
 @pytest.mark.parametrize(
@@ -236,16 +240,16 @@ def test_invalid_seed(seed: object, exc: type[Exception]) -> None:
     async def main() -> None: ...
 
     with pytest.raises(exc):
-        run(main(), seed=seed)  # type: ignore[arg-type]
+        run(main(), seed=seed)  # type: ignore[call-overload]
 
 
 def test_non_coroutine_raises_type_error() -> None:
     async def main() -> None: ...
 
     with pytest.raises(TypeError, match="coroutine"):
-        run(main)  # type: ignore[arg-type]  # forgot the call parentheses
+        run(main)  # type: ignore[call-overload]  # forgot the call parentheses
     with pytest.raises(TypeError, match="coroutine"):
-        run(42)  # type: ignore[arg-type]
+        run(42)  # type: ignore[call-overload]
 
 
 def test_no_never_awaited_warning_on_rejected_arguments() -> None:
@@ -258,7 +262,7 @@ def test_no_never_awaited_warning_on_rejected_arguments() -> None:
         with pytest.raises(ValueError):
             run(main(), seed=-1)
         with pytest.raises(TypeError):
-            run(main(), until="x")  # type: ignore[arg-type]
+            run(main(), until="x")  # type: ignore[call-overload]
         gc.collect()
 
 
@@ -331,3 +335,56 @@ def test_accessor_does_not_leak_after_run() -> None:
     run(main(), seed=5)
     with pytest.raises(RuntimeError):
         current_rng_streams()
+
+
+def test_no_submodule_named_run_shadows_the_function() -> None:
+    assert callable(desyncio.run)
+    assert desyncio.run is run
+    runners = importlib.import_module("desyncio.runners")
+    assert hasattr(runners, "current_rng_streams")
+    assert importlib.util.find_spec("desyncio.run") is None
+    with pytest.raises(ImportError):
+        importlib.import_module("desyncio.run.nothing")
+    # patching by dotted path hits the module attribute, not the function
+    with mock.patch("desyncio.runners.current_rng_streams") as fake:
+        assert runners.current_rng_streams is fake
+    assert runners.current_rng_streams is current_rng_streams
+
+
+def test_overload_types() -> None:
+    # assert_type is a runtime no-op; mypy checks it (`uv run mypy tests/test_run.py`).
+    async def main() -> int:
+        return 1
+
+    assert_type(run(main()), int)
+    assert_type(run(main(), until=None), int)
+    assert_type(run(main(), until=5.0), int | None)
+    assert_type(run(main(), until=5), int | None)
+
+
+@pytest.mark.parametrize(
+    ("until", "expected", "end"), [(None, "done", 3.5), (10, None, 10.0)]
+)
+def test_endless_background_task_is_cancelled_cleanly(
+    until: float | None, expected: str | None, end: float
+) -> None:
+    seen: dict[str, float | bool] = {}
+
+    async def ticker() -> None:
+        try:
+            while True:  # noqa: ASYNC110 (the point: an endless timer loop)
+                await asyncio.sleep(1)
+        finally:
+            seen["cancelled_at"] = asyncio.get_running_loop().time()
+
+    async def main() -> str:
+        asyncio.create_task(ticker())
+        await asyncio.sleep(3.5 if until is None else 100)
+        return "done"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = run(main(), until=until)
+        gc.collect()
+    assert result == expected
+    assert seen["cancelled_at"] == end
