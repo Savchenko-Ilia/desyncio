@@ -34,3 +34,14 @@ This cloud session pushes the session branch `claude/setup-batch-1-5bb5vp`. Per 
 
 ## D007 — File ownership gap for LOOP-03 and LOOP-07 (open, for the owner)
 LOOP-03 (tie-breaking) has to change how timers are ordered. That lives in `VirtualTimeLoop` (`call_at` / `_scheduled`). LOOP-07 (I/O guards) has to override loop methods (`add_reader`, `sock_*`, `subprocess_*`, `run_in_executor`). Both are listed as owning only their own new files, but both realistically need `src/desyncio/loop.py`. The suggested batch 4 (LOOP-03, LOOP-04, LOOP-07) therefore overlaps on `loop.py`. Owner decision pending.
+
+## D007 — resolved (owner said "go", batch 4)
+- LOOP-03 and LOOP-07 also own `src/desyncio/loop.py` and `tests/test_loop.py`. They therefore run in different batches: LOOP-03 in batch 4, LOOP-07 in batch 5.
+- LOOP-03 absorbs the LOOP-02 review SHOULDs on scheduling: the clock-resolution window, tests for overdue and mid-heap-cancelled timers, and a robust wall-time test.
+- LOOP-07 absorbs the thread/executor ones: an honest test and docstring for cross-thread wake-ups. D006 was confirmed by the owner.
+
+## D008 — Batch 4 spec details (lead; owner may overrule)
+- **Priority source (LOOP-03):** the spec orders timers by `(time, priority, sequence)` but doesn't say where priority comes from. Default priority is `0` for all stock asyncio timers (`sleep`, `call_later`, `call_at`, `timeout`). Lower values fire first. A non-default priority is set through an explicit loop method (named by the implementer and documented), not through `call_at` kwargs. `sequence` is a per-loop monotonically increasing counter assigned at scheduling time.
+- **`until` semantics (LOOP-04):** timers due at `t <= until` run; nothing runs at virtual time `> until`, including during cleanup. If `main` finishes first, `run` returns its result. If `until` is reached first, `run` returns `None` (as SimPy's `env.run(until=...)` does), and other tasks are left unfinished, as documented. What happens to them during loop close is the implementer's to document and test, under the constraint that the clock never passes `until`.
+- **`seed` (LOOP-04):** `run` validates `seed` with the same rules as `RngStreams`. It makes an `RngStreams(seed)` available to the running simulation by a documented mechanism, chosen by the implementer, that LOOP-05 can build `sim.rng()` on. It does not edit `loop.py`.
+- LOOP-04 may edit `src/desyncio/__init__.py`, only to export `run`, so that `desyncio.run(...)` works.
