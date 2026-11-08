@@ -79,3 +79,6 @@ The DOC-01 reviewer rated as SHOULD that §4 still said `to_thread` and `run_in_
   It also takes the LOOP-07 SHOULD: the D006 test should use a `threading.Event` gate, with no real sleep and no wall-clock bound.
 - LOOP-05 and LOOP-11 share no files. `__init__.py` belongs to LOOP-05 only. LOOP-11 adds no export; its public names are reached via `desyncio.realtime`, and can be exported later.
 - PR #2 (`integration` → `main`) was opened at the owner's request after batch 5.
+
+## D013 — CI made manual-only (owner request)
+The owner has no GitHub Actions credits. The two runs on PR #2 failed within ~3 s without running any steps. CI-02 removes the `pull_request` trigger and keeps only `workflow_dispatch`. `scripts/gate.sh` remains the verification for every merge. LOOP-10's "runs in CI on every PR" becomes "runs in `scripts/gate.sh`". Restore the `pull_request` trigger when credits are available.
