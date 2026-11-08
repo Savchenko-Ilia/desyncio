@@ -5,7 +5,7 @@ description = "Async/await-native discrete-event simulation on a virtual-time as
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "LICENSES/*"]
 dependencies = []
 
 [build-system]

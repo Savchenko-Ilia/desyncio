@@ -1,0 +1,42 @@
+# CI is manual-only. The owner has no GitHub Actions credits, so this workflow
+# runs only when started by hand (Actions -> CI -> Run workflow). The check used
+# for every merge is scripts/gate.sh (D013). To re-enable CI on pull requests,
+# add `pull_request:` back under `on:`. Mirrors the commands in scripts/gate.env.
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Mypy
+        run: uv run mypy src
