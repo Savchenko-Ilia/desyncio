@@ -33,7 +33,9 @@ name and, if tracing is on, wraps its coroutine (section 10).
 
 `run_forever` just calls
 [`BaseEventLoop._run_once`](https://github.com/python/cpython/blob/3.13/Lib/asyncio/base_events.py)
-in a loop until `stop()` is called. One call is one *iteration*. It has five steps:
+in a loop until `stop()` is called. (That is the base class's `run_forever`;
+desyncio's override calls it unchanged and only adds re-raising the trace sink's
+error afterwards, see section 10.) One call is one *iteration*. It has five steps:
 
 ```
  _run_once()
@@ -533,7 +535,7 @@ its exception after the loop is closed. `loop.trace_error` keeps the first sink 
 
 Stock, unmodified CPython code:
 
-- `run_forever` and `_run_once` (the five steps in section 2), the `_ready` deque and
+- `_run_once` (the five steps in section 2), the `_ready` deque and
   `call_soon`, and the `_scheduled` heap with `heapq`;
 - `Task`, `Future`, `sleep`, `timeout`, `Queue`, `Lock`, `gather`, `TaskGroup`, and
   `asyncio.Runner` (which `desyncio.run` drives; it only supplies the loop).
@@ -545,7 +547,9 @@ Overridden or wrapped (our code, subclassing only):
 - `call_at` / `call_later`'s scheduling path, to key timers by `(when, priority, sequence)`;
 - the real-I/O entry points (sockets, subprocesses, executors, signals), which raise
   `RealIOError`;
-- `create_task`, for deterministic names and optional tracing.
+- `create_task`, for deterministic names and optional tracing;
+- `run_forever`, which calls the stock one and then re-raises the trace sink's error
+  if the sink stopped the loop (section 10).
 
 Adapted from CPython (PSF License, D009): about ten lines, the body of
 `BaseEventLoop.call_at` re-created in `VirtualTimeLoop._schedule` because the stock method

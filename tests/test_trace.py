@@ -593,3 +593,12 @@ def test_docs_private_attribute_table_lists_create_task() -> None:
     section = _loop_doc_section(8)
     row = next(line for line in section.splitlines() if "`loop._check_closed`" in line)
     assert "create_task" in row
+
+
+def test_docs_reuse_section_lists_run_forever_as_overridden() -> None:
+    """Section 11 must not call run_forever stock: loop.py overrides it (D011)."""
+    section = _loop_doc_section(11)
+    stock, overridden = section.split("Overridden or wrapped", 1)
+    assert "`run_forever`" not in stock
+    assert "`run_forever`" in overridden
+    assert "`_run_once`" in stock
