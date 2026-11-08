@@ -65,3 +65,17 @@ LOOP-07 is merged. `run_in_executor`, `set_default_executor` and therefore `asyn
 
 ## D011 — Lead promoted a SHOULD to MUST on DOC-01 (batch 5)
 The DOC-01 reviewer rated as SHOULD that §4 still said `to_thread` and `run_in_executor` deadlock and "LOOP-07 will refuse executors". LOOP-07 had already been merged into `integration`, so the merged doc would have stated something false, and the lead made it a MUST for fix round 1. Rule going forward: a docs claim that is false on the current `integration` is a MUST.
+
+## D012 — Batch 6 scope (owner said "go" to the lead's recommendations)
+- **`sim` shape (LOOP-05):** `from desyncio import sim`. `sim` is a module-level singleton `Sim` object whose attributes read the *running* loop on every access, the way asyncio's free functions (`asyncio.sleep`, `asyncio.create_task`) do. Outside a running `VirtualTimeLoop` it raises a clear `RuntimeError`. Nothing is passed into `main`.
+  - `sim.now` is the virtual time.
+  - `await sim.timeout(dt)` waits `dt` of virtual time.
+  - `sim.spawn(coro, name=...)` returns an `asyncio.Task`.
+  - `sim.rng(name)` builds on `runners.current_rng_streams()`.
+  - Default task names must be deterministic per run. asyncio's own `Task-N` counter is process-global, so two runs in one process would differ.
+- **LOOP-11 ownership:** besides `realtime.py` and `loop.py`, it owns:
+  - `runners.py` and `tests/test_run.py`, for the `speed` / pacer argument of `desyncio.run`;
+  - `docs/how-the-loop-works.md`, for a real-time section and any claims its loop changes make stale (D011).
+  It also takes the LOOP-07 SHOULD: the D006 test should use a `threading.Event` gate, with no real sleep and no wall-clock bound.
+- LOOP-05 and LOOP-11 share no files. `__init__.py` belongs to LOOP-05 only. LOOP-11 adds no export; its public names are reached via `desyncio.realtime`, and can be exported later.
+- PR #2 (`integration` → `main`) was opened at the owner's request after batch 5.
