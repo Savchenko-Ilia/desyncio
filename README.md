@@ -32,6 +32,11 @@ desyncio.run(main())  # ship-0 at 12, ship-1 at 24, ship-2 at 36
 - Fast-as-possible and scaled real-time modes
 - Classic DES primitives: resources, containers, stores, interrupts
 
+## Documentation
+
+- [How the loop works](docs/how-the-loop-works.md): how asyncio's `_run_once`, timer
+  heap and selector are turned into a virtual-time loop, with a traced worked example.
+
 ## License
 
 Apache-2.0
