@@ -300,3 +300,7 @@ The owner extended D042 with the two remaining audit points:
 ## D044 — Gate changes are verified after merge (lead)
 `scripts/gate.sh` sources `scripts/gate.env` from the main checkout, not from the branch it tests. So a branch that changes `gate.env` passes the gate under the *old* commands. For TST-05 the lead merged on the reviewer's manual run of the new command on the merged tree, then ran `scripts/gate.sh origin/integration`, which used the new `mypy src tests`: GATE PASS. Until `gate.sh` is fixed (a SHOULD), any gate change is verified this way: run it by hand on the merged tree, merge, then gate `integration`.
 
+
+## D045 — Batch 19: the SHOULD clean-ups; monitor errors outside a loop are logged (lead, the owner may revise)
+The owner said "go" with Module 3 still undefined, so the lead ran the defined work: the four SHOULD clean-ups from the batch 18 handoff, as CLN-06..08. Module 3 still waits for the owner.
+For CLN-07, a monitor that raises when there is no running loop (e.g. `Store.shutdown(immediate=True)` called outside a simulation) is logged at ERROR on the `desyncio` logger with the traceback, the way asyncio's default exception handler logs (to its `asyncio` logger). The operation still completes. Inside a loop nothing changes: `call_exception_handler` as in D023 v2.

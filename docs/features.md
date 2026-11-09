@@ -114,3 +114,14 @@ Source: `docs/test-audit.md`. Common rules:
 16. TST-01, TST-02, TST-03, TST-04
 17. TST-06 (after batch 16: it touches TST-01..03 files)
 18. TST-05 (last, so mypy checks the final tests)
+
+# Clean-up follow-ups (D045)
+
+| ID | Feature | Acceptance criteria | Owns files | Depends on | Status |
+|----|---------|---------------------|------------|------------|--------|
+| CLN-06 | Gate reads gate.env from the tested tree | `scripts/gate.sh` sources `scripts/gate.env` from the worktree under test (after checkout), so a branch that changes its gate commands is gated by its own commands (closes D044's SHOULD). If the tested tree has no `scripts/gate.env`, it falls back to the main checkout's, then to the built-in defaults. Behaviour is otherwise unchanged (exit 2 on failure, `GATE PASS (<branch>)` on success). Proof in NOTES: on a throwaway local branch whose `gate.env` sets a failing `TEST_CMD` (e.g. `false`), the new gate prints `GATE FAIL` and the old one `GATE PASS`. The throwaway branch is deleted and never pushed. | `scripts/gate.sh` | — | in_progress |
+| CLN-07 | Raising monitor outside a running loop | One private helper in a new `src/desyncio/_monitor.py` reports a monitor's `Exception`: inside a running loop it calls `loop.call_exception_handler(context)` exactly as today (same context keys and messages); with no running loop it logs the same message at ERROR level on `logging.getLogger("desyncio")` with `exc_info` (D045), instead of raising `RuntimeError: no running event loop`. Resource/PriorityResource, Container and the three stores use the helper (principle 6: no other behaviour change). Tests: a raising monitor on `Store.shutdown(immediate=True)` and `PriorityStore.shutdown(immediate=True)` called outside any loop completes the shutdown (`items` empty), raises nothing, and the error is in `caplog`. Existing tests pass unmodified. | `src/desyncio/_monitor.py` (new), `src/desyncio/resource.py`, `src/desyncio/container.py`, `src/desyncio/store.py` (monitor-reporting code only), `tests/test_store.py` | — | in_progress |
+| CLN-08 | Relative-import guard; late-interrupt docstring | `tests/test_import.py`: the AST guard also rejects `from . import X` (`level >= 1 and module is None`) inside `src/desyncio/`; prove by temporary mutation (add `from . import sim` to a submodule, see the test fail, revert). `src/desyncio/interrupt.py` (docstring only): the late-interrupt bullet adds one clause saying that with a non-eager task the late `interrupt()` raises `RuntimeError` ("not inside ...") because the block has already closed. | `tests/test_import.py`, `src/desyncio/interrupt.py` (docstring only) | — | in_progress |
+
+## Suggested batches (clean-up follow-ups)
+19. CLN-06, CLN-07, CLN-08
