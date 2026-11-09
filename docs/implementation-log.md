@@ -1204,3 +1204,18 @@ Branch: feat/STA-03  ·  Merged: 44649b1
 **Gotchas.** `min`/`max` include the value holding at the warm-up instant only if it is held for some time: a record exactly at `t` replaces it.
 
 **Follow-ups (SHOULD).** `Tally.quantile(b"x")` raises `ValueError` (bytes is a Sequence of ints), where `TimeSeries.quantile` raises `TypeError`; reject `bytes`/`bytearray` too.
+
+## STA-06 — Exports and statistics guide (2026-11-09, batch 23)
+Branch: feat/STA-06 (+ fix/STA-06-1)  ·  Merged: 34ebdec
+
+**Approach.** `__init__.py` imports `Tally`, `replicate` and `confidence_interval` directly: the stats modules already import numpy/scipy inside their functions, so `import desyncio` stays numpy-free without a module `__getattr__`, and the names stay visible to mypy and IDEs. README "Public API" lists them plus `sim.np_random`, and links the new guide. `docs/statistics.md` has five executed examples on one M/M/1 model (λ=0.8, μ=1): Tally of waits, TimeSeries of the number in system, warm-up, 20 replications with a 95% interval, and `sim.np_random` inputs (`rng.poisson`, an empirical distribution via `numpy.quantile`, `scipy.stats.truncnorm` with `random_state=rng`). `tests/test_docs_examples.py` now runs a `GUIDES` table (primitives, statistics), with the fence checks, determinism and output checks applied to both. 615 → 627 tests, about 14 s.
+
+**asyncio internals.** None new.
+
+**Trade-offs.** Short runs keep the guide under about 2 s per pass, at the cost of visibly noisy numbers; the prose says so.
+
+**Review findings.** Round 1, two MUSTs in the guide's prose: (1) it said `TimeSeries.mean` uses `numpy.average`; it is desyncio's own running integral, and `time_fractions` uses `math.fsum`. (2) The replications example printed "contains the true value 4", but the estimand (mean wait after a time-50 warm-up in a 500-customer empty-start run) is biased low (about 3.83 over 400 replications). The output now prints the interval, and the prose explains the estimand. Also fixed: empty start as a bias, population vs sample variance, the time-fraction gap, histogram wording. Mutations (a `Python` fence, a changed number, a removed `text` block) all fail the docs tests.
+
+**Gotchas.** `ruff format` also formats the guide's code blocks, so the gate's format check covers them. `Tally(warmup=50)` is a time threshold, not a customer count.
+
+**Follow-ups (SHOULD).** The Tally section calls an empty-start run "one sample" of the long-run mean 4; say it is noisy and slightly low (reviewer's wording is in the review report: "A short run is noisy, and because it starts empty it is also biased a little low...").
