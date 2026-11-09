@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 23. **Module 3 (statistics) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`, batches 19–23) is open. Module 4 (calendar/shifts, D051 confirmed) is in progress: batch 24 (CAL-01). Per D049, batches run back to back until the module ends._
+_Last updated: 2026-11-09, end of batch 23. **Module 3 (statistics) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`, batches 19–23) is open. Module 4 (calendar/shifts, D051 confirmed) is in progress: CAL-01 merged (1 fix round); batch 25 (CAL-02). Per D049, batches run back to back until the module ends._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -84,7 +84,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - Guide for users: `docs/statistics.md`. Per-feature details and SHOULDs: `docs/implementation-log.md`.
 
 ## Next batches
-1. **Module 4: calendar/shifts** (D051): CAL-01..04, batches 24–27, sequential. D051's defaults are confirmed. In flight: `feat/CAL-01`.
+1. **Module 4: calendar/shifts** (D051): CAL-01..04, batches 24–27, sequential. D051's defaults are confirmed. CAL-01 merged. In flight: `feat/CAL-02`.
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.

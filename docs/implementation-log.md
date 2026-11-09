@@ -1219,3 +1219,18 @@ Branch: feat/STA-06 (+ fix/STA-06-1)  ·  Merged: 34ebdec
 **Gotchas.** `ruff format` also formats the guide's code blocks, so the gate's format check covers them. `Tally(warmup=50)` is a time threshold, not a customer count.
 
 **Follow-ups (SHOULD).** The Tally section calls an empty-start run "one sample" of the long-run mean 4; say it is noisy and slightly low (reviewer's wording is in the review report: "A short run is noisy, and because it starts empty it is also biased a little low...").
+
+## CAL-01 — Calendar: sim time ↔ dates (2026-11-09, batch 24)
+Branch: feat/CAL-01 (+ fix/CAL-01-1)  ·  Merged: cfcc09c
+
+**Approach.** New `src/desyncio/dates.py` (named so it cannot shadow the stdlib `calendar`). `Calendar(start, *, unit=timedelta(seconds=1))` keeps `start` and `start` in UTC. `to_datetime(t)` is `start_utc + t * unit`, then `astimezone(start.tzinfo)`; `to_sim(dt)` is `(dt.astimezone(UTC) - start_utc) / unit`; `now()` is `to_datetime(sim.now)`. Out-of-range dates raise `ValueError` both ways.
+
+**asyncio internals.** None; `now()` reads `sim.now`.
+
+**Trade-offs.** Conversion in UTC, so sim time is elapsed real time and a DST change only changes the displayed wall clock.
+
+**Review findings.** Round 1 (D052, promoted SHOULDs): the round-trip tolerance allowed 3.6 ms for an hour unit instead of 1 µs (now `1e-6 / unit + ulp(t)`; a millisecond-rounding mutation for units ≥ 60 s now fails), and `to_sim` leaked `OverflowError`.
+
+**Gotchas.** Aware subtraction of two datetimes that share one `tzinfo` compares wall clocks and ignores a DST offset change; `to_sim` converts both sides to UTC explicitly, and a test (July vs a January start) pins it. Python's `==` between different zones is False inside a DST fold, so the hypothesis test compares in UTC.
+
+**Follow-ups.** None.
