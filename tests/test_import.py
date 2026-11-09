@@ -32,6 +32,11 @@ EXPORTS: dict[str, str | None] = {
     "RealIOError": "guards",
     "SimulationDeadlock": "loop",
     "RealTimePacer": "realtime",
+    "Calendar": "dates",
+    "Shift": "schedule",
+    "Schedule": "schedule",
+    "ScheduledResource": "scheduled",
+    "ShiftEnded": "scheduled",
 }
 
 SUBMODULES = sorted(
