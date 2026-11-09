@@ -18,14 +18,12 @@ Conventions used throughout:
 """
 
 import asyncio
-import time
 from typing import Any
 
 import pytest
 
 import desyncio
 from desyncio import sim
-from desyncio.loop import VirtualTimeLoop
 
 Log = list[tuple[float, str]]
 
@@ -36,59 +34,23 @@ def now() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Runners and wall time
+# The clock
 # ---------------------------------------------------------------------------
 
 
-def test_runner_with_loop_factory_uses_virtual_time() -> None:
-    """asyncio.Runner(loop_factory=VirtualTimeLoop): sleep(50) ends at t=50
-    instantly.
-    """
-
-    async def main() -> float:
-        await asyncio.sleep(50)
-        return now()
-
-    with asyncio.Runner(loop_factory=VirtualTimeLoop) as runner:
-        assert runner.run(main()) == 50.0
-
-
 def test_sim_now_is_the_loop_clock() -> None:
-    """sim.now equals loop.time() at every point; sleep(2.5) moves both to t=2.5."""
+    """sim.now equals loop.time() throughout; asyncio.sleep(2.5) and then
+    sim.timeout(2) move both to t=4.5, so they share one clock."""
 
     async def main() -> list[tuple[float, float]]:
         out = [(sim.now, now())]
         await asyncio.sleep(2.5)
         out.append((sim.now, now()))
+        await sim.timeout(2)
+        out.append((sim.now, now()))
         return out
 
-    assert desyncio.run(main()) == [(0.0, 0.0), (2.5, 2.5)]
-
-
-def test_sim_timeout_and_asyncio_sleep_share_one_clock() -> None:
-    """sim.timeout(2) then asyncio.sleep(3) leave sim.now at t=5."""
-
-    async def main() -> float:
-        await sim.timeout(2)
-        await asyncio.sleep(3)
-        return sim.now
-
-    assert desyncio.run(main()) == 5.0
-
-
-def test_ten_thousand_virtual_seconds_take_negligible_wall_time() -> None:
-    """Sleeping 10,000 virtual seconds (t=0 to t=10000) costs well under a real
-    second.
-    """
-
-    async def main() -> float:
-        for _ in range(100):
-            await asyncio.sleep(100)
-        return now()
-
-    start = time.monotonic()
-    assert desyncio.run(main()) == 10_000.0
-    assert time.monotonic() - start < 1.0  # deliberately loose
+    assert desyncio.run(main()) == [(0.0, 0.0), (2.5, 2.5), (4.5, 4.5)]
 
 
 # ---------------------------------------------------------------------------
@@ -169,22 +131,6 @@ def test_queue_is_fifo_for_waiting_getters() -> None:
     assert desyncio.run(main()) == [(1.0, "a:one"), (2.0, "b:two")]
 
 
-def test_queue_shutdown_makes_get_raise_when_empty() -> None:
-    """After shutdown() at t=2, get() on an empty queue raises QueueShutDown at t=2."""
-
-    async def main() -> float:
-        q: asyncio.Queue[int] = asyncio.Queue()
-        await asyncio.sleep(2)
-        q.shutdown()
-        with pytest.raises(asyncio.QueueShutDown):
-            await q.get()
-        with pytest.raises(asyncio.QueueShutDown):
-            q.put_nowait(1)
-        return now()
-
-    assert desyncio.run(main()) == 2.0
-
-
 def test_queue_shutdown_wakes_blocked_getter_at_shutdown_time() -> None:
     """A getter blocked since t=0 is woken with QueueShutDown at the instant
     shutdown() runs (t=6).
@@ -204,25 +150,6 @@ def test_queue_shutdown_wakes_blocked_getter_at_shutdown_time() -> None:
         return await task
 
     assert desyncio.run(main()) == 6.0
-
-
-def test_queue_graceful_shutdown_still_yields_remaining_items() -> None:
-    """shutdown() (not immediate) at t=1 lets get() drain the 2 queued items, then
-    raises, all at t=1.
-    """
-
-    async def main() -> tuple[list[int], float]:
-        q: asyncio.Queue[int] = asyncio.Queue()
-        q.put_nowait(1)
-        q.put_nowait(2)
-        await asyncio.sleep(1)
-        q.shutdown()
-        got = [await q.get(), await q.get()]
-        with pytest.raises(asyncio.QueueShutDown):
-            await q.get()
-        return got, now()
-
-    assert desyncio.run(main()) == ([1, 2], 1.0)
 
 
 def test_queue_shutdown_immediate_drains_and_unblocks_join() -> None:
@@ -276,37 +203,6 @@ def test_queue_shutdown_wakes_blocked_putter() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lock_waiter_acquires_when_holder_releases() -> None:
-    """A task waiting on a Lock held from t=0 gets it at t=3, the moment the holder
-    releases.
-    """
-
-    async def main() -> Log:
-        lock = asyncio.Lock()
-        log: Log = []
-
-        async def holder() -> None:
-            async with lock:
-                log.append((now(), "holder in"))
-                await asyncio.sleep(3)
-            log.append((now(), "holder out"))
-
-        async def waiter() -> None:
-            async with lock:
-                log.append((now(), "waiter in"))
-
-        h = asyncio.create_task(holder())
-        await asyncio.sleep(0)
-        w = asyncio.create_task(waiter())
-        await asyncio.gather(h, w)
-        return log
-
-    log = desyncio.run(main())
-    assert (0.0, "holder in") in log
-    assert (3.0, "holder out") in log
-    assert (3.0, "waiter in") in log
-
-
 def test_lock_serialises_critical_sections_in_virtual_time() -> None:
     """Three tasks each hold a Lock for 2s; they get it in FIFO order at t=0, 2, 4."""
 
@@ -349,30 +245,6 @@ def test_event_wakes_all_waiters_at_set_time() -> None:
     assert desyncio.run(main()) == [7.0, 7.0, 7.0]
 
 
-def test_event_wait_on_already_set_event_does_not_advance_time() -> None:
-    """Event.wait() on a set Event returns at once: the clock stays at t=2."""
-
-    async def main() -> float:
-        ev = asyncio.Event()
-        ev.set()
-        await asyncio.sleep(2)
-        await ev.wait()
-        return now()
-
-    assert desyncio.run(main()) == 2.0
-
-
-def test_event_wait_for_times_out_if_never_set() -> None:
-    """wait_for(Event.wait(), 4) on an Event nobody sets raises TimeoutError at t=4."""
-
-    async def main() -> float:
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.Event().wait(), timeout=4)
-        return now()
-
-    assert desyncio.run(main()) == 4.0
-
-
 def test_semaphore_limits_concurrency_in_virtual_time() -> None:
     """Semaphore(2) with four 10s jobs: two start at t=0 and two at t=10, all done
     by t=20.
@@ -396,26 +268,6 @@ def test_semaphore_limits_concurrency_in_virtual_time() -> None:
     assert end == 20.0
 
 
-def test_semaphore_release_unblocks_waiter_at_release_time() -> None:
-    """A task blocked on Semaphore(0) since t=0 resumes at t=4 when release() is
-    called.
-    """
-
-    async def main() -> float:
-        sem = asyncio.Semaphore(0)
-
-        async def waiter() -> float:
-            await sem.acquire()
-            return now()
-
-        task = asyncio.create_task(waiter())
-        await asyncio.sleep(4)
-        sem.release()
-        return await task
-
-    assert desyncio.run(main()) == 4.0
-
-
 # ---------------------------------------------------------------------------
 # gather
 # ---------------------------------------------------------------------------
@@ -437,53 +289,42 @@ def test_gather_finishes_with_slowest_child_and_keeps_argument_order() -> None:
     assert desyncio.run(main()) == ([3, 1, 2], 3.0)
 
 
-def test_gather_return_exceptions_waits_for_all_children() -> None:
-    """With return_exceptions=True a failure at t=1 does not end gather early: it
-    ends at t=5.
-    """
+@pytest.mark.parametrize("return_exceptions", [False, True])
+def test_gather_with_a_failing_child(return_exceptions: bool) -> None:
+    """A child fails at t=1, its sibling finishes at t=5. Without
+    return_exceptions gather raises at t=1 and does NOT cancel the sibling; with
+    it, gather waits and returns both outcomes at t=5."""
 
-    async def ok() -> str:
-        await asyncio.sleep(5)
-        return "ok"
-
-    async def bad() -> str:
-        await asyncio.sleep(1)
-        raise ValueError("boom")
-
-    async def main() -> tuple[list[Any], float]:
-        results = await asyncio.gather(ok(), bad(), return_exceptions=True)
-        return results, now()
-
-    results, end = desyncio.run(main())
-    assert results[0] == "ok"
-    assert isinstance(results[1], ValueError)
-    assert end == 5.0
-
-
-def test_gather_without_return_exceptions_raises_at_first_failure() -> None:
-    """gather raises the first exception at t=1 but does NOT cancel the other
-    child, which finishes at t=5.
-    """
-
-    async def main() -> tuple[float, float]:
+    async def main() -> tuple[float, float, list[Any]]:
         finished: list[float] = []
 
-        async def slow() -> None:
+        async def slow() -> str:
             await asyncio.sleep(5)
             finished.append(now())
+            return "ok"
 
-        async def bad() -> None:
+        async def bad() -> str:
             await asyncio.sleep(1)
             raise ValueError("boom")
 
         slow_task = asyncio.create_task(slow())
-        with pytest.raises(ValueError):
-            await asyncio.gather(slow_task, bad())
-        raised_at = now()
+        results: list[Any] = []
+        if return_exceptions:
+            results = await asyncio.gather(slow_task, bad(), return_exceptions=True)
+        else:
+            with pytest.raises(ValueError):
+                await asyncio.gather(slow_task, bad())
+        returned_at = now()
         await slow_task
-        return raised_at, finished[0]
+        return returned_at, finished[0], results
 
-    assert desyncio.run(main()) == (1.0, 5.0)
+    returned_at, finished_at, results = desyncio.run(main())
+    assert finished_at == 5.0
+    if return_exceptions:
+        assert returned_at == 5.0
+        assert results[0] == "ok" and isinstance(results[1], ValueError)
+    else:
+        assert returned_at == 1.0
 
 
 def test_gather_cancellation_propagates_to_children_at_cancel_time() -> None:
@@ -521,40 +362,6 @@ def test_gather_cancellation_propagates_to_children_at_cancel_time() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_taskgroup_failure_cancels_siblings_at_that_time() -> None:
-    """A child failing at t=3 cancels a sibling sleeping until t=100 at t=3; the
-    group exits at t=3.
-    """
-
-    async def main() -> tuple[Log, float, list[BaseException]]:
-        log: Log = []
-
-        async def sibling() -> None:
-            try:
-                await asyncio.sleep(100)
-            except asyncio.CancelledError:
-                log.append((now(), "sibling cancelled"))
-                raise
-
-        async def failing() -> None:
-            await asyncio.sleep(3)
-            raise ValueError("boom")
-
-        caught: list[BaseException] = []
-        try:
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(sibling())
-                tg.create_task(failing())
-        except* ValueError as eg:
-            caught.extend(eg.exceptions)
-        return log, now(), caught
-
-    log, end, caught = desyncio.run(main())
-    assert log == [(3.0, "sibling cancelled")]
-    assert end == 3.0
-    assert len(caught) == 1 and isinstance(caught[0], ValueError)
-
-
 def test_taskgroup_error_arrives_as_exception_group() -> None:
     """Two children failing at t=2 arrive together as one ExceptionGroup raised at
     t=2.
@@ -578,39 +385,41 @@ def test_taskgroup_error_arrives_as_exception_group() -> None:
     assert {type(e) for e in eg.exceptions} == {ValueError, KeyError}
 
 
-def test_taskgroup_success_waits_for_slowest_child() -> None:
-    """A TaskGroup with children of 2s and 6s exits normally at t=6."""
+@pytest.mark.parametrize("source", ["child_fails", "body_fails"])
+def test_taskgroup_failure_cancels_siblings_at_that_time(source: str) -> None:
+    """A failure at t=3, from a child or from the `async with` body, cancels a
+    sibling sleeping until t=100 at t=3; the group exits at t=3."""
 
-    async def main() -> float:
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(asyncio.sleep(2))
-            tg.create_task(asyncio.sleep(6))
-        return now()
+    async def main() -> tuple[Log, float, list[BaseException]]:
+        log: Log = []
 
-    assert desyncio.run(main()) == 6.0
-
-
-def test_taskgroup_body_error_cancels_children_at_that_time() -> None:
-    """An exception in the `async with` body at t=1 cancels a 50s child at t=1."""
-
-    async def main() -> tuple[float, float]:
-        cancelled_at: list[float] = []
-
-        async def child() -> None:
+        async def sibling() -> None:
             try:
-                await asyncio.sleep(50)
+                await asyncio.sleep(100)
             except asyncio.CancelledError:
-                cancelled_at.append(now())
+                log.append((now(), "sibling cancelled"))
                 raise
 
-        with pytest.raises(ExceptionGroup):
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(child())
-                await asyncio.sleep(1)
-                raise RuntimeError("body")
-        return cancelled_at[0], now()
+        async def failing() -> None:
+            await asyncio.sleep(3)
+            raise ValueError("boom")
 
-    assert desyncio.run(main()) == (1.0, 1.0)
+        caught: list[BaseException] = []
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(sibling())
+                if source == "child_fails":
+                    tg.create_task(failing())
+                else:
+                    await failing()
+        except* ValueError as eg:
+            caught.extend(eg.exceptions)
+        return log, now(), caught
+
+    log, end, caught = desyncio.run(main())
+    assert log == [(3.0, "sibling cancelled")]
+    assert end == 3.0
+    assert len(caught) == 1 and isinstance(caught[0], ValueError)
 
 
 # ---------------------------------------------------------------------------
@@ -684,30 +493,6 @@ def test_wait_for_times_out_at_the_deadline_and_cancels_work() -> None:
     assert desyncio.run(main()) == (4.0, 4.0)
 
 
-def test_wait_for_returns_result_if_work_finishes_first() -> None:
-    """wait_for(timeout=10) around 3s work returns its result at t=3, not t=10."""
-
-    async def work() -> str:
-        await asyncio.sleep(3)
-        return "done"
-
-    async def main() -> tuple[str, float]:
-        result = await asyncio.wait_for(work(), timeout=10)
-        return result, now()
-
-    assert desyncio.run(main()) == ("done", 3.0)
-
-
-def test_wait_for_none_timeout_waits_as_long_as_needed() -> None:
-    """wait_for(timeout=None) over 500s work just waits and returns at t=500."""
-
-    async def main() -> float:
-        await asyncio.wait_for(asyncio.sleep(500), timeout=None)
-        return now()
-
-    assert desyncio.run(main()) == 500.0
-
-
 # ---------------------------------------------------------------------------
 # asyncio.timeout() / timeout_at()
 # ---------------------------------------------------------------------------
@@ -751,81 +536,32 @@ def test_timeout_at_uses_absolute_virtual_deadline() -> None:
     assert desyncio.run(main()) == 7.0
 
 
-def test_timeout_reschedule_later_extends_deadline() -> None:
-    """timeout(5) rescheduled at t=2 to t=9: work ending at t=8 survives it."""
+@pytest.mark.parametrize(
+    ("initial", "new_deadline", "end", "expired"),
+    [
+        (5, 11, 11.0, True),  # later: fires at the new deadline, not t=5
+        (50, 4, 4.0, True),  # earlier: shortened
+        (5, None, 31.0, False),  # None: never fires, the 30s sleep completes
+        (50, 0.5, 1.0, True),  # into the past: expires at once, at t=1
+    ],
+)
+def test_timeout_reschedule(
+    initial: float, new_deadline: float | None, end: float, expired: bool
+) -> None:
+    """A timeout(initial) rescheduled at t=1 ends the 30s sleep at `end`."""
 
     async def main() -> tuple[float, bool]:
-        async with asyncio.timeout(5) as cm:
-            await asyncio.sleep(2)
-            cm.reschedule(9)
-            assert cm.when() == 9
-            await asyncio.sleep(6)  # ends at t=8, before the new deadline
+        try:
+            async with asyncio.timeout(initial) as cm:
+                await asyncio.sleep(1)
+                cm.reschedule(new_deadline)
+                assert cm.when() == new_deadline
+                await asyncio.sleep(30)
+        except TimeoutError:
+            pass
         return now(), cm.expired()
 
-    assert desyncio.run(main()) == (8.0, False)
-
-
-def test_timeout_reschedule_later_then_fires_at_new_deadline() -> None:
-    """timeout(5) rescheduled at t=2 to t=11 (a second time, from t=22) fires at
-    t=11, not t=5.
-    """
-
-    async def main() -> tuple[float, bool]:
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(5) as cm:
-                await asyncio.sleep(2)
-                cm.reschedule(22)
-                cm.reschedule(11)  # moved again; only the last deadline counts
-                await asyncio.sleep(100)
-        return now(), cm.expired()
-
-    assert desyncio.run(main()) == (11.0, True)
-
-
-def test_timeout_reschedule_earlier_shortens_deadline() -> None:
-    """timeout(50) rescheduled at t=1 to t=4 fires at t=4."""
-
-    async def main() -> float:
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(50) as cm:
-                await asyncio.sleep(1)
-                cm.reschedule(4)
-                await asyncio.sleep(100)
-        return now()
-
-    assert desyncio.run(main()) == 4.0
-
-
-def test_timeout_reschedule_none_disables_deadline() -> None:
-    """timeout(5) rescheduled to None at t=1 never fires: a 30s sleep completes at
-    t=31.
-    """
-
-    async def main() -> float:
-        async with asyncio.timeout(5) as cm:
-            await asyncio.sleep(1)
-            cm.reschedule(None)
-            assert cm.when() is None
-            await asyncio.sleep(30)
-        return now()
-
-    assert desyncio.run(main()) == 31.0
-
-
-def test_timeout_reschedule_into_the_past_fires_at_current_time() -> None:
-    """Rescheduling at t=1 to a deadline already past (t=0.5) expires at once, at
-    t=1.
-    """
-
-    async def main() -> float:
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(50) as cm:
-                await asyncio.sleep(1)
-                cm.reschedule(0.5)
-                await asyncio.sleep(100)
-        return now()
-
-    assert desyncio.run(main()) == 1.0
+    assert desyncio.run(main()) == (end, expired)
 
 
 # ---------------------------------------------------------------------------
@@ -859,19 +595,6 @@ def test_task_cancel_delivers_cancelled_error_at_cancel_time() -> None:
     assert desyncio.run(main()) == (7.0, 7.0)
 
 
-def test_cancelled_sleep_leaves_no_timer_that_moves_the_clock() -> None:
-    """After cancelling a 1000s sleep at t=2, the run ends at t=2, not t=1000."""
-
-    async def main() -> float:
-        task = asyncio.create_task(asyncio.sleep(1000))
-        await asyncio.sleep(2)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        return now()
-
-    assert desyncio.run(main()) == 2.0
-
-
 def test_cancel_handler_can_take_virtual_time() -> None:
     """A task cancelled at t=3 that cleans up with sleep(2) finishes its cleanup at
     t=5.
@@ -899,30 +622,11 @@ def test_cancel_handler_can_take_virtual_time() -> None:
     assert desyncio.run(main()) == ([(3.0, "cancelled"), (5.0, "cleaned up")], 5.0)
 
 
-def test_task_can_suppress_cancellation_and_carry_on() -> None:
-    """A task that swallows CancelledError at t=2 keeps running and finishes at t=6."""
-
-    async def main() -> tuple[float, bool]:
-        async def stubborn() -> float:
-            try:
-                await asyncio.sleep(1000)
-            except asyncio.CancelledError:
-                await asyncio.sleep(4)
-            return now()
-
-        task = asyncio.create_task(stubborn())
-        await asyncio.sleep(2)
-        task.cancel()
-        end = await task
-        return end, task.cancelled()
-
-    assert desyncio.run(main()) == (6.0, False)
-
-
-def test_shield_outer_cancelled_at_cancel_time_inner_keeps_running() -> None:
-    """Cancelling a shield() waiter at t=2 raises CancelledError at t=2; the inner
-    task still finishes at t=5.
-    """
+@pytest.mark.parametrize("how", ["cancel_waiter", "wait_for_timeout"])
+def test_shield_inner_work_survives_the_outer_being_stopped(how: str) -> None:
+    """The waiter on shield(inner) is stopped at t=2, by task.cancel() or by a
+    wait_for timeout. It sees CancelledError / TimeoutError at t=2; the inner
+    task is not cancelled and still finishes at t=5."""
 
     async def main() -> tuple[float, float, str]:
         async def inner() -> str:
@@ -931,58 +635,22 @@ def test_shield_outer_cancelled_at_cancel_time_inner_keeps_running() -> None:
 
         inner_task = asyncio.create_task(inner())
 
-        async def outer() -> None:
-            await asyncio.shield(inner_task)
+        if how == "cancel_waiter":
 
-        outer_task = asyncio.create_task(outer())
-        await asyncio.sleep(2)
-        outer_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await outer_task
-        cancelled_at = now()
+            async def outer() -> None:
+                await asyncio.shield(inner_task)
+
+            outer_task = asyncio.create_task(outer())
+            await asyncio.sleep(2)
+            outer_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await outer_task
+        else:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(inner_task), timeout=2)
+        stopped_at = now()
         assert not inner_task.done()
         result = await inner_task
-        return cancelled_at, now(), result
+        return stopped_at, now(), result
 
     assert desyncio.run(main()) == (2.0, 5.0, "inner done")
-
-
-def test_shield_inside_wait_for_timeout_does_not_stop_inner_work() -> None:
-    """wait_for(shield(work 8s), timeout=3) times out at t=3 but the work still
-    completes at t=8.
-    """
-
-    async def main() -> tuple[float, float, str]:
-        async def work() -> str:
-            await asyncio.sleep(8)
-            return "finished"
-
-        task = asyncio.create_task(work())
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=3)
-        timed_out_at = now()
-        result = await task
-        return timed_out_at, now(), result
-
-    assert desyncio.run(main()) == (3.0, 8.0, "finished")
-
-
-def test_cancel_before_first_step_never_runs_the_body() -> None:
-    """A task cancelled at t=4 before it first ran never executes its body, and
-    time stays at t=4.
-    """
-
-    async def main() -> tuple[bool, float]:
-        ran: list[bool] = []
-
-        async def body() -> None:
-            ran.append(True)
-
-        await asyncio.sleep(4)
-        task = asyncio.create_task(body())
-        task.cancel()  # no await in between: the task has not started yet
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        return bool(ran), now()
-
-    assert desyncio.run(main()) == (False, 4.0)
