@@ -7,6 +7,7 @@ import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
+from desyncio._validate import to_float
 from desyncio.clock import VirtualClock
 from desyncio.realtime import _check_speed
 from desyncio.runners import _check_until
@@ -152,8 +153,6 @@ def _helper_kwargs() -> dict[str, str]:
 
 
 def test_helper_options() -> None:
-    from desyncio._validate import to_float
-
     # Without finite_error, inf and nan pass through; without normalise_zero,
     # -0.0 keeps its sign.
     assert to_float(math.inf, **_helper_kwargs()) == math.inf
