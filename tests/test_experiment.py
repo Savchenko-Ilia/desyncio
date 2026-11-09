@@ -1,7 +1,7 @@
 import asyncio
 import random
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, assert_type
 
 import pytest
 
@@ -28,6 +28,19 @@ def test_replicate_is_deterministic_and_seeds_are_distinct() -> None:
 
 def test_replicate_passes_until_through() -> None:
     assert replicate(_model, 2, until=0.5) == [None, None]
+
+
+def test_replicate_overload_types() -> None:
+    # Checked by mypy (the gate runs mypy on tests): with ``until`` a run may
+    # return None, so the list type must say so; without it, it must not.
+    async def main() -> int:
+        return 1
+
+    x: list[int | None] = replicate(main, 2, until=1.0)
+    y: list[int] = replicate(main, 2)
+    assert_type(replicate(main, 2, until=1.0), list[int | None])
+    assert_type(replicate(main, 2), list[int])
+    assert x == [1, 1] and y == [1, 1]
 
 
 def test_replicate_validation() -> None:
