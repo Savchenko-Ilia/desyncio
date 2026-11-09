@@ -8,7 +8,7 @@ _Last updated: 2026-11-09, end of batch 19. The SHOULD clean-ups (CLN-06..08, D0
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
   `claude/setup-batch-1-5bb5vp` mirrors it; fast-forward it after each push.
-- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) is open for the owner. It covered batches 14–18 and was **merged** on 2026-11-09. Batch 19 (CLN-06..08) is on `integration` only and needs a new PR when the owner asks for one.
+- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) covered batches 14–18 and was **merged** on 2026-11-09. Batch 19 (CLN-06..08) is on `integration` only and needs a new PR when the owner asks for one.
   PR #3 was merged at `74c88b7` (end of batch 13). Only the owner merges into `main`.
   **Lesson:** after the owner merges a PR, the next batch's work needs a new PR. Check `list_pull_requests` before telling the owner that an open PR already contains it.
 - **CI is manual-only (D013)**: there are no GitHub Actions credits, so `scripts/gate.sh <branch>` is the check for every merge.
