@@ -93,9 +93,7 @@ from typing import Any, Self
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
 
 
-def _call_monitor(
-    primitive: object, monitor: Callable[[Any], object] | None
-) -> None:
+def _call_monitor(primitive: object, monitor: Callable[[Any], object] | None) -> None:
     """Call ``monitor(primitive)`` once state is settled (D023 v2), shared by
     ``Resource`` and ``PriorityResource``.
 
@@ -116,7 +114,6 @@ def _call_monitor(
                 "resource": primitive,
             }
         )
-
 
 
 class Resource:
@@ -385,9 +382,7 @@ class PriorityResource:
             self._unit_assigned(ticket)
             fut.set_result(None)  # the waiter resumes at its next turn
 
-    async def _acquire(
-        self, priority: float, ticket: "_Ticket | None" = None
-    ) -> None:
+    async def _acquire(self, priority: float, ticket: "_Ticket | None" = None) -> None:
         key = (priority, next(self._seq))
         if ticket is not None:
             ticket.seq = key[1]
@@ -641,9 +636,7 @@ class PreemptiveResource(PriorityResource):
         # Plain ``async with res:`` per task, innermost last.
         self._plain: dict[asyncio.Task[Any], list[PreemptiveRequest]] = {}
 
-    def request(
-        self, priority: float = 0, preempt: bool = True
-    ) -> PreemptiveRequest:
+    def request(self, priority: float = 0, preempt: bool = True) -> PreemptiveRequest:
         """Return a request to use as ``async with res.request(priority=p):``."""
         if not isinstance(preempt, bool):
             raise TypeError(f"preempt must be a bool, got {type(preempt).__name__}")
