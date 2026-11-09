@@ -531,14 +531,14 @@ def _model() -> Any:
         log: list[tuple[float, str, int]] = []
 
         async def producer(pid: int) -> None:
-            rng = sim.rng(f"prod{pid}")
+            rng = sim.random(f"prod{pid}")
             for k in range(20):
                 await sim.timeout(rng.expovariate(1.0))
                 await s.put(pid * 100 + k)
                 log.append((sim.now, "put", pid * 100 + k))
 
         async def consumer(cid: int) -> None:
-            rng = sim.rng(f"cons{cid}")
+            rng = sim.random(f"cons{cid}")
             for _ in range(20):
                 item = await s.get()
                 log.append((sim.now, f"get{cid}", item))

@@ -232,8 +232,8 @@ async def _mm1_with_resource(
     n_customers: int = 300, arrival_rate: float = 0.9, service_rate: float = 1.0
 ) -> list[CustomerRecord]:
     """Same model as tests/models/mm1.py, but the server is a Resource."""
-    arrivals = sim.rng("arrivals")
-    service = sim.rng("service")
+    arrivals = sim.random("arrivals")
+    service = sim.random("service")
     server = Resource(1)
     records: list[CustomerRecord | None] = [None] * n_customers
 
@@ -262,7 +262,7 @@ def test_mm1_matches_lock_reference() -> None:
 def test_determinism() -> None:
     async def main() -> list[tuple[float, str, int, int]]:
         res = Resource(2)
-        rng = sim.rng("x")
+        rng = sim.random("x")
         trace: list[tuple[float, str, int, int]] = []
 
         async def user(name: str) -> None:

@@ -44,15 +44,15 @@ loop. Because jumps happen only when idle, every callback and timer due at
 
 Seeds
 -----
-``run`` builds an :class:`~desyncio.rng.RngStreams` and stores it in a
+``run`` builds an :class:`~desyncio.randomness.RandomStreams` and stores it in a
 ``contextvars.ContextVar``. The variable is set inside a fresh
 ``contextvars.Context`` passed to ``Runner.run(main, context=...)`` (the
 ``context=`` keyword of ``Runner(...)`` itself only exists from Python 3.14). Every task
 *copies the context that is current when it is created*, so the main task, and
-all tasks it spawns (directly or indirectly), see the same ``RngStreams``
+all tasks it spawns (directly or indirectly), see the same ``RandomStreams``
 object. Setting the variable inside a private ``Context`` (rather than in the
 caller's) also means it never leaks into, or out of, the caller's code.
-Read it with :func:`current_rng_streams`.
+Read it with :func:`current_random_streams`.
 """
 
 import asyncio
@@ -63,12 +63,12 @@ from typing import Any, overload
 
 from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
+from desyncio.randomness import RandomStreams
 from desyncio.realtime import RealTimePacer
-from desyncio.rng import RngStreams
 from desyncio.trace import TraceSink
 
-_rng_streams: contextvars.ContextVar[RngStreams] = contextvars.ContextVar(
-    "desyncio_rng_streams"
+_random_streams: contextvars.ContextVar[RandomStreams] = contextvars.ContextVar(
+    "desyncio_random_streams"
 )
 
 
@@ -94,8 +94,8 @@ class _BoundedClock(VirtualClock):
         super().advance_to(t)
 
 
-def current_rng_streams() -> RngStreams:
-    """Return the :class:`RngStreams` of the simulation being run.
+def current_random_streams() -> RandomStreams:
+    """Return the :class:`RandomStreams` of the simulation being run.
 
     Works in ``main`` and in any task (transitively) created by it.
 
@@ -103,10 +103,10 @@ def current_rng_streams() -> RngStreams:
         RuntimeError: when called outside :func:`run`.
     """
     try:
-        return _rng_streams.get()
+        return _random_streams.get()
     except LookupError:
         raise RuntimeError(
-            "no simulation is running: current_rng_streams() only works "
+            "no simulation is running: current_random_streams() only works "
             "inside desyncio.run()"
         ) from None
 
@@ -165,7 +165,7 @@ def run[T](
         main: a coroutine object (``main()``, not ``main``).
         until: stop at this virtual time. Timers due at ``t <= until`` run;
             nothing runs after. ``None`` means run until ``main`` finishes.
-        seed: master seed for :func:`current_rng_streams`.
+        seed: master seed for :func:`current_random_streams`.
         speed: run in scaled real time at this speed (virtual seconds per
             real second); shorthand for ``pacer=RealTimePacer(speed)``.
             ``None`` (default) is fast mode; ``math.inf`` is the same.
@@ -210,7 +210,7 @@ def run[T](
         else:
             raise RuntimeError("run() cannot be called from a running event loop")
         limit = math.inf if until is None else _check_until(until)
-        streams = RngStreams(seed)  # validates seed
+        streams = RandomStreams(seed)  # validates seed
         if speed is not None and pacer is not None:
             raise TypeError("give either speed= or pacer=, not both")
         if speed is not None:
@@ -232,7 +232,7 @@ def run[T](
     # A fresh Context: the ContextVar set below is visible to main and to all
     # tasks it creates (each task copies the current context), and nowhere else.
     context = contextvars.Context()
-    context.run(_rng_streams.set, streams)
+    context.run(_random_streams.set, streams)
 
     runner = asyncio.Runner(loop_factory=lambda: loop)
     try:

@@ -243,7 +243,7 @@ from desyncio import sim
 from desyncio.trace import ListSink
 
 async def worker(i):
-    rng = sim.rng(f"w{i}")
+    rng = sim.random(f"w{i}")
     for _ in range(3):
         await sim.timeout(rng.random())
 

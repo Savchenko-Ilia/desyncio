@@ -178,10 +178,10 @@ def test_spawn_outside_run_closes_coroutine() -> None:
 
 def _draw(seed: int) -> list[float]:
     async def main() -> list[float]:
-        a = sim.rng("arrivals")
+        a = sim.random("arrivals")
         first = [a.random(), a.random()]
         # Same name again continues the same stream.
-        return [*first, sim.rng("arrivals").random()]
+        return [*first, sim.random("arrivals").random()]
 
     return desyncio.run(main(), seed=seed)
 
@@ -196,7 +196,7 @@ def test_rng_different_seed_differs() -> None:
 
 def test_rng_continues_stream() -> None:
     async def main() -> bool:
-        return sim.rng("x") is sim.rng("x")
+        return sim.random("x") is sim.random("x")
 
     assert desyncio.run(main()) is True
 
@@ -229,7 +229,7 @@ def test_outside_run_raises() -> None:
     with pytest.raises(RuntimeError, match=r"desyncio\.run"):
         _ = sim.now
     with pytest.raises(RuntimeError, match=r"desyncio\.run"):
-        sim.rng("x")
+        sim.random("x")
 
 
 def test_plain_asyncio_loop_raises() -> None:
@@ -242,6 +242,6 @@ def test_plain_asyncio_loop_raises() -> None:
         with pytest.raises(RuntimeError, match=r"desyncio\.run"):
             sim.spawn(child)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match=r"desyncio\.run"):
-            sim.rng("x")
+            sim.random("x")
 
     asyncio.run(main())
