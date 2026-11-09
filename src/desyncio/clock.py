@@ -65,6 +65,7 @@ class VirtualClock:
             ValueError: if ``value`` is NaN, infinite, or an int too large
                 to represent as a float.
         """
+        # `what` must be an internal constant with no braces: str.format sees it.
         return to_float(
             value,
             type_error=f"{what} must be a real number (int or float), got {{type}}",
