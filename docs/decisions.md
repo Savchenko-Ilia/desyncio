@@ -324,3 +324,8 @@ Principle 6 is extended: if numpy or scipy already implements something, call it
 
 ## D049 — The lead stops after a module, not after each batch (owner)
 The owner: "Stop after module. Do not stop after batch." From module 3 on, the lead runs the module's batches back to back, with the per-batch steps of CLAUDE.md unchanged (review, max 2 fix rounds, gate, merge, log, handoff rewrite, push). It reports and waits for "go" only at the end of a module, or earlier when a feature is blocked, a spec is ambiguous, or an owner decision is needed.
+
+## D050 — Batch 21: two reviewer SHOULDs promoted to MUST (lead)
+- **RND-02:** the `np_random` seeding formula must be pinned by a literal golden value (as RND-01 does for `random`). Without it, a change to the key or the hash passes every test, and principle 2 says the same seed must give the same trace across versions.
+- **STA-02:** the M/M/1 test's comment states a wrong error figure (±0.02; measured ±0.012 over seeds 1..10) and the band (0.05) is looser than needed. Fix the comment and tighten the band to 0.04. A misleading test comment is a test defect.
+- **STA-01 (deferred to STA-03, which owns tally.py next):** `Tally.quantile` accepts `bool` and `str` p, while `TimeSeries.quantile` rejects them. STA-03 validates `p` the same way in both.
