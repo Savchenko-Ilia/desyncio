@@ -1,7 +1,7 @@
-"""Run every example in docs/primitives.md and docs/statistics.md, and check the README
-(DOC-02, STA-06, D011).
+"""Run every example in docs/primitives.md, docs/statistics.md and docs/calendar.md, and
+check the README (DOC-02, STA-06, CAL-04, D011).
 
-Convention in both guides:
+Convention in all guides:
 
 * a fenced ``python`` block is a complete, runnable example;
 * the fenced ``text`` block right after it is its exact expected stdout;
@@ -24,6 +24,7 @@ import desyncio
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "primitives.md"
 STATS = ROOT / "docs" / "statistics.md"
+CALENDAR = ROOT / "docs" / "calendar.md"
 README = ROOT / "README.md"
 
 FENCE = re.compile(r"^```(\w*)[ \t]*\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
@@ -76,14 +77,18 @@ def _example_ids(path: Path) -> list[str]:
 
 
 # Every guide whose examples are run: (path, minimum number of examples).
-GUIDES = {"primitives": (GUIDE, 8), "statistics": (STATS, 5)}
+GUIDES = {
+    "primitives": (GUIDE, 8),
+    "statistics": (STATS, 5),
+    "calendar": (CALENDAR, 6),
+}
 ALL_EXAMPLES = [
     (f"{name}-{eid}", code, expected)
     for name, (path, _) in GUIDES.items()
     for (code, expected), eid in zip(_examples(path), _example_ids(path), strict=True)
 ]
-DOCS = [GUIDE, STATS, README]
-DOC_IDS = ["guide", "statistics", "readme"]
+DOCS = [GUIDE, STATS, CALENDAR, README]
+DOC_IDS = ["guide", "statistics", "calendar", "readme"]
 
 
 @pytest.mark.parametrize("path", DOCS, ids=DOC_IDS)
@@ -181,6 +186,7 @@ def test_readme_links_the_guides() -> None:
     text = README.read_text()
     assert "docs/primitives.md" in text
     assert "docs/statistics.md" in text
+    assert "docs/calendar.md" in text
 
 
 def test_readme_example_runs() -> None:

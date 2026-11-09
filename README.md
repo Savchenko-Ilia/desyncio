@@ -58,6 +58,11 @@ Everything below is importable from the top level: `from desyncio import Resourc
 - `Tally`: statistics of individual observations (mean, quantiles, histogram, `warmup=`)
 - `replicate`: run a model `n` times with consecutive seeds
 - `confidence_interval`: Student t interval for the mean of the replications
+- `Calendar`: converts sim time to timezone-aware dates and back
+- `Shift`: a capacity on some weekdays between two wall-clock times
+- `Schedule`: shifts placed on a `Calendar` (`capacity_at`, `changes`)
+- `ScheduledResource`: a resource whose capacity follows a `Schedule`; a shift end interrupts holders
+- `ShiftEnded`: the `Interrupt.cause` a holder receives when its shift ends
 - `RealTimePacer`: pacing for scaled real-time runs
 - `RealIOError`: raised when a simulation tries real I/O
 - `SimulationDeadlock`: raised when nothing can ever run again
@@ -74,6 +79,10 @@ Everything below is importable from the top level: `from desyncio import Resourc
 
 - [Statistics guide](docs/statistics.md): `Tally`, `TimeSeries`, warm-up, replications with
   confidence intervals, and input distributions with `sim.np_random` (numpy and scipy do the maths).
+  The examples are run by the test suite.
+
+- [Calendar guide](docs/calendar.md): sim time as real dates with `Calendar`, DST days, weekly
+  `Schedule`s of `Shift`s, and a `ScheduledResource` whose holders are interrupted at shift end.
   The examples are run by the test suite.
 
 ## License
