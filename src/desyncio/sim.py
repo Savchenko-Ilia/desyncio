@@ -22,8 +22,8 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 
 import asyncio
 import math
-import random
 from collections.abc import Coroutine
+from random import Random
 from typing import Any
 
 from desyncio.interrupt import Interruptible, interrupt_task
@@ -132,7 +132,7 @@ class Sim:
             raise
         return loop.create_task(coro, name=name)
 
-    def random(self, name: str) -> random.Random:
+    def random(self, name: str) -> Random:
         """Return the named random stream of this run (same object each call).
 
         Streams derive from the ``seed`` given to ``desyncio.run``: the same

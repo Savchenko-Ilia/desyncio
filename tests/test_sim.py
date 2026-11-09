@@ -245,3 +245,15 @@ def test_plain_asyncio_loop_raises() -> None:
             sim.random("x")
 
     asyncio.run(main())
+
+
+def test_random_return_annotation_resolves_to_random_class() -> None:
+    # Regression (RND-01 fix 1): the method is named ``random``, so a
+    # ``random.Random`` annotation resolved to the method under PEP 649 (3.14).
+    import random
+    import typing
+
+    from desyncio.sim import Sim
+
+    assert typing.get_type_hints(Sim.random)["return"] is random.Random
+    assert Sim.random.__annotations__["return"] is random.Random
