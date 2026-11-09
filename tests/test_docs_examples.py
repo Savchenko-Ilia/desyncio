@@ -1,5 +1,5 @@
-"""Run every example in docs/primitives.md, docs/statistics.md and docs/calendar.md, and
-check the README (DOC-02, STA-06, CAL-04, D011).
+"""Run every example in docs/primitives.md, docs/statistics.md, docs/calendar.md and
+docs/quickstart.md, and check the README (DOC-02, STA-06, CAL-04, DOC-03, D011).
 
 Convention in all guides:
 
@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "primitives.md"
 STATS = ROOT / "docs" / "statistics.md"
 CALENDAR = ROOT / "docs" / "calendar.md"
+QUICKSTART = ROOT / "docs" / "quickstart.md"
 README = ROOT / "README.md"
 
 FENCE = re.compile(r"^```(\w*)[ \t]*\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
@@ -81,14 +82,15 @@ GUIDES = {
     "primitives": (GUIDE, 8),
     "statistics": (STATS, 5),
     "calendar": (CALENDAR, 6),
+    "quickstart": (QUICKSTART, 1),
 }
 ALL_EXAMPLES = [
     (f"{name}-{eid}", code, expected)
     for name, (path, _) in GUIDES.items()
     for (code, expected), eid in zip(_examples(path), _example_ids(path), strict=True)
 ]
-DOCS = [GUIDE, STATS, CALENDAR, README]
-DOC_IDS = ["guide", "statistics", "calendar", "readme"]
+DOCS = [GUIDE, STATS, CALENDAR, QUICKSTART, README]
+DOC_IDS = ["guide", "statistics", "calendar", "quickstart", "readme"]
 
 
 @pytest.mark.parametrize("path", DOCS, ids=DOC_IDS)
@@ -187,6 +189,7 @@ def test_readme_links_the_guides() -> None:
     assert "docs/primitives.md" in text
     assert "docs/statistics.md" in text
     assert "docs/calendar.md" in text
+    assert "docs/quickstart.md" in text
 
 
 def test_readme_example_runs() -> None:
