@@ -412,3 +412,91 @@ Branch: feat/LOOP-11 + fix/LOOP-11-1  ·  Merged: 2d06d94
 - The `run()` tests for `speed` and `pacer` are in `tests/test_realtime.py`, not `tests/test_run.py`.
 
 **Follow-ups.** The SHOULDs above. Time anchoring, for long real-time runs.
+
+## LOOP-06 — asyncio compatibility suite (2026-11-08, batch 7)
+Branch: feat/LOOP-06  ·  Merged: e95ae83
+
+**Approach.** `tests/test_asyncio_compat.py` has 47 tests, all on the public API. Each one records `(virtual_time, label)` events and checks the whole timeline. The tests cover:
+- `asyncio.Runner(loop_factory=VirtualTimeLoop)` and wall-time negligibility;
+- `Queue`: blocking get and put, FIFO getters, and `shutdown()` (graceful, `immediate=True` with `join()` release, waking blocked getters and putters);
+- `Lock`, `Event`, `Semaphore`;
+- `gather`: `return_exceptions`, first failure, cancellation propagation;
+- `TaskGroup`: siblings cancelled at the failure time, `ExceptionGroup`;
+- `as_completed` as an async iterator, and with a timeout;
+- `wait_for`;
+- `timeout()`/`timeout_at()` with `reschedule` (later, earlier, `None`, into the past);
+- cancellation: landing time, cleanup that takes virtual time, suppression, cancel before the first step;
+- `shield`.
+No desyncio bugs were found, and there are no xfails.
+
+**asyncio internals.**
+- `reschedule()` into the past uses `call_soon`, so the timeout fires at the current time.
+- `gather` without `return_exceptions` does not cancel the other children.
+- Two TaskGroup child failures at the same t arrive together, because both timers fire in the same `_run_once` iteration.
+- These are plain sync tests that call `desyncio.run`, which cannot nest inside pytest-asyncio's loop.
+
+**Trade-offs.** Same-instant order is asserted only where asyncio or desyncio guarantees it (FIFO waiters, D008 timer ties).
+
+**Review findings.** PASS. Mutation results:
+- clock off by +1 (implementer): 47/47 tests fail;
+- jump to `when + 0.5`: 47/47 fail;
+- LIFO timer ties: 0/47 fail. That case is covered by `tests/test_ordering.py`'s 1,000-sleeper test.
+SHOULD:
+- Add a FIFO-wake test here, citing D008.
+- Comment on the `in log` check.
+- Graceful `shutdown()` with a blocked putter.
+- `timeout()` combined with a TaskGroup.
+
+**Gotchas.** Mutating `time()` to return 0 makes the loop spin forever, because no timer is ever due. Don't use that mutation.
+
+**Follow-ups.** The SHOULDs above.
+
+## LOOP-09 — Trace hook (2026-11-09, batch 7)
+Branch: feat/LOOP-09 + fix/LOOP-09-1 + fix/LOOP-09-2  ·  Merged: 62caa24
+
+**Approach.** `src/desyncio/trace.py` defines `TraceRecord(t, seq, task_name, kind)` (`kind` ∈ start/resume/finish/cancel), a `Tracer`, a `ListSink`, and `_TracedCoroutine`, a subclass of `collections.abc.Coroutine`.
+- Tracing is enabled with `desyncio.run(..., trace=sink)` or `VirtualTimeLoop(..., trace=sink)`, and is off by default.
+- `VirtualTimeLoop.create_task` is overridden, not `set_task_factory`, so a user's own factory still works. It does two things:
+  - gives every unnamed task `proc-N` from one per-loop counter, shared with `sim.spawn`; `desyncio.run` names the main task `main` via `name_next_task`;
+  - wraps the coroutine only when tracing is on.
+- The wrapper records `start` on the first send/throw and `resume` on later ones. A `StopIteration` or other exception records `finish`, and an escaping `CancelledError` records `cancel`. Records are made inside the step, so `t` is that step's virtual time.
+- `stop_tracing_new_tasks()` runs before `Runner.close()`, so Runner's housekeeping tasks don't appear in the trace. Pending tasks still get their cleanup `cancel` records, at the frozen clock.
+- **Sink errors (D016):** `Tracer.emit` catches the first sink exception, turns the sink off and calls the loop's `_on_trace_error`, which records it and calls `stop()`. The `run_forever` override re-raises it after `super().run_forever()`. During cleanup it is only recorded, and `run` raises it after close.
+- All loop state of ours is in one `__slots__` `_LoopState` at `self._state`, which replaced `_sequence`.
+
+**asyncio internals.**
+- The C `Task.__step` can't be overridden. A coroutine-protocol object (`send`/`throw`/`close`) is the observable seam, and Task falls back from its fast path to generic `send` for such objects.
+- `asyncio.create_task`, `TaskGroup`, `gather`, `ensure_future` and `Runner.run` all call `loop.create_task`.
+- **CPython 3.13 instance-dict limit:** after construction, a loop has 28 `vars()` entries. Adding three more pushed it past the inline-values / shared-keys layout limit and slowed attribute access in stock `_run_once` by about 8–10% per step, even with tracing off. `test_loop_instance_dict_is_not_larger_than_before_loop_09` pins `len(vars(loop)) <= 28`.
+- `loop.stop()` only sets a flag. Callbacks already in `_ready` in that iteration still run.
+
+**Trade-offs.**
+- A `create_task` override rather than a task factory, so user factories keep working.
+- Containing sink errors and aborting the run, rather than letting them propagate into tasks (principle 4).
+
+**Review findings.**
+- Round 0 FAILED:
+  - (MUST) tracing off was ~8–10% slower per step, due to the attribute count; the old benchmark test could not detect it because both sides used `VirtualTimeLoop`;
+  - (MUST) §10's zero-cost claim was false;
+  - (promoted to MUST, D016) a sink error replaced the task's result or its `CancelledError`, changing TaskGroup and timeout semantics.
+- Fix round 1:
+  - `_LoopState`. Re-measured by the reviewer: integration 0.76–0.81 s vs the fix branch 0.757–0.759 s for 100k sleeps, best of 7;
+  - the deterministic attribute-count test replaces the vacuous benchmark test;
+  - §10 rewritten with measured per-task numbers (the override adds ~0.3 µs to a ~2.5 µs `create_task`);
+  - sink containment, with tests for start, finish and cancel errors, the main task, TaskGroup and cleanup. A subprocess check runs under `-W error -X dev`.
+  Re-review FAILED with one MUST: §11 listed `run_forever` as stock although it is overridden.
+- Fix round 2 corrected §11 and §2 and added a docs test. Re-review: PASS.
+- The reviewer also ran all 47 LOOP-06 compat tests with tracing forced on, and they all pass.
+- SHOULD:
+  - A `KeyboardInterrupt`/`SystemExit` raised by the sink is deferred to the end of the iteration. Stock asyncio aborts immediately. Document it, or re-raise those two at once.
+  - `run()`'s `finally` can replace an in-flight exception with a pending sink error. Chain it instead.
+  - Direct `asyncio.Runner` use with a failing sink during cleanup is undocumented.
+  - With tracing on, `inspect.iscoroutine(task.get_coro())` is False.
+  - Tasks created by GC (async-generator finalisation) are traced and use up a `proc-N`. This is deterministic on CPython only.
+  - §11 should list the `_clock_resolution` override.
+
+**Gotchas.**
+- **Adding attributes to `VirtualTimeLoop` is a performance hazard.** Put new state on `self._state`.
+- A test that deliberately makes `run` fail with a bad argument needs `# type: ignore[call-overload]`.
+
+**Follow-ups.** The SHOULDs above.

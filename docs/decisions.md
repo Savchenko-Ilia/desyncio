@@ -99,3 +99,9 @@ In real-time mode, a paused pacer waits in real time with no timeout until `resu
   LOOP-06 owns only `tests/test_asyncio_compat.py`, so there is no overlap.
 - **Deterministic names for every task:** a task created on a `VirtualTimeLoop` without an explicit name gets `proc-N` from one per-loop counter. That covers `asyncio.create_task`, `TaskGroup` and `sim.spawn`. The main task created by `desyncio.run` is named `main`. Explicit names are kept. Naming applies whether or not tracing is on.
 - **Trace record:** `(t, seq, task_name, kind)`, with `kind` one of `start`, `resume`, `finish`, `cancel` (spec). A task that ends with an exception records `finish`. `seq` is a per-run counter. The sink is any callable that takes one record. It is off by default, and when off no tracing code runs per task step (naming still applies).
+
+## D016 — Trace sinks must not alter the model (lead, batch 7)
+The LOOP-09 reviewer rated as SHOULD that a sink exception became the running task's exception. The lead promoted it to MUST under principle 4: observability must not change the model. Now the first sink error is contained, tracing stops, the loop stops after the current iteration, and `desyncio.run` raises that same exception. During shutdown it is raised after close. Up to the abort point, the model behaves exactly as it would without tracing.
+
+## D017 — Performance guard on `VirtualTimeLoop` attributes (batch 7)
+Under CPython 3.13, adding instance attributes to `VirtualTimeLoop` beyond its post-construction count of 28 measurably slows every loop iteration: the inline-values / shared-keys instance-dict layout is lost. Any new per-loop state goes on `self._state` (a `__slots__` object). `tests/test_loop.py::test_loop_instance_dict_is_not_larger_than_before_loop_09` enforces this.
