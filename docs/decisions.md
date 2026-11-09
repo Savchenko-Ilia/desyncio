@@ -307,3 +307,10 @@ For CLN-07, a monitor that raises when there is no running loop (e.g. `Store.shu
 
 ## D046 — D044 is resolved by CLN-06; a branch's gate.env is trusted (lead)
 `scripts/gate.sh` now sources `scripts/gate.env` from the tree under test, so a branch that changes its gate commands is gated by its own commands. D044's merge-then-verify procedure is no longer needed for `gate.env` changes. It is still needed for changes to `gate.sh` itself, because the script runs from the checkout it is started in. A branch's `gate.env` runs as shell code inside the gate (an `exit 0` there would end the gate early); that adds no trust the gate did not already give to the branch's tests, and the lead reads every diff before gating.
+
+## D047 — Module 3 is statistics; module 4 is calendar/shifts (owner)
+The owner chose statistics as module 3 ("B, after that C"), with:
+- **Distributions, both kinds:** output distributions (quantiles, histograms, time-weighted fractions) and input distributions (only those `random.Random` lacks).
+- **Standard library only:** no numpy or scipy. The Student t quantile is computed in pure Python.
+- **In scope:** Tally (plain statistics of observations), replications across seeds, confidence intervals, warm-up removal.
+The feature rows (STA-01..06) were drafted by the lead and shown to the owner before the first batch. Module 4 (calendar/shifts) is defined after module 3.
