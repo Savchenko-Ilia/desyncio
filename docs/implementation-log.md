@@ -765,3 +765,28 @@ Branch: feat/RES-02 + fix/RES-02-1  ·  Merged: 40e9dca
 
 **Follow-ups.** The SHOULDs above. RES-03 extends `PriorityRequest` with `preempt=True`.
 
+## CI-03 — Gate: Python 3.14 and ruff format (2026-11-09, batch 11)
+Branch: feat/CI-03  ·  Merged: d17d8d3
+
+**Approach.**
+- `scripts/gate.sh` has a new optional `TEST_CMD_314`. It runs after `TEST_CMD` and before lint, and fails with "tests failed on Python 3.14". When the variable is unset, the gate behaves as before.
+- `gate.env` sets `TEST_CMD_314="UV_PROJECT_ENVIRONMENT=.venv-3.14 uv run --locked --python 3.14 pytest -q"` and adds `ruff format --check .` to `LINT_CMD`.
+- `ci.yml` stays manual-only (D013) and mirrors both changes.
+- One separate commit (7232114) formats the 6 files that were failing; the reviewer confirmed the ASTs are identical.
+
+**asyncio internals.** The 3.14 failure was in `test_loop_instance_dict_is_not_larger_than_before_loop_09`. Stock `asyncio.SelectorEventLoop` has 26 instance attributes on 3.13 and 27 on 3.14, and `VirtualTimeLoop` adds a net +2 on both (28 and 29).
+- **Test change (permitted by D033):** the hard-coded limit of 28 became `len(vars(SelectorEventLoop())) + 2`, measured on the running interpreter. The limit on 3.13 is still 28, so D017 is enforced exactly as before.
+- A mutation that adds one instance attribute fails on both interpreters.
+
+**Trade-offs.** The 3.14 run uses its own environment, so the 3.13 run and lint keep the default `.venv`. `ruff` skips `.venv-3.14` only because uv writes a `.gitignore` containing `*` into every venv it creates.
+
+**Review findings.**
+- PASS. The reviewer checked that a missing interpreter (`--python 3.99`) and a misformatted file both make the gate fail loudly. 573 tests pass on 3.13 and on 3.14.
+- SHOULD:
+  - Make the venv exclusion robust: add `.venv-3.14` to `.gitignore` or to ruff's `extend-exclude`.
+  - Add an explicit `uv python install 3.14` step to ci.yml.
+
+**Gotchas.** From now on, every branch must be `ruff format`-clean and pass on 3.14 (D033).
+
+**Follow-ups.** The SHOULDs above.
+

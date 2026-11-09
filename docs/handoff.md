@@ -52,9 +52,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 12:** API-01 (exports, including `PriorityStore`, `FilterStore` and `TimeSeries`; FilterStore has no `shutdown`, D031), then DOC-02 (primitives guide; the car-wash example from D026 uses `sim.random`).
 
 ## Open questions for the owner
-- **D027:** add a Python 3.14 run to the gate (one test, `test_loop_instance_dict_is_not_larger_than_before_loop_09`, already fails on 3.14), or document 3.13 as the only tested version?
 - **D028/D031:** confirm the `TimeSeries` wiring (a lambda on `monitor=`, explicit initial record, `mean(until=)`), `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
-- **`ruff format`:** 6 files on `integration` aren't formatted (README.md, docs/how-the-loop-works.md, loop.py, sim.py, trace.py, test_realtime.py). The gate runs `ruff check` only. Should we add `ruff format --check` to the gate, plus a one-off format commit?
+- _(Resolved by D033/CI-03: the gate now runs 3.14 and `ruff format --check`.)_
 
 ## Open SHOULD backlog (not scheduled; propose to the owner as clean-up features)
 - **Reuse audit of module 1:** no MUSTs. SHOULDs:
