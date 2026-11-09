@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 19. The SHOULD clean-ups (CLN-06..08, D045, D046) are done. Nothing is in flight. Next: the owner defines module 3._
+_Last updated: 2026-11-09, end of batch 20. Module 3 (statistics, D047/D048) is defined and started: DEP-01 is merged. Nothing is in flight. Next: batch 21 after the owner's "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -74,11 +74,15 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - CLN-07 (0da8d5e): a raising monitor outside a running loop is logged on the `desyncio` logger (D045, owner may revise); one helper in `_monitor.py`.
 - All 0 fix rounds. `integration` passes the gate: 558 tests on 3.13 and 3.14, ruff, mypy. Nothing is in flight; no agents are running.
 
+## Module 3: statistics — IN PROGRESS
+- Rows STA-01..06, RND-02 and DEP-01 are in `docs/features.md` (Module 3). Owner decisions: D047 (scope), D048 (numpy and scipy required; `sim.np_random`; STA-05 dropped; principle 6 extended to numpy/scipy, AGENTS.md updated).
+- **Batch 20:** DEP-01 merged (0 fix rounds): numpy 2.5.4, scipy 1.18.1, scipy-stubs in dev. `integration` passes the gate: 560 tests on 3.13 and 3.14, ruff, mypy.
+
 ## Next batches
-1. **Module 3 is undefined. Ask the owner.** Candidates: calendar/shift handling (AGENTS.md open question), LOOP-12 benchmark (deferred, D018), statistics consumers on the monitor hook.
-2. **Small SHOULDs left, if the owner wants them:**
-   - `gate.sh`: set the cleanup trap right after `mktemp -d` (a bad branch name leaks an empty temp dir; pre-existing).
-   - Outside-loop monitor tests for Resource and Container (CLN-07 covered the stores only).
+1. **Batch 21:** RND-02, STA-01, STA-02, STA-04 (no shared files).
+2. **Batch 22:** STA-03 (warm-up). **Batch 23:** STA-06 (exports and guide).
+3. **Module 4:** calendar/shifts, to define with the owner after module 3.
+4. **Small SHOULDs:** `gate.sh` trap right after `mktemp -d`; outside-loop monitor tests for Resource/Container; numpy floor for 3.14 (DEP-01).
 
 ## Open questions for the owner
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.

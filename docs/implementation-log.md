@@ -1114,3 +1114,18 @@ Branch: feat/CLN-08  ·  Merged: 36d0215
 **Gotchas.** `__init__.py` is not scanned, where `from . import X` is legitimate.
 
 **Follow-ups.** None.
+
+## DEP-01 — numpy and scipy as dependencies (2026-11-09, batch 20)
+Branch: feat/DEP-01  ·  Merged: 6790cdf
+
+**Approach.** `uv add` put `numpy>=2.0` and `scipy>=1.16.2` in `[project] dependencies`, and `scipy-stubs` in the dev group (it pulls in `optype` and `numpy-typing-compat`, dev only). The lock resolves numpy 2.5.4 and scipy 1.18.1; wheels install on 3.13 and 3.14. No mypy override was needed. Two tests in `tests/test_import.py`: a smoke test (numpy major ≥ 2, `scipy.stats.norm.cdf(0) == 0.5`) and a subprocess test that `import desyncio` loads neither numpy nor scipy. 558 → 560 tests.
+
+**asyncio internals.** None.
+
+**Trade-offs.** `scipy-stubs` instead of a mypy override, so scipy calls are type-checked under strict mode.
+
+**Review findings.** No MUST. The reviewer proved the sys.modules test by adding `import numpy` to `__init__.py` (it failed), and checked `--resolution lowest-direct` on 3.14: scipy 1.16.2 installs and imports.
+
+**Gotchas.** `numpy>=2.0` is a nominal floor on 3.14: numpy 2.0.0 has no 3.14 wheels, so the real floor there is higher. The spec's reason for 2.0 is weighted `np.quantile`.
+
+**Follow-ups (SHOULD).** Raise the numpy floor to the first release with 3.14 wheels, once checked.
