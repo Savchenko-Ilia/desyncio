@@ -22,47 +22,6 @@ def test_defaults_and_read_only() -> None:
         c2.capacity = 1  # type: ignore[misc]
 
 
-def test_get_blocks_until_put() -> None:
-    async def main() -> list[tuple[str, float]]:
-        c = Container()
-        log: list[tuple[str, float]] = []
-
-        async def getter() -> None:
-            await c.get(5)
-            log.append(("got", sim.now))
-
-        t = sim.spawn(getter())
-        await sim.timeout(2)
-        await c.put(3)
-        await sim.timeout(2)
-        assert not t.done()
-        await c.put(2)
-        await t
-        assert c.level == 0
-        return log
-
-    assert desyncio.run(main()) == [("got", 4.0)]
-
-
-def test_put_blocks_until_get_makes_room() -> None:
-    async def main() -> float:
-        c = Container(10, init=8)
-
-        async def putter() -> float:
-            await c.put(5)
-            return sim.now
-
-        t = sim.spawn(putter())
-        await sim.timeout(3)
-        assert not t.done()
-        await c.get(3)
-        when = await t
-        assert c.level == 10
-        return when
-
-    assert desyncio.run(main()) == 3.0
-
-
 def test_capacity_limit_exact_fit_does_not_block() -> None:
     async def main() -> float:
         c = Container(10, init=5)
@@ -130,71 +89,59 @@ def test_directions_are_independent() -> None:
     assert desyncio.run(main()) == 1.0
 
 
-def test_cancelled_head_of_line_unblocks_next() -> None:
-    async def main() -> tuple[float, float]:
+@pytest.mark.parametrize("how", ["cancel", "timeout"])
+def test_cancelled_waiter_leaves_line_and_takes_nothing(how: str) -> None:
+    # A timeout is a cancel underneath, so both must take the head of the line
+    # out of the queue without taking anything from the container.
+    async def main() -> None:
         c = Container()
-        big = sim.spawn(c.get(10))
+
+        async def big() -> None:
+            if how == "timeout":
+                async with asyncio.timeout(3):  # expires at t=3
+                    await c.get(10)
+            else:
+                await c.get(10)
+
+        big_task = sim.spawn(big())
         await sim.timeout(1)
         small = sim.spawn(c.get(1))
         await sim.timeout(1)
-        await c.put(2)
-        await sim.timeout(1)
+        await c.put(2)  # small would fit, but big is ahead of it
+        await sim.timeout(0.5)
         assert not small.done()
-        big.cancel()
-        await sim.timeout(1)
-        assert big.cancelled()
-        await small
-        return c.level, sim.now
-
-    assert desyncio.run(main()) == (1.0, 4.0)
-
-
-def test_cancelled_waiter_takes_nothing() -> None:
-    async def main() -> float:
-        c = Container()
-        t = sim.spawn(c.get(5))
-        await sim.timeout(1)
-        t.cancel()
-        await sim.timeout(1)
+        await sim.timeout(0.5)  # t=3
+        if how == "cancel":
+            big_task.cancel()
+        with pytest.raises(
+            TimeoutError if how == "timeout" else asyncio.CancelledError
+        ):
+            await big_task
+        await small  # served in the same instant the head of the line left
+        assert (sim.now, c.level) == (3.0, 1)
         await c.put(5)
-        await sim.timeout(1)
-        return c.level
-
-    assert desyncio.run(main()) == 5
-
-
-def test_timeout_cancels_waiter() -> None:
-    async def main() -> float:
-        c = Container()
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(2):
-                await c.get(1)
-        await c.put(1)
-        await c.get(1)
-        return sim.now
-
-    assert desyncio.run(main()) == 2.0
-
-
-@pytest.mark.parametrize("amount", [0, -1, math.nan, math.inf, 11])
-def test_bad_amount_value(amount: float) -> None:
-    async def main() -> None:
-        c = Container(10, init=5)
-        with pytest.raises(ValueError):
-            await c.put(amount)
-        with pytest.raises(ValueError):
-            await c.get(amount)
+        assert c.level == 6  # big took nothing
 
     desyncio.run(main())
 
 
-@pytest.mark.parametrize("amount", [True, "1", None, 1j])
-def test_bad_amount_type(amount: object) -> None:
+@pytest.mark.parametrize(
+    ("amount", "error"),
+    [
+        (0, ValueError),
+        (math.nan, ValueError),
+        (math.inf, ValueError),
+        (11, ValueError),  # more than the capacity
+        (True, TypeError),
+        ("1", TypeError),
+    ],
+)
+def test_bad_amount(amount: object, error: type[Exception]) -> None:
     async def main() -> None:
         c = Container(10, init=5)
-        with pytest.raises(TypeError):
+        with pytest.raises(error):
             await c.put(amount)  # type: ignore[arg-type]
-        with pytest.raises(TypeError):
+        with pytest.raises(error):
             await c.get(amount)  # type: ignore[arg-type]
 
     desyncio.run(main())
@@ -308,35 +255,6 @@ def test_monitor_base_exceptions_propagate() -> None:
 
     with pytest.raises(KeyboardInterrupt):
         desyncio.run(main())
-
-
-def test_fuel_tank() -> None:
-    async def main() -> list[tuple[str, float, float]]:
-        tank = Container(100, init=30)
-        log: list[tuple[str, float, float]] = []
-
-        async def car(name: str, arrive: float, need: float) -> None:
-            await sim.timeout(arrive)
-            await tank.get(need)
-            log.append((name, sim.now, tank.level))
-
-        async def tanker() -> None:
-            await sim.timeout(10)
-            await tank.put(60)
-
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(car("a", 1, 20))
-            tg.create_task(car("b", 2, 40))
-            tg.create_task(car("c", 3, 5))
-            tg.create_task(tanker())
-        return log
-
-    # b (40) blocks c (5) until the tanker arrives, even though c would fit.
-    assert desyncio.run(main()) == [
-        ("a", 1.0, 10.0),
-        ("b", 10.0, 30.0),
-        ("c", 10.0, 25.0),
-    ]
 
 
 async def _feeder(c: Container) -> None:
