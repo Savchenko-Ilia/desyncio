@@ -214,7 +214,7 @@ def test_plain_asyncio_loop_raises() -> None:
             await sim.timeout(1)
         child = asyncio.sleep(0)
         with pytest.raises(RuntimeError, match=r"desyncio\.run"):
-            sim.spawn(child)  # type: ignore[arg-type]
+            sim.spawn(child)
         with pytest.raises(RuntimeError, match=r"desyncio\.run"):
             sim.random("x")
 

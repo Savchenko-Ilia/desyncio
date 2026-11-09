@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -11,7 +12,7 @@ from desyncio.monitor import TimeSeries
 from desyncio.resource import Resource
 
 
-def run_ts(body):  # type: ignore[no-untyped-def]
+def run_ts(body: Callable[[TimeSeries], Awaitable[None]]) -> TimeSeries:
     """Run ``body(ts)`` (an async function) in a fresh sim; return the series."""
     ts = TimeSeries()
 
@@ -20,6 +21,16 @@ def run_ts(body):  # type: ignore[no-untyped-def]
 
     desyncio.run(main())
     return ts
+
+
+def _record_both(busy: TimeSeries, waiting: TimeSeries) -> Callable[[Resource], None]:
+    """A Resource monitor: record the count and the queue length."""
+
+    def monitor(r: Resource) -> None:
+        busy.record(r.count)
+        waiting.record(r.queue_length)
+
+    return monitor
 
 
 async def _steps(ts: TimeSeries) -> None:
@@ -67,7 +78,13 @@ def test_until_before_last_record_is_value_error() -> None:
 
 def test_empty_series_raises_value_error() -> None:
     ts = TimeSeries()
-    for call in (lambda: ts.mean(until=1), ts.min, ts.max, ts.last):
+    calls: list[Callable[[], object]] = [
+        lambda: ts.mean(until=1),
+        ts.min,
+        ts.max,
+        ts.last,
+    ]
+    for call in calls:
         with pytest.raises(ValueError):
             call()
     assert ts.samples == ()
@@ -121,7 +138,7 @@ def test_record_rejects_bad_value(bad: object, exc: type[Exception]) -> None:
 def test_mean_rejects_bad_until() -> None:
     ts = run_ts(_steps)
     with pytest.raises(TypeError):
-        ts.mean(until=True)  # type: ignore[arg-type]
+        ts.mean(until=True)
     with pytest.raises(ValueError):
         ts.mean(until=math.nan)
 
@@ -139,7 +156,7 @@ def mm1_stats(seed: int) -> tuple[float, float]:
         waiting = TimeSeries()
         server = Resource(
             1,
-            monitor=lambda r: (busy.record(r.count), waiting.record(r.queue_length)),
+            monitor=_record_both(busy, waiting),
         )
         busy.record(0)
         waiting.record(0)
@@ -179,7 +196,7 @@ def test_resource_count_and_queue_length_recorded_separately() -> None:
         waiting = TimeSeries()
         res = Resource(
             1,
-            monitor=lambda r: (busy.record(r.count), waiting.record(r.queue_length)),
+            monitor=_record_both(busy, waiting),
         )
         busy.record(0)
         waiting.record(0)
@@ -220,10 +237,7 @@ def mm1_customer_records(
             waiting = TimeSeries()
             server = Resource(
                 1,
-                monitor=lambda r: (
-                    busy.record(r.count),
-                    waiting.record(r.queue_length),
-                ),
+                monitor=_record_both(busy, waiting),
             )
             busy.record(0)
             waiting.record(0)

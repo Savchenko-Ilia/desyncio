@@ -219,9 +219,11 @@ def _trace(schedule: list[tuple[float, int]]) -> list[tuple[float, int]]:
     trace: list[tuple[float, int]] = []
     try:
         for label, (when, prio) in enumerate(schedule):
-            loop.call_at_priority(
-                when, prio, lambda lab=label: trace.append((loop.time(), lab))
-            )
+
+            def fire(lab: int = label) -> None:
+                trace.append((loop.time(), lab))
+
+            loop.call_at_priority(when, prio, fire)
         last = max((w for w, _ in schedule), default=0)
         loop.run_until_complete(asyncio.sleep(last + 1))
     finally:

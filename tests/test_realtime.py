@@ -13,8 +13,9 @@ import selectors
 import sys
 import threading
 import time
+import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
 import pytest
@@ -73,14 +74,20 @@ class FakeWall:
         return []
 
 
-async def sleeps(durations: list[float], trace: Trace, wall: Any) -> None:
+def _is_closed(coro: Coroutine[Any, Any, Any]) -> bool:
+    """True once a coroutine has been closed or has finished (no frame left)."""
+    assert isinstance(coro, types.CoroutineType)
+    return coro.cr_frame is None
+
+
+async def sleeps(durations: Sequence[float], trace: Trace, wall: Any) -> None:
     loop = asyncio.get_running_loop()
     for d in durations:
         await asyncio.sleep(d)
         trace.append((loop.time(), wall.t))
 
 
-def run_fake(durations: list[float], speed: float) -> tuple[FakeWall, Trace]:
+def run_fake(durations: Sequence[float], speed: float) -> tuple[FakeWall, Trace]:
     wall = FakeWall()
     trace: Trace = []
     desyncio.run(
@@ -311,8 +318,8 @@ def test_run_rejects_speed_and_pacer_together() -> None:
 
     coro = main()
     with pytest.raises(TypeError, match="speed"):
-        desyncio.run(coro, speed=2, pacer=RealTimePacer())  # type: ignore[call-overload]
-    assert coro.cr_frame is None  # closed: no "never awaited" warning
+        desyncio.run(coro, speed=2, pacer=RealTimePacer())
+    assert _is_closed(coro)  # closed: no "never awaited" warning
 
 
 def test_run_rejects_bad_speed_and_pacer_types() -> None:
@@ -321,8 +328,8 @@ def test_run_rejects_bad_speed_and_pacer_types() -> None:
     for kwargs in ({"speed": 0}, {"speed": "x"}, {"pacer": object()}):
         coro = main()
         with pytest.raises((TypeError, ValueError)):
-            desyncio.run(coro, **kwargs)  # type: ignore[call-overload]
-        assert coro.cr_frame is None
+            desyncio.run(coro, **kwargs)
+        assert _is_closed(coro)
 
 
 def test_until_caps_real_time_at_until() -> None:
@@ -519,7 +526,7 @@ def test_failed_bind_leaks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
             coro = main()
             with pytest.raises(ValueError, match="already"):
                 desyncio.run(coro, pacer=pacer)
-            assert coro.cr_frame is None
+            assert _is_closed(coro)
             del coro
             gc.collect()
     finally:

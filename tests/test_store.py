@@ -344,7 +344,7 @@ def test_monitor_base_exceptions_propagate(kind: Any) -> None:
 @pytest.mark.parametrize("bad", [0, math.nan, -math.inf, 3.0])
 def test_capacity_bad_value(bad: float) -> None:
     with pytest.raises(ValueError, match="capacity"):
-        Store(capacity=bad)  # type: ignore[arg-type]
+        Store(capacity=bad)
 
 
 @pytest.mark.parametrize("bad", [True, "3", None])
@@ -465,7 +465,7 @@ def test_priority_items_snapshot_is_in_priority_order() -> None:
         assert len(s) == 3
         await s.put("high2", priority=1)
         assert snap == ("high", "mid", "low")  # a copy
-        assert s.items == ("high", "high2", "mid", "low")
+        assert list(s.items) == ["high", "high2", "mid", "low"]
         assert await s.get() == "high"
         assert s.items == ("high2", "mid", "low")
         assert len(s) == 3

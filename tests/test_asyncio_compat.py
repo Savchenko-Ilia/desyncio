@@ -284,7 +284,7 @@ def test_gather_finishes_with_slowest_child_and_keeps_argument_order() -> None:
 
     async def main() -> tuple[list[float], float]:
         results = await asyncio.gather(work(3), work(1), work(2))
-        return results, now()
+        return list(results), now()
 
     assert desyncio.run(main()) == ([3, 1, 2], 3.0)
 
@@ -310,7 +310,9 @@ def test_gather_with_a_failing_child(return_exceptions: bool) -> None:
         slow_task = asyncio.create_task(slow())
         results: list[Any] = []
         if return_exceptions:
-            results = await asyncio.gather(slow_task, bad(), return_exceptions=True)
+            results = list(
+                await asyncio.gather(slow_task, bad(), return_exceptions=True)
+            )
         else:
             with pytest.raises(ValueError):
                 await asyncio.gather(slow_task, bad())

@@ -152,7 +152,7 @@ def test_bad_construction() -> None:
         with pytest.raises(ValueError):
             Container(cap)
     with pytest.raises(TypeError):
-        Container(True)  # type: ignore[arg-type]
+        Container(True)
     with pytest.raises(TypeError):
         Container("5")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
@@ -160,7 +160,7 @@ def test_bad_construction() -> None:
     with pytest.raises(ValueError):
         Container(10, init=11)
     with pytest.raises(TypeError):
-        Container(10, init=True)  # type: ignore[arg-type]
+        Container(10, init=True)
 
 
 def test_monitor_hook() -> None:
