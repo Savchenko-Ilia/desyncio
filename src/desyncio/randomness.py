@@ -10,7 +10,14 @@ The ``:`` separator is unambiguous: a seed is a non-negative int, so it is digit
 only and the first ``:`` always ends it, even if the name contains ``:``.
 """
 
+from __future__ import annotations
+
+import hashlib
 import random
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 def _check_seed(seed: object) -> int:
@@ -47,6 +54,7 @@ class RandomStreams:
         """
         self._seed = _check_seed(seed)
         self._streams: dict[str, random.Random] = {}
+        self._np_streams: dict[str, np.random.Generator] = {}
 
     @property
     def seed(self) -> int:
@@ -60,4 +68,26 @@ class RandomStreams:
         if rng is None:
             rng = random.Random(f"{self._seed}:{name}")
             self._streams[name] = rng
+        return rng
+
+    def np_stream(self, name: str) -> np.random.Generator:
+        """Return the numpy ``Generator`` called ``name``, creating it on first use.
+
+        Independent of ``stream(name)``. Users then call numpy's own
+        distributions (``rng.poisson(...)``) and scipy's
+        (``scipy.stats.truncnorm.rvs(..., random_state=rng)``).
+        """
+        _check_name(name)
+        rng = self._np_streams.get(name)
+        if rng is None:
+            # numpy is imported here, not at module level, so ``import desyncio``
+            # stays numpy-free.
+            import numpy
+
+            # SHA-256, not hash(): PYTHONHASHSEED randomises str hashes per
+            # process, which would break reproducibility across processes.
+            digest = hashlib.sha256(f"{self._seed}:{name}".encode()).digest()
+            entropy = int.from_bytes(digest, "big")
+            rng = numpy.random.default_rng(numpy.random.SeedSequence(entropy))
+            self._np_streams[name] = rng
         return rng

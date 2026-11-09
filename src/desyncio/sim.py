@@ -23,12 +23,15 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 import asyncio
 from collections.abc import Coroutine
 from random import Random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from desyncio._validate import to_float
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_random_streams
+
+if TYPE_CHECKING:
+    import numpy as np
 
 _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
@@ -154,6 +157,29 @@ class Sim:
                 "create it without context= to use sim.random()"
             ) from None
         return streams.stream(name)
+
+    def np_random(self, name: str) -> "np.random.Generator":
+        """Return the named numpy ``Generator`` of this run (same object each call).
+
+        Seeded from the run seed and ``name``, independent of ``random(name)``.
+        Call numpy's own distributions on it (``rng.poisson(...)``) and scipy's
+        (``scipy.stats.truncnorm.rvs(..., random_state=rng)``).
+
+        Raises:
+            RuntimeError: outside ``desyncio.run(...)``, or in a task created
+                with a fresh ``contextvars.Context`` (it lacks the run's streams).
+        """
+        _loop()
+        try:
+            streams = current_random_streams()
+        except RuntimeError:
+            raise RuntimeError(
+                "the simulation is running, but this task's context lacks the "
+                "run's random streams: the task was created with a fresh "
+                "contextvars.Context (loop.create_task(..., context=...)); "
+                "create it without context= to use sim.np_random()"
+            ) from None
+        return streams.np_stream(name)
 
     def interruptible(self) -> Interruptible:
         """Return an async context manager marking code that may be interrupted.
