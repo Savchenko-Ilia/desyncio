@@ -131,3 +131,12 @@ The Module 2 backlog was rewritten accordingly:
 
 ## D021 — accepted (owner said "go")
 The three defaults stand: Container uses strict FIFO (head-of-line); an interrupt to a task that isn't waiting is delivered at its next `await`; primitives get an explicit `monitor=` hook. Batch 9 is RES-01, INT-01, CON-01 and STO-01. The owner also asked for an audit of module 1 code for reuse of existing asyncio functionality (principle 6).
+
+## D023 — One monitor contract for all primitives (lead, batch 9)
+The batch 9 implementers each invented a different monitor signature (`monitor(resource)`, `monitor(level)`, `monitor(store)`), because D021 didn't specify one. The contract is now:
+- `monitor(primitive)`: called with the primitive itself, synchronously, after every state change, once the primitive's state is fully settled.
+- The monitor reads public properties (`count`, `queue_length`, `level`, `len()`, ...).
+- An exception from the monitor propagates to the task that caused the change, but it must never leave the primitive inconsistent: no leaked unit, counter, ticket or mirror entry.
+- Monitors must not block, or acquire the primitive.
+
+The lead promoted RES-01's reviewer SHOULD ("a raising monitor leaks a held unit") to a MUST under this contract. CON-01 and STO-01 are reviewed against it too.
