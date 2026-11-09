@@ -103,6 +103,17 @@ def test_every_fence_line_is_parsed(path: Path) -> None:
     )
 
 
+ALLOWED_LANGUAGES = {"python", "text"}
+
+
+@pytest.mark.parametrize("path", [GUIDE, README], ids=["guide", "readme"])
+def test_every_fence_language_is_allowed(path: Path) -> None:
+    """A ``Python`` or ``python3`` fence would be skipped by the exact match on
+    ``python``, so any language outside the allowlist fails by name."""
+    bad = sorted({lang for lang, _ in _blocks(path)} - ALLOWED_LANGUAGES)
+    assert not bad, f"{path.name}: fence languages {bad} not in {ALLOWED_LANGUAGES}"
+
+
 def test_python_block_count_matches_python_fence_lines() -> None:
     text = GUIDE.read_text()
     openers = len(re.findall(r"^```python[ \t]*$", text, re.MULTILINE))

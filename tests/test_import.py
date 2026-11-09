@@ -72,6 +72,12 @@ def _run_python(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_import_desyncio_succeeds_in_a_fresh_interpreter() -> None:
+    """An import cycle fails here by name, not as a collection error."""
+    result = _run_python("import desyncio")
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("module", SUBMODULES)
 def test_submodule_imports_first(module: str) -> None:
     result = _run_python(f"import desyncio.{module}; import desyncio")
@@ -79,9 +85,11 @@ def test_submodule_imports_first(module: str) -> None:
 
 
 @pytest.mark.parametrize("module", SUBMODULES)
-def test_no_from_desyncio_import_sim(module: str) -> None:
-    """`from desyncio import sim` can yield the submodule; use `desyncio.sim`."""
+def test_no_from_desyncio_import_x(module: str) -> None:
+    """Inside the package, `from desyncio import X` is forbidden: it can yield a
+    submodule instead of the object, and it risks cycles. Import from the
+    defining submodule (`from desyncio.sim import sim`)."""
     path = Path(desyncio.__file__).parent / f"{module}.py"
     for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom) and node.module == "desyncio":
-            assert "sim" not in [a.name for a in node.names], path
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            assert node.module != "desyncio", f"{path}: {ast.unparse(node)}"

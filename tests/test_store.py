@@ -1382,3 +1382,31 @@ def test_filter_same_seed_gives_identical_log() -> None:
     assert len(a) > 20
     assert a == desyncio.run(_filter_model(), seed=7)
     assert a != desyncio.run(_filter_model(), seed=8)
+
+
+@pytest.mark.parametrize("non_matching", [1, 2, 3])
+def test_filter_getter_keeps_seniority_after_re_parking(non_matching: int) -> None:
+    """Non-matching puts wake both getters and they re-park; the one that
+    waited longer still gets the first matching item."""
+
+    async def main() -> list[tuple[str, str]]:
+        s: FilterStore[str] = FilterStore()
+        got: list[tuple[str, str]] = []
+
+        async def getter(name: str) -> None:
+            got.append((name, await s.get(lambda p: p.startswith("wheel"))))
+
+        sim.spawn(getter("older"))
+        await sim.timeout(1)
+        sim.spawn(getter("younger"))
+        await sim.timeout(1)
+        for i in range(non_matching):  # each wakes both getters; neither matches
+            await s.put(f"gear-{i}")
+            await sim.timeout(1)
+        assert got == []
+        await s.put("wheel-1")
+        await s.put("wheel-2")
+        await sim.timeout(1)
+        return got
+
+    assert desyncio.run(main()) == [("older", "wheel-1"), ("younger", "wheel-2")]
