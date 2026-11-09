@@ -1,6 +1,7 @@
 """Deterministic tie-breaking: timers fire in (time, priority, sequence) order."""
 
 import asyncio
+import itertools
 import math
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from hypothesis import given
 from hypothesis import strategies as st
 
+from desyncio import scheduling
 from desyncio.loop import VirtualTimeLoop
 from desyncio.scheduling import PriorityTimerHandle
 
@@ -112,6 +114,23 @@ def test_sequence_is_per_loop_and_monotonic() -> None:
     first, second = seqs(), seqs()
     assert first == sorted(first) and len(set(first)) == 5
     assert first == second  # a fresh loop starts its own counter
+
+
+def test_sequence_starts_at_zero_per_loop_and_is_a_plain_itertools_count() -> None:
+    # Reads PriorityTimerHandle.sequence (public property) and the loop's
+    # private _state, because the stdlib-counter claim has no other surface.
+    assert not hasattr(scheduling, "SequenceCounter")  # principle 6
+    loop_a, loop_b = VirtualTimeLoop(), VirtualTimeLoop()
+    try:
+        assert type(loop_a._state.sequence) is type(itertools.count())
+        a = [loop_a.call_at(1.0, lambda: None) for _ in range(3)]
+        b = [loop_b.call_at(1.0, lambda: None) for _ in range(2)]
+        a.append(loop_a.call_at(1.0, lambda: None))
+        assert [h.sequence for h in a] == [0, 1, 2, 3]  # type: ignore[attr-defined]
+        assert [h.sequence for h in b] == [0, 1]  # type: ignore[attr-defined]
+    finally:
+        loop_a.close()
+        loop_b.close()
 
 
 def test_priority_must_be_int() -> None:
