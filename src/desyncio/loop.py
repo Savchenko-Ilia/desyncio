@@ -61,7 +61,6 @@ from desyncio.realtime import MAX_REAL_WAIT, RealTimePacer
 from desyncio.scheduling import (
     DEFAULT_PRIORITY,
     PriorityTimerHandle,
-    SequenceCounter,
 )
 from desyncio.trace import Tracer, TraceSink, _TracedCoroutine
 
@@ -239,7 +238,8 @@ class _LoopState:
     ``tests/test_loop.py`` guards the count.
 
     Attributes:
-        sequence: the timer tie-break counter (see :mod:`desyncio.scheduling`).
+        sequence: the timer tie-break ``itertools.count()``, one per loop
+            (see :mod:`desyncio.scheduling`).
         task_names: the ``proc-N`` counter for default task names (D015).
         next_task_name: one-shot name for the next unnamed task, or ``None``.
         tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
@@ -262,7 +262,7 @@ class _LoopState:
     )
 
     def __init__(self) -> None:
-        self.sequence = SequenceCounter()
+        self.sequence = itertools.count()
         self.task_names = itertools.count(1)
         self.next_task_name: str | None = None
         self.tracer: Tracer | None = None
@@ -436,7 +436,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             self._check_thread()  # type: ignore[attr-defined]
             self._check_callback(callback, api_name)  # type: ignore[attr-defined]
         timer = PriorityTimerHandle(
-            when, priority, self._state.sequence.next(), callback, args, self, context
+            when, priority, next(self._state.sequence), callback, args, self, context
         )
         timer.drop_creation_frame()
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]

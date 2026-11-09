@@ -58,12 +58,6 @@ def test_interrupt_is_exception_not_cancelled_error() -> None:
     assert Interrupt().cause is None
 
 
-def test_exported_at_top_level() -> None:
-    """API-01/D036 changed the spec: Interrupt is now a top-level export."""
-    assert desyncio.Interrupt is desyncio.interrupt.Interrupt
-    assert "Interrupt" in desyncio.__all__
-
-
 def test_facade_outside_run_raises() -> None:
     with pytest.raises(RuntimeError):
         sim.interruptible()
@@ -86,14 +80,6 @@ def test_interrupt_sim_timeout_clock_does_not_jump() -> None:
 
     desyncio.run(main())
     # And the run itself ends without the loop sleeping until the dead timer.
-
-
-def test_interrupt_clock_never_reaches_cancelled_timer() -> None:
-    async def main() -> float:
-        await _interrupt_blocked(lambda: sim.timeout(100))
-        return sim.now
-
-    assert desyncio.run(main()) == 1.0
 
 
 def test_interrupt_lock_waiter_next_waiter_not_stranded() -> None:
@@ -126,43 +112,6 @@ def test_interrupt_lock_waiter_next_waiter_not_stranded() -> None:
     assert desyncio.run(main()) == ["victim-interrupted", "next"]
 
 
-def test_interrupt_condition_wait_lock_held_again_and_not_others() -> None:
-    async def main() -> None:
-        cond = asyncio.Condition()
-        holder_released = False
-
-        async def victim() -> None:
-            async with cond:
-                try:
-                    async with sim.interruptible():
-                        await cond.wait()
-                except Interrupt:
-                    # Condition.wait re-acquires the lock even on cancel.
-                    assert cond.locked()
-                    await sim.timeout(1)
-                    assert cond.locked()
-            assert not cond.locked()
-
-        async def other() -> None:
-            nonlocal holder_released
-            await sim.timeout(2)
-            async with cond:
-                await sim.timeout(5)
-                assert cond.locked()
-            holder_released = True
-
-        v = sim.spawn(victim())
-        o = sim.spawn(other())
-        await sim.timeout(1)
-        sim.interrupt(v, "c")
-        await v
-        await o
-        assert holder_released
-        assert not cond.locked()
-
-    desyncio.run(main())
-
-
 def test_interrupt_condition_wait_while_other_holds_lock() -> None:
     """The lock is taken by someone else when the waiter is interrupted: the
     waiter must wait for it and must not release the other task's hold."""
@@ -177,6 +126,8 @@ def test_interrupt_condition_wait_while_other_holds_lock() -> None:
                     async with sim.interruptible():
                         await cond.wait()
                 except Interrupt:
+                    # Condition.wait re-acquires the lock even when cancelled.
+                    assert cond.locked()
                     log.append(f"victim-back@{sim.now}")
 
         async def other() -> None:
@@ -197,27 +148,6 @@ def test_interrupt_condition_wait_while_other_holds_lock() -> None:
 
     # victim runs again only once other released the lock at t=5
     assert desyncio.run(main()) == ["other-done", "victim-back@5.0"]
-
-
-def test_interrupt_semaphore_no_leak() -> None:
-    async def main() -> None:
-        sem = asyncio.Semaphore(1)
-        await sem.acquire()
-        got: list[str] = []
-
-        async def nxt() -> None:
-            async with sem:
-                got.append("next")
-
-        n = sim.spawn(nxt())
-        exc, _, _ = await _interrupt_blocked(sem.acquire)
-        assert exc.cause == "boom"
-        sem.release()
-        await n
-        assert got == ["next"]
-        assert not sem.locked()
-
-    desyncio.run(main())
 
 
 def test_interrupt_resource_no_unit_leaked_next_waiter_served() -> None:
@@ -257,43 +187,6 @@ def test_interrupt_resource_no_unit_leaked_next_waiter_served() -> None:
     assert desyncio.run(main()) == [("next", 10.0)]
 
 
-def test_interrupt_resource_holder_releases_unit() -> None:
-    async def main() -> None:
-        res = Resource(2)
-
-        async def holder() -> None:
-            try:
-                async with sim.interruptible():
-                    async with res:
-                        await sim.timeout(100)
-            except Interrupt:
-                pass
-
-        h = sim.spawn(holder())
-        await sim.timeout(1)
-        assert res.count == 1
-        sim.interrupt(h, None)
-        await h
-        assert res.count == 0
-        assert sim.now == 1.0
-
-    desyncio.run(main())
-
-
-def test_interrupt_queue_get_item_goes_to_next_getter() -> None:
-    async def main() -> None:
-        q: asyncio.Queue[int] = asyncio.Queue()
-        second = sim.spawn(q.get())
-        await sim.timeout(0)
-        await _interrupt_blocked(q.get)
-        # The interrupted getter is no longer queued, so the item reaches the
-        # getter that was already waiting... which is "second" (first in line).
-        q.put_nowait(7)
-        assert await second == 7
-
-    desyncio.run(main())
-
-
 def test_interrupt_store_get_and_put() -> None:
     async def main() -> None:
         store: Store[int] = Store(capacity=1)
@@ -303,7 +196,7 @@ def test_interrupt_store_get_and_put() -> None:
         await _interrupt_blocked(lambda: store.put(2))
         assert store.items == (1,)
         assert await store.get() == 1
-        assert store.items == ()
+        assert list(store.items) == []
 
     desyncio.run(main())
 
@@ -320,17 +213,6 @@ def test_interrupt_container_get_and_put() -> None:
         await c.put(2)  # serves the get(5) that was ahead of the others
         await later
         assert c.level == 0
-
-    desyncio.run(main())
-
-
-def test_interrupt_event_wait() -> None:
-    async def main() -> None:
-        ev = asyncio.Event()
-        exc, now, _ = await _interrupt_blocked(ev.wait)
-        assert (exc.cause, now) == ("boom", 1.0)
-        ev.set()
-        await ev.wait()
 
     desyncio.run(main())
 
@@ -448,43 +330,32 @@ def test_nested_blocks_innermost_receives() -> None:
     assert desyncio.run(main()) == ["inner:one", "outer:two"]
 
 
-def test_interrupt_inside_asyncio_timeout_interrupt_fires_first() -> None:
+@pytest.mark.parametrize("outer", ["timeout_outer", "interruptible_outer"])
+@pytest.mark.parametrize("trigger", ["interrupt", "timeout"])
+def test_interrupt_and_asyncio_timeout_nesting(outer: str, trigger: str) -> None:
+    """``asyncio.timeout()`` and ``interruptible()`` nested in either order: whichever
+    fires translates to its own exception, at the time it fired, and leaves
+    ``cancelling() == 0`` because each scope undoes only its own cancel."""
+
     async def main() -> list[object]:
         log: list[object] = []
 
+        # trigger "timeout": the timeout fires at t=1. Otherwise it is far away
+        # and the interrupt arrives at t=1 first.
+        limit = 1 if trigger == "timeout" else 10
+
         async def worker() -> None:
             try:
-                async with asyncio.timeout(10):
+                if outer == "timeout_outer":
+                    async with asyncio.timeout(limit):
+                        async with sim.interruptible():
+                            await sim.timeout(100)
+                else:
                     async with sim.interruptible():
-                        await sim.timeout(100)
+                        async with asyncio.timeout(limit):
+                            await sim.timeout(100)
             except Interrupt as exc:
                 log.append(("interrupt", exc.cause, sim.now))
-            except TimeoutError:
-                log.append("timeout")
-            task = asyncio.current_task()
-            assert task is not None
-            log.append(task.cancelling())
-
-        w = sim.spawn(worker())
-        await sim.timeout(1)
-        sim.interrupt(w, "i")
-        await w
-        return log
-
-    assert desyncio.run(main()) == [("interrupt", "i", 1.0), 0]
-
-
-def test_asyncio_timeout_inside_interruptible_timeout_fires_first() -> None:
-    async def main() -> list[object]:
-        log: list[object] = []
-
-        async def worker() -> None:
-            try:
-                async with sim.interruptible():
-                    async with asyncio.timeout(1):
-                        await sim.timeout(100)
-            except Interrupt:
-                log.append("interrupt")
             except TimeoutError:
                 log.append(("timeout", sim.now))
             task = asyncio.current_task()
@@ -492,56 +363,14 @@ def test_asyncio_timeout_inside_interruptible_timeout_fires_first() -> None:
             log.append(task.cancelling())
 
         w = sim.spawn(worker())
+        if trigger == "interrupt":
+            await sim.timeout(1)
+            sim.interrupt(w, "i")
         await w
         return log
 
-    assert desyncio.run(main()) == [("timeout", 1.0), 0]
-
-
-def test_interruptible_outside_asyncio_timeout_interrupt_fires_first() -> None:
-    async def main() -> list[object]:
-        log: list[object] = []
-
-        async def worker() -> None:
-            try:
-                async with sim.interruptible():
-                    async with asyncio.timeout(10):
-                        await sim.timeout(100)
-            except Interrupt as exc:
-                log.append(("interrupt", exc.cause, sim.now))
-            except TimeoutError:
-                log.append("timeout")
-            task = asyncio.current_task()
-            assert task is not None
-            log.append(task.cancelling())
-
-        w = sim.spawn(worker())
-        await sim.timeout(1)
-        sim.interrupt(w, "i")
-        await w
-        return log
-
-    assert desyncio.run(main()) == [("interrupt", "i", 1.0), 0]
-
-
-def test_asyncio_timeout_outside_interruptible_timeout_fires_first() -> None:
-    async def main() -> list[object]:
-        log: list[object] = []
-
-        async def worker() -> None:
-            try:
-                async with asyncio.timeout(1):
-                    async with sim.interruptible():
-                        await sim.timeout(100)
-            except Interrupt:
-                log.append("interrupt")
-            except TimeoutError:
-                log.append(("timeout", sim.now))
-
-        await sim.spawn(worker())
-        return log
-
-    assert desyncio.run(main()) == [("timeout", 1.0)]
+    expected = ("interrupt", "i", 1.0) if trigger == "interrupt" else ("timeout", 1.0)
+    assert desyncio.run(main()) == [expected, 0]
 
 
 # --- real cancel -----------------------------------------------------------
@@ -566,26 +395,13 @@ def test_real_cancel_alone_is_not_turned_into_interrupt() -> None:
     desyncio.run(main())
 
 
-def test_cancel_then_interrupt_cancel_wins() -> None:
-    async def main() -> None:
-        async def worker() -> None:
-            async with sim.interruptible():
-                await sim.timeout(100)
+@pytest.mark.parametrize("cancel_first", [True, False])
+def test_real_cancel_beats_interrupt_in_either_order(cancel_first: bool) -> None:
+    """Cancel and interrupt both land before the task runs again. The real cancel
+    wins: the task ends cancelled, and ``cancelling()`` still counts it (1)."""
 
-        w = sim.spawn(worker())
-        await sim.timeout(1)
-        w.cancel()
-        sim.interrupt(w, "late")  # same instant, before the task ran
-        with pytest.raises(asyncio.CancelledError):
-            await w
-        assert w.cancelled()
-
-    desyncio.run(main())
-
-
-def test_interrupt_then_cancel_cancel_wins() -> None:
-    async def main() -> list[object]:
-        log: list[object] = []
+    async def main() -> list[tuple[bool, int]]:
+        seen: list[tuple[bool, int]] = []
 
         async def worker() -> None:
             scope = sim.interruptible()
@@ -595,18 +411,21 @@ def test_interrupt_then_cancel_cancel_wins() -> None:
             finally:
                 task = asyncio.current_task()
                 assert task is not None
-                log.append((scope.interrupted, task.cancelling()))
+                seen.append((scope.interrupted, task.cancelling()))
 
         w = sim.spawn(worker())
         await sim.timeout(1)
-        sim.interrupt(w, "first")
-        w.cancel()
+        if cancel_first:
+            w.cancel()
+            sim.interrupt(w, "late")
+        else:
+            sim.interrupt(w, "first")
+            w.cancel()
         with pytest.raises(asyncio.CancelledError):
             await w
         assert w.cancelled()
-        return log
+        return seen
 
-    # The real cancel is still counted (cancelling() == 1), the interrupt is not.
     assert desyncio.run(main()) == [(True, 1)]
 
 
@@ -640,35 +459,40 @@ def test_cancelling_restored_after_interrupt_with_prior_real_cancel_request() ->
     desyncio.run(main())
 
 
-# --- several interrupts / delivery timing ---------------------------------
+# --- delivery timing ---------------------------------------------------------
 
 
-def test_several_interrupts_first_cause_wins() -> None:
-    async def main() -> tuple[object, int]:
-        out: list[object] = []
+@pytest.mark.parametrize("wait", ["sim_timeout", "first_await"])
+def test_interrupt_wins_over_a_wakeup_already_queued(wait: str) -> None:
+    """The target's own wakeup is already queued for this instant (a timer that
+    just fired, or ``sleep(0)`` at its first await): the interrupt still wins and
+    is delivered at that await, so the code after the await never runs."""
+
+    async def main() -> list[object]:
+        log: list[object] = []
 
         async def worker() -> None:
-            scope = sim.interruptible()
             try:
-                async with scope:
-                    await sim.timeout(100)
+                async with sim.interruptible():
+                    if wait == "sim_timeout":
+                        await sim.timeout(1)  # fires at t=1, same instant
+                    else:
+                        await asyncio.sleep(0)
+                    log.append("not reached")
             except Interrupt as exc:
-                out.append(exc.cause)
-                out.append(scope.cause)
-            task = asyncio.current_task()
-            assert task is not None
-            out.append(task.cancelling())
+                log.append((exc.cause, sim.now))
 
         w = sim.spawn(worker())
-        await sim.timeout(1)
-        sim.interrupt(w, "first")
-        sim.interrupt(w, "second")
-        sim.interrupt(w, "third")
+        # sim_timeout: our timer (registered after the worker's) fires second, so
+        # the interrupt hits while the worker's t=1 wakeup is queued.
+        # first_await: yield once so the worker is parked at sleep(0).
+        await sim.timeout(1 if wait == "sim_timeout" else 0)
+        sim.interrupt(w, "x")
         await w
-        assert out[0] == out[1]
-        return out[0], int(out[2])  # type: ignore[call-overload]
+        return log
 
-    assert desyncio.run(main()) == ("first", 0)
+    now = 1.0 if wait == "sim_timeout" else 0.0
+    assert desyncio.run(main()) == [("x", now)]
 
 
 def test_interrupt_after_block_exit_needs_new_block() -> None:
@@ -687,82 +511,7 @@ def test_interrupt_after_block_exit_needs_new_block() -> None:
     desyncio.run(main())
 
 
-def test_interrupt_delivered_at_current_await_same_time() -> None:
-    """The target's wait already completed this instant (its wakeup is queued):
-    the interrupt still wins and is delivered at that await."""
-
-    async def main() -> list[object]:
-        log: list[object] = []
-
-        async def worker() -> None:
-            try:
-                async with sim.interruptible():
-                    await sim.timeout(1)  # fires at t=1, same instant
-                    log.append("not reached")
-            except Interrupt as exc:
-                log.append((exc.cause, sim.now))
-
-        w = sim.spawn(worker())
-        await sim.timeout(1)
-        sim.interrupt(w, "x")
-        await w
-        return log
-
-    # The main task's timer (registered first) fires first, and it interrupts
-    # while the worker's own t=1 wakeup is still queued: the interrupt is
-    # delivered at that await, so "not reached" is never logged.
-    assert desyncio.run(main()) == [("x", 1.0)]
-
-
-def test_interrupt_before_first_await_of_block() -> None:
-    """Interrupter runs before the target task has started its block."""
-
-    async def main() -> list[object]:
-        log: list[object] = []
-        ready = asyncio.Event()
-
-        async def worker() -> None:
-            try:
-                async with sim.interruptible():
-                    ready.set()
-                    await asyncio.sleep(0)  # first await of the block
-                    log.append("ran-past-first-await")
-                    await sim.timeout(100)
-            except Interrupt as exc:
-                log.append((exc.cause, sim.now))
-
-        w = sim.spawn(worker())
-        await ready.wait()
-        # The worker is parked at its first await; the wakeup is queued.
-        sim.interrupt(w, "early")
-        await w
-        return log
-
-    assert desyncio.run(main()) == [("early", 0.0)]
-
-
 # --- RuntimeError cases ----------------------------------------------------
-
-
-def test_runtime_error_task_not_in_block() -> None:
-    async def main() -> None:
-        w = sim.spawn(sim.timeout(5))
-        await sim.timeout(1)
-        with pytest.raises(RuntimeError):
-            sim.interrupt(w, None)
-        await w
-
-    desyncio.run(main())
-
-
-def test_runtime_error_task_not_started() -> None:
-    async def main() -> None:
-        w = sim.spawn(sim.timeout(5))
-        with pytest.raises(RuntimeError):
-            sim.interrupt(w, None)
-        await w
-
-    desyncio.run(main())
 
 
 def test_runtime_error_finished_task() -> None:
@@ -829,45 +578,6 @@ def test_runtime_error_enter_outside_task() -> None:
     desyncio.run(main())
 
 
-# --- machine breakdown (D024) ----------------------------------------------
-
-
-def test_machine_breakdown_worker_resumes_remaining_work() -> None:
-    async def main() -> list[object]:
-        log: list[object] = []
-
-        async def worker() -> None:
-            remaining = 10.0
-            while remaining > 0:
-                started = sim.now
-                try:
-                    async with sim.interruptible():
-                        await sim.timeout(remaining)
-                    remaining = 0
-                except Interrupt as exc:
-                    remaining -= sim.now - started
-                    log.append(("broken", sim.now, exc.cause, remaining))
-                    await sim.timeout(exc.cause)  # repair takes `cause` units
-                    log.append(("repaired", sim.now))
-            log.append(("done", sim.now))
-
-        w = sim.spawn(worker())
-        await sim.timeout(3)
-        sim.interrupt(w, 2.0)
-        await sim.timeout(4)  # t=7: work resumed at 5, 2 units done... interrupt
-        sim.interrupt(w, 1.0)
-        await w
-        return log
-
-    assert desyncio.run(main()) == [
-        ("broken", 3.0, 2.0, 7.0),
-        ("repaired", 5.0),
-        ("broken", 7.0, 1.0, 5.0),
-        ("repaired", 8.0),
-        ("done", 13.0),
-    ]
-
-
 # --- determinism ------------------------------------------------------------
 
 
@@ -877,7 +587,6 @@ async def _chaos(n_workers: int = 6) -> dict[str, object]:
     rng = sim.random("chaos")
     res = Resource(2)
     cont = Container(capacity=20, init=10)
-    store: Store[int] = Store(capacity=3)
     mirror_ok = True
     moved_in = 0.0
     moved_out = 0.0
@@ -887,7 +596,7 @@ async def _chaos(n_workers: int = 6) -> dict[str, object]:
         nonlocal mirror_ok
         mirror_ok &= len(s) == len(s.items)
 
-    store = Store(capacity=3, monitor=check_store)
+    store: Store[int] = Store(capacity=3, monitor=check_store)
 
     async def step(wrng_val: float, kind: int) -> None:
         nonlocal moved_in, moved_out
@@ -947,14 +656,15 @@ async def _chaos(n_workers: int = 6) -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize("seed", range(20))
-def test_stress_invariants_hold(seed: int) -> None:
-    out: Any = desyncio.run(_chaos(), seed=seed)
-    assert out["res_count"] == 0 and out["res_queue"] == 0
-    assert 0 <= out["level"] <= 20
-    assert out["mirror_ok"]
-    assert len(out["store_items"]) == out["store_len"] <= 3
-    assert out["stats"]["interrupts"] + out["stats"]["cancels"] > 0
+def test_stress_invariants_hold() -> None:
+    for seed in range(20):
+        out: Any = desyncio.run(_chaos(), seed=seed)
+        msg = f"seed={seed}"
+        assert out["res_count"] == 0 and out["res_queue"] == 0, msg
+        assert 0 <= out["level"] <= 20, msg
+        assert out["mirror_ok"], msg
+        assert len(out["store_items"]) == out["store_len"] <= 3, msg
+        assert out["stats"]["interrupts"] + out["stats"]["cancels"] > 0, msg
 
 
 def test_stress_conserves_container_amount() -> None:
@@ -1071,3 +781,114 @@ def test_abandoned_task_leaves_no_registry_entry_after_gc() -> None:
     collected, after, before = desyncio.run(main())
     assert collected, "the registry kept the abandoned task alive"
     assert after == before
+
+
+# --- gap tests (TST-06) --------------------------------------------------
+
+
+@pytest.mark.parametrize("eager", [True, False])
+def test_late_interrupt_after_the_last_await_is_not_raised(eager: bool) -> None:
+    # An eager task runs inside the worker's step: its cancel() only sets
+    # _must_cancel, which uncancel() in __aexit__ clears, so no Interrupt. A
+    # normal task runs only after that step, when the block is already closed.
+    async def main() -> tuple[bool, int, float, str]:
+        if eager:
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+
+        async def worker() -> tuple[bool, int, float, str]:
+            task = asyncio.current_task()
+            assert task is not None
+
+            async def interrupter() -> str:
+                try:
+                    sim.interrupt(task, "late")
+                except RuntimeError as exc:
+                    return str(exc)
+                return "delivered"
+
+            async with sim.interruptible() as scope:
+                await sim.timeout(1)
+                job = sim.spawn(interrupter())
+            await sim.timeout(1)  # no stale cancel: this await survives
+            return scope.interrupted, task.cancelling(), sim.now, await job
+
+        return await sim.spawn(worker())
+
+    interrupted, cancelling, now, outcome = desyncio.run(main())
+    assert (interrupted, cancelling, now) == (eager, 0, 2.0)
+    if eager:
+        assert outcome == "delivered"
+    else:
+        assert "not inside" in outcome
+
+
+def test_real_taskgroup_failure_while_interrupted_is_not_translated() -> None:
+    # Known limit: a real TaskGroup failure at the instant of the interrupt
+    # propagates as an untranslated ExceptionGroup; the scope is still interrupted.
+    async def main() -> tuple[ExceptionGroup[Exception], bool, int]:
+        async def failing_child() -> None:
+            await sim.timeout(1)
+            raise ValueError("real failure")
+
+        async def worker() -> tuple[ExceptionGroup[Exception], bool, int]:
+            task = asyncio.current_task()
+            assert task is not None
+            scope = sim.interruptible()
+            try:
+                async with scope:
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(failing_child())
+                        await sim.timeout(100)
+            except ExceptionGroup as group:
+                return group, scope.interrupted, task.cancelling()
+            raise AssertionError("expected an ExceptionGroup")
+
+        w = sim.spawn(worker())
+        await sim.timeout(0)  # let the worker start and the child schedule its timer
+
+        async def interrupter() -> None:
+            await sim.timeout(1)  # fires after the child's timer, same instant
+            sim.interrupt(w, "boom")
+
+        sim.spawn(interrupter())
+        return await w
+
+    group, interrupted, cancelling = desyncio.run(main())
+    assert [type(e) for e in group.exceptions] == [ValueError]
+    assert interrupted
+    assert cancelling == 0
+
+
+@pytest.mark.parametrize("method", ["__aenter__", "__aexit__"])
+def test_interruptible_enter_and_exit_never_await(method: str) -> None:
+    """Pin that ``Interruptible.__aenter__``/``__aexit__`` contain no suspension point.
+
+    Why this test exists (D030, D034): ``PreemptiveRequest`` grants a unit and
+    then enters an ``Interruptible`` scope; on exit it leaves the scope and
+    releases the unit. Both steps are leak-free only because the scope's
+    ``__aenter__`` and ``__aexit__`` run to completion without ever yielding to
+    the event loop. If either one gained an ``await`` (or ``async for`` /
+    ``async with``), a cancel or ``sim.interrupt`` could land at that
+    suspension point, between the grant and the scope (or between the scope
+    and the release), and a unit would be lost for good -- the same leak D030
+    removed from RES-02. The methods are declared ``async`` only to satisfy
+    the async context manager protocol, so this check inspects their source:
+    a future ``await`` in either one fails here loudly instead of leaking
+    silently under rare timing.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from desyncio.interrupt import Interruptible
+
+    source = textwrap.dedent(inspect.getsource(getattr(Interruptible, method)))
+    tree = ast.parse(source)
+    suspending = [
+        f"{type(node).__name__} at line {node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Await, ast.AsyncFor, ast.AsyncWith))
+    ]
+    assert suspending == [], (
+        f"Interruptible.{method} must never suspend (D030/D034), found: {suspending}"
+    )

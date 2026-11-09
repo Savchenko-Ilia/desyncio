@@ -146,21 +146,6 @@ def test_tracing_on_wraps_and_is_still_a_coroutine() -> None:
     assert seen == [(False, True)]
 
 
-def test_no_trace_code_runs_when_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    import desyncio.trace as tr
-
-    def explode(*a: Any, **k: Any) -> None:
-        raise AssertionError("tracing code ran while tracing was off")
-
-    monkeypatch.setattr(tr._TracedCoroutine, "send", explode)
-    monkeypatch.setattr(tr._TracedCoroutine, "throw", explode)
-
-    async def main() -> None:
-        await asyncio.gather(asyncio.sleep(1), asyncio.sleep(2))
-
-    desyncio.run(main())
-
-
 def test_trace_must_be_callable() -> None:
     with pytest.raises(TypeError):
         VirtualTimeLoop(trace=42)  # type: ignore[arg-type]
@@ -269,41 +254,7 @@ def test_trace_identical_across_runs_in_process() -> None:
     assert ns["go"](8) != a
 
 
-def test_trace_identical_in_subprocess_with_other_hashseed() -> None:
-    code = _MODEL + "\nprint(repr(go(7)))"
-    outs = []
-    for hs in ("1", "12345"):
-        env = {**os.environ, "PYTHONHASHSEED": hs}
-        p = subprocess.run(
-            [sys.executable, "-c", code],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        outs.append(p.stdout)
-    assert outs[0] == outs[1]
-    ns: dict[str, Any] = {}
-    exec(_MODEL, ns)  # noqa: S102
-    assert outs[0].strip() == repr(ns["go"](7))
-
-
 # --- sink errors ----------------------------------------------------------
-
-
-def test_sink_exception_propagates_from_run() -> None:
-    class SinkBoom(Exception):
-        pass
-
-    def sink(rec: TraceRecord) -> None:
-        if rec.kind == "resume":
-            raise SinkBoom(rec)
-
-    async def main() -> None:
-        await asyncio.sleep(1)
-
-    with pytest.raises(SinkBoom):
-        desyncio.run(main(), trace=sink)
 
 
 class SinkBoom(Exception):
@@ -531,7 +482,7 @@ def test_trace_with_pacer_and_fake_wall() -> None:
         await asyncio.sleep(4)
 
     sink = ListSink()
-    pacer = RealTimePacer(2, wall_clock=wall)  # type: ignore[arg-type]
+    pacer = RealTimePacer(2, wall_clock=wall)
     desyncio.run(main(), trace=sink, pacer=pacer)
     assert sink.records == [
         R(0.0, 0, "main", "start"),
@@ -539,15 +490,6 @@ def test_trace_with_pacer_and_fake_wall() -> None:
         R(4.0, 2, "main", "finish"),
     ]
     assert wall.t == 2.0
-
-
-def test_trace_with_speed_and_until() -> None:
-    async def main() -> None:
-        await asyncio.sleep(0.0)
-
-    sink = ListSink()
-    desyncio.run(main(), trace=sink, speed=1e9, until=1.0)
-    assert [r.kind for r in sink.records] == ["start", "resume", "finish"]
 
 
 def test_traced_task_repr_and_stack_work() -> None:

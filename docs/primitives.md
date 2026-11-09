@@ -50,6 +50,7 @@ first-come first-served. Read-only `capacity`, `count` (units in use) and `queue
 
 ### Example: bank tellers
 
+<!-- pins: Resource FIFO service: waiting customers start in arrival order as tellers free up (D042) -->
 ```python
 import asyncio
 
@@ -108,6 +109,7 @@ done at t=8; in use=0, waiting=0
 - `queue_length` counts a request that was handed a unit but whose task has not resumed yet.
   `count` includes it only once the task resumes.
 
+<!-- pins: the queue is left on timeout: a waiter that gives up via asyncio.timeout leaves the Resource queue at once (D042) -->
 ```python
 import asyncio
 
@@ -210,6 +212,7 @@ caught boom; in use=0
 in the order they began waiting. Use `async with res.request(priority=p):`; a plain
 `async with res:` is priority 0. `priority` is an `int` or `float` (not `bool`, not NaN).
 
+<!-- pins: PriorityResource order: lowest priority number first, equal priorities FIFO (D042) -->
 ```python
 import asyncio
 
@@ -317,6 +320,7 @@ thrown off (SimPy semantics, D032). `request(priority=0, preempt=True)`:
 
 ### Example: machine shop
 
+<!-- pins: PreemptiveResource: a preempted holder is interrupted and its remaining work is resubmitted and finished (D042) -->
 ```python
 import asyncio
 
@@ -603,6 +607,7 @@ while `level < n`. Amounts are real numbers `> 0` and `<= capacity`. Read-only `
 
 ### Example: fuel tank
 
+<!-- pins: Container: blocking get and strict FIFO head-of-line blocking (D042) -->
 ```python
 import asyncio
 
@@ -714,6 +719,7 @@ item count and `store.items` is a read-only snapshot tuple.
 
 ### Example: producer/consumer
 
+<!-- pins: Store FIFO order and capacity blocking of put (D042) -->
 ```python
 import asyncio
 
@@ -777,6 +783,7 @@ item with the **lowest** priority number, ties in put order (D031). Items themse
 compared; priorities must be comparable with each other. If the priority is a function of the
 item, call `put(job, priority=key(job))`. `items` is in the order `get` will return them.
 
+<!-- pins: PriorityStore: lowest priority number first, ties in put order (D042) -->
 ```python
 from desyncio import PriorityStore, run
 
@@ -808,6 +815,7 @@ run(main())
 `FilterStore(capacity=math.inf, *, monitor=None)`: `get(filter=None)` removes and returns the
 first item (oldest first) for which `filter(item)` is true; without a filter it is plain FIFO.
 
+<!-- pins: FilterStore: get blocks until a matching item arrives, non-matching items stay (D042) -->
 ```python
 import asyncio
 
@@ -862,6 +870,7 @@ asyncio has no filtered queue, so `FilterStore` is built on `asyncio.Condition`,
   Here is the barging, identical in all three stores. A getter has waited since t=0; at t=1 an
   item is put and a fresh `get` in the same step takes it, so the old waiter is still waiting:
 
+<!-- pins: same-instant barging (D031): a fresh get beats an already woken getter, identically in all three stores (D042) -->
 ```python
 from desyncio import FilterStore, PriorityStore, Store, run, sim
 
@@ -900,6 +909,7 @@ FilterStore -> old waiter still waiting
   `Condition.notify_all()` may only be called with the lock held, which needs an `await`, but
   `shutdown` is synchronous in `asyncio.Queue`. It is left out rather than half-implemented.
 
+<!-- pins: Store shutdown: items already inside drain, then get raises QueueShutDown; FilterStore has no shutdown (D042) -->
 ```python
 import asyncio
 
@@ -947,6 +957,7 @@ leaves the block, which is the only place it can still be swapped for another ex
 
 ### Example: machine breakdown
 
+<!-- pins: machine breakdown: an Interrupt outside the block lets the process resume its remaining work (D042) -->
 ```python
 import asyncio
 
@@ -1020,6 +1031,7 @@ t=16 finished
   block ends with an `ExceptionGroup` (a child really failed), the group propagates
   untranslated; `scope.interrupted` is still `True`.
 
+<!-- pins: Interrupt guarantees: first cause wins, interrupting outside a block raises RuntimeError, a real cancel wins (D042) -->
 ```python
 import asyncio
 
@@ -1076,6 +1088,7 @@ real cancel won
 
 The `cancelling()` count after the block, with and without a real cancel:
 
+<!-- pins: cancelling() count after the block: +0 for an interrupt only, +1 when a real cancel also fired (D042) -->
 ```python
 import asyncio
 
@@ -1191,6 +1204,7 @@ Monitors fire only on a change, so record the starting value yourself.
 - With several records at the same time the last one wins for the mean, but all count for
   `min`/`max`.
 
+<!-- pins: TimeSeries: mean defaults to sim.now, and the Resource monitor to TimeSeries wiring (D042) -->
 ```python
 import asyncio
 

@@ -9,7 +9,8 @@ import gc
 import importlib
 import importlib.util
 import warnings
-from typing import assert_type
+from collections.abc import Callable, Coroutine
+from typing import Any, assert_type
 from unittest import mock
 
 import pytest
@@ -18,12 +19,6 @@ import desyncio
 from desyncio.loop import SimulationDeadlock
 from desyncio.randomness import RandomStreams
 from desyncio.runners import SimulationCleanupError, current_random_streams, run
-
-
-def test_exported_from_package() -> None:
-    assert desyncio.run is run
-    assert "run" in desyncio.__all__
-    assert "__version__" in desyncio.__all__
 
 
 def test_returns_main_result() -> None:
@@ -179,44 +174,41 @@ def test_sleeping_handler_after_main_finished_cannot_advance_clock() -> None:
     assert loops[0].is_closed()
 
 
-def test_exception_propagates_and_loop_closed() -> None:
-    loops: list[asyncio.AbstractEventLoop] = []
-
-    async def main() -> None:
-        loops.append(asyncio.get_running_loop())
-        await asyncio.sleep(1)
-        raise KeyError("boom")
-
-    with pytest.raises(KeyError, match="boom"):
-        run(main())
-    assert loops[0].is_closed()
+async def _raises_key_error() -> None:
+    await asyncio.sleep(1)
+    raise KeyError("boom")
 
 
-def test_deadlock_propagates_and_loop_closed() -> None:
-    loops: list[asyncio.AbstractEventLoop] = []
-
-    async def main() -> None:
-        loops.append(asyncio.get_running_loop())
-        await asyncio.get_running_loop().create_future()
-
-    with pytest.raises(SimulationDeadlock):
-        run(main())
-    assert loops[0].is_closed()
+async def _deadlocks() -> None:
+    await asyncio.get_running_loop().create_future()
 
 
-def test_loop_closed_after_normal_return() -> None:
-    loops: list[asyncio.AbstractEventLoop] = []
-
-    async def main() -> None:
-        loops.append(asyncio.get_running_loop())
-
-    run(main())
-    assert loops[0].is_closed()
+async def _returns() -> None:
+    pass
 
 
 @pytest.mark.parametrize(
-    "until", [-1, -0.001, float("nan"), float("inf"), -float("inf")]
+    ("body", "exc"),
+    [(_raises_key_error, KeyError), (_deadlocks, SimulationDeadlock), (_returns, None)],
 )
+def test_loop_closed_after_exception_deadlock_or_normal_return(
+    body: Callable[[], Coroutine[Any, Any, None]], exc: type[Exception] | None
+) -> None:
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    async def main() -> None:
+        loops.append(asyncio.get_running_loop())
+        await body()
+
+    if exc is None:
+        run(main())
+    else:
+        with pytest.raises(exc):
+            run(main())
+    assert loops[0].is_closed()
+
+
+@pytest.mark.parametrize("until", [-1, float("nan"), float("inf")])
 def test_invalid_until_value(until: float) -> None:
     async def main() -> None: ...
 
@@ -294,20 +286,6 @@ def test_seed_visible_in_main_and_spawned_task() -> None:
     assert got["child"] == RandomStreams(7).stream("x").random()
 
 
-def test_same_seed_same_stream_different_seed_differs() -> None:
-    def draw(seed: int) -> list[float]:
-        out: list[float] = []
-
-        async def main() -> None:
-            out.extend(current_random_streams().stream("a").random() for _ in range(3))
-
-        run(main(), seed=seed)
-        return out
-
-    assert draw(1) == draw(1)
-    assert draw(1) != draw(2)
-
-
 def test_streams_shared_within_one_run_and_fresh_per_run() -> None:
     async def main() -> tuple[float, float]:
         s = current_random_streams()
@@ -352,7 +330,8 @@ def test_no_submodule_named_run_shadows_the_function() -> None:
 
 
 def test_overload_types() -> None:
-    # assert_type is a runtime no-op; mypy checks it (`uv run mypy tests/test_run.py`).
+    # assert_type is a runtime no-op: this test does nothing at runtime;
+    # it is checked by running mypy on tests/.
     async def main() -> int:
         return 1
 

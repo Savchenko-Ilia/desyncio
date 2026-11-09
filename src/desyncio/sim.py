@@ -21,11 +21,11 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 """
 
 import asyncio
-import math
 from collections.abc import Coroutine
 from random import Random
 from typing import Any
 
+from desyncio._validate import to_float
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_random_streams
@@ -49,14 +49,12 @@ def _loop() -> VirtualTimeLoop:
 
 def _check_delay(dt: object) -> float:
     """Validate ``dt``: a finite real number >= 0 (bool is rejected)."""
-    if isinstance(dt, bool) or not isinstance(dt, (int, float)):
-        raise TypeError(f"dt must be a real number, got {type(dt).__name__}")
-    try:
-        value = float(dt)
-    except OverflowError:
-        raise ValueError("dt must be finite, got an int too large") from None
-    if not math.isfinite(value):
-        raise ValueError(f"dt must be finite, got {value!r}")
+    value = to_float(
+        dt,
+        type_error="dt must be a real number, got {type}",
+        overflow_error="dt must be finite, got an int too large",
+        finite_error="dt must be finite, got {value!r}",
+    )
     if value < 0.0:
         raise ValueError(f"dt must be >= 0, got {value!r}")
     return value
@@ -140,10 +138,22 @@ class Sim:
         seed gives the same sequence, a different seed a different one.
 
         Raises:
-            RuntimeError: outside ``desyncio.run(...)``.
+            RuntimeError: outside ``desyncio.run(...)``, or in a task created
+                with a fresh ``contextvars.Context`` (it lacks the run's streams).
         """
         _loop()
-        return current_random_streams().stream(name)
+        try:
+            streams = current_random_streams()
+        except RuntimeError:
+            # _loop() passed, so a run is active: the variable is missing from
+            # this task's context only if it was created with a fresh Context.
+            raise RuntimeError(
+                "the simulation is running, but this task's context lacks the "
+                "run's random streams: the task was created with a fresh "
+                "contextvars.Context (loop.create_task(..., context=...)); "
+                "create it without context= to use sim.random()"
+            ) from None
+        return streams.stream(name)
 
     def interruptible(self) -> Interruptible:
         """Return an async context manager marking code that may be interrupted.

@@ -61,6 +61,7 @@ import math
 from collections.abc import Coroutine
 from typing import Any, overload
 
+from desyncio._validate import to_float
 from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
 from desyncio.randomness import RandomStreams
@@ -113,18 +114,12 @@ def current_random_streams() -> RandomStreams:
 
 def _check_until(until: object) -> float:
     """Validate ``until`` (a finite real number >= the start time 0.0)."""
-    if isinstance(until, bool) or not isinstance(until, (int, float)):
-        raise TypeError(
-            f"until must be a real number or None, got {type(until).__name__}"
-        )
-    try:
-        value = float(until)
-    except OverflowError:
-        raise ValueError(
-            "until must be finite, got an int too large for a float"
-        ) from None
-    if not math.isfinite(value):
-        raise ValueError(f"until must be finite, got {value!r}")
+    value = to_float(
+        until,
+        type_error="until must be a real number or None, got {type}",
+        overflow_error="until must be finite, got an int too large for a float",
+        finite_error="until must be finite, got {value!r}",
+    )
     if value < 0.0:
         raise ValueError(f"until must be >= the start time 0.0, got {value!r}")
     return value
@@ -171,7 +166,11 @@ def run[T](
             ``None`` (default) is fast mode; ``math.inf`` is the same.
         pacer: a :class:`~desyncio.realtime.RealTimePacer`, for changing
             speed or pausing mid-run, or for an injected wall clock. Give
-            ``speed`` or ``pacer``, not both.
+            ``speed`` or ``pacer``, not both. Warning: calling
+            ``pacer.pause()`` from inside the simulation, with no other
+            thread to call ``resume()``, blocks forever. A pacer keeps its
+            paused state across runs, so one reused after a run that ended
+            paused starts the next run paused.
         trace: a callable taking one :class:`~desyncio.trace.TraceRecord`, called
             for every task start, resume, finish and cancel (see
             :mod:`desyncio.trace`). Off by default (``None``); when off no

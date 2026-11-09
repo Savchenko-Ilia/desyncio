@@ -60,8 +60,12 @@ the cancel *we* requested. If the result is still above the recorded value,
 someone else (a real ``task.cancel()``, an enclosing ``TaskGroup`` or
 ``asyncio.timeout()``) has also asked for cancellation, so the
 ``CancelledError`` is left alone and propagates: a real cancel always wins.
-Otherwise the cancellation was ours and becomes ``Interrupt``. Either way
-``cancelling()`` ends with its value before the block (rule 4).
+Otherwise the cancellation was ours and becomes ``Interrupt``. ``uncancel()``
+undoes only the interrupt's own cancel, so ``cancelling()`` is back to its
+value before the block only if the interrupt was the only cancel. If a real
+cancel also fired it stays one higher: that is how an enclosing
+``asyncio.timeout()`` or ``TaskGroup`` sees that a cancel is still pending
+(rule 4).
 
 Where the bookkeeping lives
 ---------------------------
@@ -90,6 +94,14 @@ Known limits
   failed for real), the group propagates untranslated, because an
   ``ExceptionGroup`` is a real error, not our cancellation.
   ``Interruptible.interrupted`` is still ``True``.
+* An interrupt sent by an *eagerly started* task (``eager_task_factory`` on
+  the loop, or ``eager_start=True``) that the target starts after the block's
+  last await is not raised: ``interrupted`` is ``True``, the block exits
+  normally. That task runs inside the target's own step, so ``cancel()`` only
+  sets ``_must_cancel``, and ``uncancel()`` in ``__aexit__`` clears it again
+  (3.13+). Timers, ``call_later``, callbacks and ordinary tasks run only
+  between steps, while the block waits at an await, so they raise a normal
+  ``Interrupt``; a task interrupting itself gets ``RuntimeError``.
 * Code that catches ``CancelledError`` inside the block and swallows it also
   swallows the interrupt, exactly as it would swallow a timeout.
 """

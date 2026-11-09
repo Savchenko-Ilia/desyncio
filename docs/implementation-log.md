@@ -896,3 +896,176 @@ Branch: feat/DOC-02 (+ fix/DOC-02-1)  ·  Merged: b3746f4
 - Split the three preemption edge cases into separate headed examples, for readability.
 - The `src/desyncio/interrupt.py` module docstring repeats the false `cancelling()` sentence (D038).
 - Turn some prose-only claims into examples. The reviewer probed them and they are true: the Resource monitor event sequence, a raising filter leaving the store unchanged, `Container` amount > capacity raising ValueError, no monitor call for a cancelled `Container.get`, and the monitor call on an immediate shutdown.
+
+## CLN-01 — Interrupt docstring; `sim.random` error message (2026-11-09, batch 14)
+Branch: feat/CLN-01 (+ fix/CLN-01-1)  ·  Merged: fa6d5dc
+
+**Approach.**
+- The `interrupt.py` module docstring now says what the guide says (D038): `uncancel()` undoes only the interrupt's own cancel. A new test pins both deltas side by side (interrupt only: +0 and `Interrupt`; interrupt + `task.cancel()`: +1 and `CancelledError`).
+- `sim.random` calls `_loop()` first, so the outside-run message is unchanged. It then catches the `RuntimeError` from `current_random_streams()` and re-raises with a message that names the fresh `contextvars.Context` (D039). It uses `from None`, because the chained error would be the misleading one. There is no fallback, and the stream storage is unchanged.
+
+**asyncio internals.** `loop.create_task(coro, context=ctx)` runs every step of the task inside `ctx` (`Context.run`). A fresh `Context()` therefore has none of the run's ContextVars. The running loop is still found through `asyncio.get_running_loop()`, which is per thread, not a ContextVar. So only `sim.random` fails in such a task; `sim.now`, `timeout`, `spawn` and `interruptible` work.
+
+**Review findings.**
+- FAIL in round 1. The lead and the reviewer each found the same MUST independently: the new "fresh Context" wording had been added to the Raises sections of `now`, `timeout`, `spawn` and `interruptible`, where it is false. The fix reverted those four docstrings and added `test_non_random_methods_work_in_fresh_context_task`. The outside-run message test now matches the real `_NOT_RUNNING` text.
+- PASS on re-review.
+
+**Follow-ups (SHOULD).** In `test_random_in_fresh_context_task_names_the_cause`, `assert "no simulation is running" not in msg` is always true; delete it.
+
+## CLN-02 — `SequenceCounter` → `itertools.count` (2026-11-09, batch 14)
+Branch: feat/CLN-02  ·  Merged: 5142464
+
+**Approach.** The `SequenceCounter` wrapper class is gone. `_LoopState.sequence` is a plain `itertools.count()` made in `__init__` (`__slots__`, one per loop; D017 holds), and `_schedule` calls `next(self._state.sequence)`. The lead fixed `docs/how-the-loop-works.md:144`, which named the old class (e913229, D011).
+
+**asyncio internals.** None new. `itertools.count` is a C iterator, and `next()` on it is atomic under the GIL. The loop is single-threaded anyway.
+
+**Review findings.** PASS. The ordering and determinism tests are unmodified and pass. Two interleaved loops each start at 0.
+
+**Follow-ups (SHOULD).** The new test partly pins the implementation (it reads `_state` and checks the type). The docstring bullet in scheduling.py has a short reflowed line. `uv run mypy src tests` reports 34 errors in tests; the gate runs `mypy src` only. Decide whether tests should be type-checked.
+
+## CLN-03 — Real-time pacer notes (2026-11-09, batch 14)
+Branch: feat/CLN-03  ·  Merged: fea39d8
+
+**Approach.** Docstring warnings were added to `RealTimePacer.pause()` and to `run()`'s `pacer` argument: `pause()` from inside the simulation with no other thread blocks forever, and the paused state persists across runs (D039: documented, not changed). A fake-wall-clock test pins the reuse behaviour. A test asserts `MAX_REAL_WAIT <= asyncio.base_events.MAXIMUM_SELECT_TIMEOUT`, and a comment at the constant explains why.
+
+**asyncio internals.** A paused pacer makes the selector wait with no timeout. Only a thread-safe wake-up (`call_soon_threadsafe` writes to the self-pipe) can end that wait. A coroutine on the frozen loop never runs, so it cannot resume the pacer.
+
+**Review findings.** PASS. The reviewer confirmed "blocks forever" with a real pacer and a watchdog thread, for both a coroutine and a `call_later` callback. Mutating `bind()` to reset `_paused` fails the new test. The new test cannot hang: `FakeWall` asserts instead of blocking.
+
+**Follow-ups (SHOULD).** The test needs `# type: ignore[attr-defined]` on `MAXIMUM_SELECT_TIMEOUT`, which is cosmetic, since mypy checks src only.
+
+## CLN-04 — Test hardening (2026-11-09, batch 14)
+Branch: feat/CLN-04  ·  Merged: 747c800
+
+**Approach.** Tests only.
+- `test_every_fence_language_is_allowed` sets the allowlist to `{python, text}`, the only languages the guide and README use. A `Python`, `python3` or bare fence now fails by name.
+- `test_import_desyncio_succeeds_in_a_fresh_interpreter` is a named subprocess test.
+- `test_no_from_desyncio_import_sim` became `test_no_from_desyncio_import_x`. It forbids any absolute `from desyncio import X` inside the package, which strictly includes the old check.
+- `test_filter_getter_keeps_seniority_after_re_parking[1|2|3]`.
+
+**asyncio internals.** `Condition.notify_all` wakes waiters in park order. Each woken waiter must re-acquire the `Lock`, which is FIFO, so a getter that re-parks keeps its place relative to the others.
+
+**Review findings.**
+- PASS. The reviewer repeated the mutations. A persistent loss of seniority fails all three cases. A toggling mutation (reversing the waiters on every put) fails only the even case, so the parametrization matters for toggling bugs.
+- The implementer reported that relative imports (`from . import X`) are also rejected. They are not: the guard checks only `level == 0`. The old guard had the same gap.
+
+**Follow-ups (SHOULD).** Reject `from . import X` (`level >= 1 and module is None`) too. Optionally, assert the getters' intermediate wake order.
+
+## CLN-05 — One float validator (2026-11-09, batch 15)
+Branch: feat/CLN-05 (+ fix/CLN-05-1)  ·  Merged: fb22adf
+
+**Approach.** The new private module `src/desyncio/_validate.py` has `to_float(value, *, type_error, overflow_error, finite_error=None, normalise_zero=False)`. It rejects bool and non-numbers with `TypeError`, turns `OverflowError` into `ValueError`, and can check finiteness and normalise `-0.0`. The messages are `str.format` templates (`{type}`, `{value!r}`). Each of the four validators (clock, until, dt, speed) is now one call plus its own range check, with its exact old messages. D040 is the one behaviour change: `speed=10**400` raises `ValueError` instead of `OverflowError`.
+
+**asyncio internals.** None.
+
+**Trade-offs.** The source is the same size as before (a 44-line helper replaces about 40 lines in the callers). The gain is one place for the bool/overflow/NaN rules, not fewer lines. The clock builds its templates with an f-string around `what`. That is safe only while `what` is a brace-free internal constant, and a comment now says so.
+
+**Review findings.**
+- PASS. The reviewer compared old and new behaviour on 190 (input × validator) cases: type, message, return value and the sign of zero. The only differences were the D040 inputs.
+- The lead promoted the test-volume SHOULD to a MUST (D041): the redundant helper tests were dropped, the per-caller messages became one exact-message table with a bool row, and D040 got its own test. That took tests/test_clock.py from 264 lines to 229.
+- PASS on re-review.
+
+**Follow-ups (SHOULD).** `_helper_kwargs()` is only used once. The ids of the `_BIG` table rows print the full `10**400` value.
+
+## TST-01 — Trim resource and container tests (2026-11-09, batch 16)
+Branch: feat/TST-01 (+ fix/TST-01-1)  ·  Merged: 116e770
+
+**Approach.** test_resource.py went from 1813 lines to about 1500, and test_container.py from 374 to 292. Together they went from 153 items to 103.
+- The Resource/PriorityResource twins are parametrized by class: release, monitor sequence, cancelled leave, granted-then-cancelled, constructor validation and read-only properties.
+- The 5 raising-monitor tests became `test_raising_monitor_never_changes_model`, which asserts exactly 11 handler errors (7 + 2 + 2, commented per scenario).
+- `test_preemption_stress[0..39]` became one hypothesis test (40 derandomized draws).
+- Never-preempts and victim choice are parametrized, and the validation tables are trimmed.
+- Dropped: Resource FIFO, the docs duplicates (machine shop, fuel tank) and Container's basic blocking.
+- `test_no_barging_same_instant_newcomer` stays (D042).
+
+**Review findings.**
+- FAIL in round 1. MUST: the merged release test used plain `async with` on PriorityResource, which lost the only guard for `PriorityRequest.__aexit__`'s release. A mutation that released only when `exc_type is None` passed the trimmed suite and failed the old one.
+- The fix added explicit `(cls, hold)` pairs. The request case now also covers a holder that is cancelled while holding: a release skipped on CancelledError was never caught before, by the old suite either.
+- PASS on re-review: both mutations fail `[PriorityResource-request]`.
+
+**Follow-ups (SHOULD).** `False` was dropped from the bool rows of the validation tables, and `-1`, `None` and `1j` from `test_bad_amount`. They share branches with the rows kept, so this is low risk.
+
+## TST-02 — Trim store and monitor tests (2026-11-09, batch 16)
+Branch: feat/TST-02  ·  Merged: 8c69f38
+
+**Approach.** test_store.py went from 83 items and 1412 lines to 56 and 631; test_monitor.py from 33 and 333 to 17 and 280.
+- One contract per behaviour, parametrized over `[Store, PriorityStore, FilterStore]` through a 5-line `get(store, match=None)` adapter. FilterStore always gets a filter, so its Condition path is exercised.
+- The tests that re-proved `asyncio.Queue` (FIFO, blocking, shutdown wake-ups) and the docs duplicates were dropped. Those guarantees are now pinned by `<!-- pins -->` comments on the docs examples (TST-04).
+- The 1.8 s M/M/1 same-seed TimeSeries test was dropped.
+- New case: `TimeSeries.record(10**400)` raises ValueError.
+
+**asyncio internals.** None new. The module docstring says why Queue behaviour is deliberately not re-proved (principle 6).
+
+**Review findings.**
+- PASS. The reviewer redid the monitor and mirror mutations for all three kinds.
+- Two gaps went to TST-06, not to a fix round:
+  - the default priority-0 FIFO of `PriorityStore.put(item)` was asserted only by a dropped test;
+  - no test guards a cancelled putter leaking into `items`. The old suite missed that too.
+
+## TST-03 — Trim interrupt and asyncio-compat tests (2026-11-09, batch 16)
+Branch: feat/TST-03  ·  Merged: cb4fa4c
+
+**Approach.**
+- test_interrupt.py went from 1112 lines to 783 (62 → 32 tests).
+  - The `asyncio.timeout` nesting tests became a 2×2 parametrize, asserting `cancelling() == 0` in all four cases. The cancel-wins orders and the delivered-at-await tests were parametrized, and the 20 stress seeds became one loop with the seed in the failure message.
+  - The raw asyncio tests and the docs duplicates were dropped.
+  - The D024 design-2 Lock, Condition and TaskGroup regressions, the weakref GC test and the PSF notice were kept.
+- test_asyncio_compat.py went from 988 lines to 656 (47 → 25 functions, 31 cases). Pure-asyncio tests and duplicates were dropped. The reschedule, TaskGroup failure source, gather and shield tests were parametrized.
+
+**Review findings.**
+- PASS. The merged reschedule-later case still checks both "extends" and "fires". The shield cases still check that the inner task outlives the stop.
+- Not regressions: a LIFO tie-break mutation passes the compat suite before and after the trim; test_resource and test_ordering catch it. "Interrupt a task not yet started" lost its own test, but it shares a branch that is still tested.
+
+## TST-04 — Trim module 1, import and docs tests; pin docs examples (2026-11-09, batch 16)
+Branch: feat/TST-04 (+ fix/TST-04-1)  ·  Merged: ff97718
+
+**Approach.** 11 files went from 437 items and 3342 lines to 306 and 3017.
+- Each docs example is one test, run twice against its expected output.
+- test_import dropped the 15 `submodule_imports_first` subprocesses: Python always runs the package `__init__` first, which `-X importtime` confirmed. The AST guard is now one test.
+- test_guards dropped 8 tests that duplicated the per-method refusal test.
+- Duplicates and redundant validation rows were dropped across loop, ordering, realtime, run, sim, trace, clock and randomness.
+- docs/primitives.md got 14 `<!-- pins: ... (D042) -->` lines above the examples that are now the only guard. No example code or output changed.
+
+**Review findings.**
+- FAIL in round 1. MUST: the PriorityResource pin claimed "default priority 0 in a plain request", but the example never makes a plain request. The fix dropped that claim. The same round reworded the `test_overload_types` comment so it does not depend on the gate (TST-05 changes the gate).
+- The lead reviewed the 2-line comment-only fix diff directly, instead of running another reviewer.
+- The implementer's commits lack the attribution trailers. They are accepted, because history rewrites are blocked.
+
+## TST-06 — Gap tests (2026-11-09, batch 17)
+Branch: feat/TST-06 (+ fix/TST-06-1)  ·  Merged: afaf4eb
+
+**Approach.** Five gaps from the audit and the TST-02 review are now pinned, and the suite goes from 550 to 556 tests.
+- `test_late_interrupt_after_the_last_await_is_not_raised[eager]`.
+- `test_real_taskgroup_failure_while_interrupted_is_not_translated`: an `ExceptionGroup[ValueError]` propagates, `interrupted` is True and `cancelling()` is 0.
+- `test_raising_monitor_on_immediate_shutdown_still_completes[Store|PriorityStore]`.
+- `test_priority_default_priority_is_zero_and_ties_are_fifo`.
+- `items` assertions in `test_cancelled_putter_is_removed`.
+- `test_interruptible_enter_and_exit_never_await` moved unchanged to test_interrupt.py.
+
+**asyncio internals.**
+- **A late interrupt arises only from an eagerly started task.** With `eager_task_factory` installed, or `eager_start=True`, the task runs its first step inside the target's own step. So `task.cancel()` on the target only sets `_must_cancel` and throws nothing. In 3.13+, `uncancel()` in `__aexit__` then clears that pending cancel, so the block exits normally with `interrupted` True.
+- **Everywhere else the interrupt is delivered normally.** Timers, `call_later`, callbacks and ordinary tasks run only between steps, while the block is suspended at an await, so they raise a normal `Interrupt`.
+- **An ordinary task spawned after the last await is too late.** It first runs after the block has closed, so interrupting then raises RuntimeError "not inside".
+- **Self-interrupt is refused** with "a task cannot interrupt itself".
+
+**Review findings.**
+- FAIL in round 1, D011. The new docstring bullet was true but did not say when the case can arise, so it read as if an ordinary interrupt could be dropped.
+- The fix made the bullet precise and parametrized the test over eager. The fixer rightly disputed the lead's request that the non-eager case should raise `Interrupt`: the block has closed by then, and the reviewer agreed.
+- PASS on re-review.
+
+**Gotcha.** Restoring a mutated src file within the same second leaves a stale `.pyc` (same size, 1 s mtime resolution). Delete `src/desyncio/__pycache__` between mutation runs.
+
+**Follow-ups (SHOULD).** The docstring could also say, in one clause, that the non-eager late case gets RuntimeError "not inside".
+
+## TST-05 — Type-check the tests in the gate (2026-11-09, batch 18)
+Branch: feat/TST-05  ·  Merged: f02743c
+
+**Approach.** `LINT_CMD` now ends with `mypy src tests`. The 33 errors in tests/ were fixed in the tests: typed helpers (`_to_float`, `_record_both`, `_is_closed`), `Sequence[float]` parameters, a named inner `def` in place of a lambda with a default argument, and `list(...)` around results. There are no overrides; tests run under full strict. No `# type: ignore` was added, and 10 unused ones were removed. `test_overload_types` is now a real check: making the `until=` overload return `T` fails `mypy` at test_run.py:340–341.
+
+**Review findings.**
+- PASS.
+- `list(x.items) == [...]` replaced two tuple comparisons. mypy had narrowed `items` to `tuple[int]` after an earlier assert, and then called the next comparison non-overlapping. The tuple type is still pinned by neighbouring asserts.
+- **Gate quirk (D044).** `scripts/gate.sh` sources `gate.env` from the main checkout, not from the branch under test. So a branch that changes the gate is gated with the old gate. The new lint step ran on `integration` after the merge: GATE PASS, mypy on 36 files.
+
+**Follow-ups (SHOULD).** Source `gate.env` from the checked-out worktree in `gate.sh`. The alternative `items: tuple[object, ...] = store.items` keeps the tuple check without narrowing.
+

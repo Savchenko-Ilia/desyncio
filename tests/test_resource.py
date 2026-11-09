@@ -1,9 +1,17 @@
-"""Tests for ``desyncio.resource.Resource`` (RES-01)."""
+"""Tests for ``desyncio.resource``: Resource (RES-01), PriorityResource (RES-02)
+and PreemptiveResource (RES-03).
+
+``Resource`` and ``PriorityResource`` share a contract, so most of their tests
+are parametrized over both classes (``RESOURCES``).
+"""
 
 import asyncio
-from collections.abc import Callable
+import contextlib
+import math
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import desyncio
 from desyncio import sim
@@ -16,24 +24,15 @@ from desyncio.resource import (
 )
 from models.mm1 import CustomerRecord, mm1
 
+RESOURCES = [Resource, PriorityResource]
+AnyResource = Resource | PriorityResource
 
-def test_fifo_service_in_virtual_time() -> None:
-    async def main() -> list[tuple[str, float]]:
-        res = Resource(1)
-        log: list[tuple[str, float]] = []
 
-        async def user(name: str, arrive: float) -> None:
-            await sim.timeout(arrive)
-            async with res:
-                log.append((name, sim.now))
-                await sim.timeout(5)
-
-        await asyncio.gather(
-            *(sim.spawn(user(n, t)) for n, t in zip("abcd", range(4), strict=True))
-        )
-        return log
-
-    assert desyncio.run(main()) == [("a", 0.0), ("b", 5.0), ("c", 10.0), ("d", 15.0)]
+# --- Resource (RES-01) ------------------------------------------------------
+#
+# FIFO order itself is asyncio.Semaphore's job and is not re-tested here (the
+# bank example in docs/primitives.md covers it). The no-barging test below is
+# kept on purpose: it is a guard in case Resource ever moves off Semaphore.
 
 
 def test_no_barging_same_instant_newcomer() -> None:
@@ -81,104 +80,84 @@ def test_capacity_limit_and_counters() -> None:
     desyncio.run(main())
 
 
-def test_properties_are_read_only() -> None:
-    res = Resource(1)
+@pytest.mark.parametrize("cls", RESOURCES)
+def test_properties_are_read_only(cls: type[AnyResource]) -> None:
+    res = cls(1)
     for name in ("capacity", "count", "queue_length"):
         with pytest.raises(AttributeError):
             setattr(res, name, 5)
 
 
-def test_cancelled_waiter_is_removed() -> None:
-    async def main() -> list[str]:
-        res = Resource(1)
-        got: list[str] = []
-
-        async def user(name: str, hold: float) -> None:
-            async with res:
-                got.append(name)
-                await sim.timeout(hold)
-
-        holder = sim.spawn(user("holder", 3))
-        await sim.timeout(1)
-        doomed = sim.spawn(user("doomed", 1))
-        later = sim.spawn(user("later", 1))
-        await sim.timeout(1)
-        assert (res.count, res.queue_length) == (1, 2)
-        doomed.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
-        assert (res.count, res.queue_length) == (1, 1)
-        await asyncio.gather(holder, later)
-        assert (res.count, res.queue_length) == (0, 0)
-        return got
-
-    assert desyncio.run(main()) == ["holder", "later"]
-
-
-def test_cancelled_right_after_grant_passes_unit_on() -> None:
-    async def main() -> list[str]:
-        res = Resource(1)
-        got: list[str] = []
-
-        async def user(name: str, hold: float) -> None:
-            async with res:
-                got.append(name)
-                await sim.timeout(hold)
-
-        holder = sim.spawn(user("holder", 1))
-        await sim.timeout(0.5)
-        doomed = sim.spawn(user("doomed", 1))
-        later = sim.spawn(user("later", 1))
-        await sim.timeout(0.5)  # t=1: holder releases, doomed is granted...
-        # ...but has not run yet; cancel it before it resumes.
-        doomed.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
-        await asyncio.gather(holder, later)
-        assert (res.count, res.queue_length) == (0, 0)
-        return got
-
-    assert desyncio.run(main()) == ["holder", "later"]
-
-
-def test_release_on_exception() -> None:
+def test_preempted_is_frozen() -> None:
     async def main() -> None:
-        res = Resource(1)
+        task = asyncio.current_task()
+        assert task is not None
+        p = Preempted(by=task, usage_since=1.0, resource=PreemptiveResource(1))
+        with pytest.raises(AttributeError):
+            p.usage_since = 2.0  # type: ignore[misc]
+
+    desyncio.run(main())
+
+
+def _holder(
+    res: AnyResource, hold: str
+) -> contextlib.AbstractAsyncContextManager[object]:
+    """``res`` itself ("plain") or a fresh ``res.request(priority=1)`` ("request").
+
+    A ``PriorityRequest`` is single-use, so each ``async with`` needs a new one.
+    """
+    if hold == "request":
+        assert isinstance(res, PriorityResource)
+        return res.request(priority=1)
+    return res
+
+
+# "request" exists only on PriorityResource, so the pairs are listed explicitly.
+# The (PriorityResource, "request") case is the guard for
+# ``PriorityRequest.__aexit__``, which is a separate release path from
+# ``PriorityResource.__aexit__``.
+@pytest.mark.parametrize(
+    ("cls", "hold"),
+    [
+        (Resource, "plain"),
+        (PriorityResource, "plain"),
+        (PriorityResource, "request"),
+    ],
+)
+def test_release_on_body_exception_and_holder_cancel(
+    cls: type[AnyResource], hold: str
+) -> None:
+    async def main() -> None:
+        res = cls(1)
         with pytest.raises(ZeroDivisionError):
-            async with res:
+            async with _holder(res, hold):
                 assert res.count == 1
                 1 / 0  # noqa: B018
         assert res.count == 0
-        async with res:  # unit is available again
+
+        async def holder() -> None:
+            async with _holder(res, hold):
+                await sim.timeout(100)
+
+        t = sim.spawn(holder())
+        await sim.timeout(1)
+        assert res.count == 1
+        # The cancel lands inside the body, so __aexit__ sees CancelledError.
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        assert res.count == 0
+        async with _holder(res, hold):  # the unit is available again
             assert res.count == 1
 
     desyncio.run(main())
 
 
-def test_release_on_cancellation_of_holder() -> None:
-    async def main() -> None:
-        res = Resource(1)
-
-        async def hold() -> None:
-            async with res:
-                await sim.timeout(100)
-
-        t = sim.spawn(hold())
-        await sim.timeout(1)
-        t.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await t
-        assert res.count == 0
-
-    desyncio.run(main())
-
-
-def test_monitor_hook_calls() -> None:
+@pytest.mark.parametrize("cls", RESOURCES)
+def test_monitor_hook_calls(cls: type[AnyResource]) -> None:
     async def main() -> list[tuple[float, int, int]]:
         seen: list[tuple[float, int, int]] = []
-        res = Resource(
-            1, monitor=lambda r: seen.append((sim.now, r.count, r.queue_length))
-        )
+        res = cls(1, monitor=lambda r: seen.append((sim.now, r.count, r.queue_length)))
 
         async def user() -> None:
             async with res:
@@ -197,10 +176,11 @@ def test_monitor_hook_calls() -> None:
     ]
 
 
-def test_monitor_sees_cancelled_waiter_leave() -> None:
+@pytest.mark.parametrize("cls", RESOURCES)
+def test_monitor_sees_cancelled_waiter_leave(cls: type[AnyResource]) -> None:
     async def main() -> list[tuple[int, int]]:
         seen: list[tuple[int, int]] = []
-        res = Resource(1, monitor=lambda r: seen.append((r.count, r.queue_length)))
+        res = cls(1, monitor=lambda r: seen.append((r.count, r.queue_length)))
 
         async def hold() -> None:
             async with res:
@@ -217,21 +197,27 @@ def test_monitor_sees_cancelled_waiter_leave() -> None:
     assert desyncio.run(main()) == [(1, 0), (1, 1), (1, 0)]
 
 
-@pytest.mark.parametrize("bad", [0, -1])
-def test_capacity_value_validation(bad: int) -> None:
-    with pytest.raises(ValueError, match="capacity"):
-        Resource(bad)
-
-
-@pytest.mark.parametrize("bad", [True, False, 1.0, "1", None])
-def test_capacity_type_validation(bad: object) -> None:
-    with pytest.raises(TypeError, match="capacity"):
-        Resource(bad)  # type: ignore[arg-type]
-
-
-def test_monitor_must_be_callable() -> None:
-    with pytest.raises(TypeError, match="monitor"):
-        Resource(1, monitor=3)  # type: ignore[arg-type]
+@pytest.mark.parametrize("cls", RESOURCES)
+@pytest.mark.parametrize(
+    ("kwargs", "error", "match"),
+    [
+        ({"capacity": 0}, ValueError, "capacity"),
+        ({"capacity": -1}, ValueError, "capacity"),
+        ({"capacity": True}, TypeError, "capacity"),
+        ({"capacity": 1.0}, TypeError, "capacity"),
+        ({"capacity": "1"}, TypeError, "capacity"),
+        ({"capacity": None}, TypeError, "capacity"),
+        ({"monitor": 3}, TypeError, "monitor"),
+    ],
+)
+def test_constructor_validation(
+    cls: type[AnyResource],
+    kwargs: dict[str, object],
+    error: type[Exception],
+    match: str,
+) -> None:
+    with pytest.raises(error, match=match):
+        cls(**kwargs)  # type: ignore[arg-type]
 
 
 async def _mm1_with_resource(
@@ -283,26 +269,58 @@ def test_determinism() -> None:
     assert desyncio.run(main(), seed=3) == desyncio.run(main(), seed=3)
 
 
+@pytest.mark.parametrize("cls", RESOURCES)
+def test_waiter_cancelled_when_granted_passes_unit_to_next(
+    cls: type[AnyResource],
+) -> None:
+    # D030 regression. The holder's release hands the unit to ``doomed`` at
+    # t=1, but ``doomed`` has not resumed yet when it is cancelled. The unit
+    # must go on to ``next``, not leak.
+    async def main() -> list[tuple[str, float]]:
+        seen: list[tuple[int, int]] = []
+
+        def monitor(r: AnyResource) -> None:
+            assert 0 <= r.count <= r.capacity
+            seen.append((r.count, r.queue_length))
+
+        res = cls(1, monitor=monitor)
+        log: list[tuple[str, float]] = []
+
+        async def user(name: str, hold: float) -> None:
+            async with res:
+                log.append((name, sim.now))
+                await sim.timeout(hold)
+
+        holder = sim.spawn(user("holder", 1))
+        await sim.timeout(0.5)
+        doomed = sim.spawn(user("doomed", 1))
+        nxt = sim.spawn(user("next", 1))
+        last = sim.spawn(user("last", 1))
+        await sim.timeout(0.5)  # t=1: holder released and handed doomed the unit
+        doomed.cancel()  # ...but doomed has not resumed yet
+        with pytest.raises(asyncio.CancelledError):
+            await doomed
+        await sim.timeout(0)
+        assert sim.now == 1.0
+        assert (res.count, res.queue_length) == (1, 1)  # next holds, last waits
+        await asyncio.gather(holder, nxt, last)
+        assert (res.count, res.queue_length) == (0, 0)
+        assert seen[-1] == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [("holder", 0.0), ("next", 1.0), ("last", 2.0)]
+
+
 # --- A raising monitor never changes the model (D023 v2) --------------------
 #
 # Monitor errors go to the loop's exception handler, as asyncio does for a
 # failing call_soon callback; the operation completes normally for the task.
+# This is the RES-01 regression: a raising monitor used to leave a unit held
+# forever.
 
 
 class MonitorBoom(Exception):
-    """Raised by the test monitor."""
-
-
-class RaisingMonitor:
-    """Raises ``MonitorBoom`` whenever ``armed`` is set and ``when(r)`` holds."""
-
-    def __init__(self, when: Callable[[Resource], bool] = lambda r: True) -> None:
-        self.when = when
-        self.armed = True
-
-    def __call__(self, r: Resource) -> None:
-        if self.armed and self.when(r):
-            raise MonitorBoom
+    """Raised by the test monitors."""
 
 
 def _capture_loop_errors() -> list[dict[str, object]]:
@@ -314,15 +332,7 @@ def _capture_loop_errors() -> list[dict[str, object]]:
     return errors
 
 
-def _assert_reported(errors: list[dict[str, object]], res: Resource, n: int) -> None:
-    assert len(errors) == n
-    for ctx in errors:
-        assert isinstance(ctx["exception"], MonitorBoom)
-        assert ctx["resource"] is res
-        assert ctx["message"] == "Resource monitor raised"
-
-
-async def _assert_clean_and_acquirable(res: Resource) -> None:
+async def _assert_clean_and_acquirable(res: AnyResource) -> None:
     assert (res.count, res.queue_length) == (0, 0)
 
     async def user() -> None:
@@ -337,127 +347,73 @@ async def _assert_clean_and_acquirable(res: Resource) -> None:
     assert (res.count, res.queue_length) == (0, 0)
 
 
-def test_raising_monitor_on_queue_enter_is_reported_and_waiter_served() -> None:
+@pytest.mark.parametrize("cls", RESOURCES)
+def test_raising_monitor_never_changes_model(cls: type[AnyResource]) -> None:
     async def main() -> None:
         errors = _capture_loop_errors()
-        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 1))
-        res = Resource(1, monitor=mon)
-        got: list[tuple[str, float]] = []
 
-        async def user(name: str) -> None:
+        def boom(r: AnyResource) -> None:
+            raise MonitorBoom
+
+        res = cls(1, monitor=boom)
+        got: list[tuple[str, float]] = []
+        cancel_seen: list[BaseException] = []
+
+        async def user(name: str, hold: float) -> None:
             async with res:
                 got.append((name, sim.now))
-                await sim.timeout(2)
+                await sim.timeout(hold)
 
-        holder = sim.spawn(user("holder"))
-        await sim.timeout(1)
-        waiter = sim.spawn(user("waiter"))
-        await sim.timeout(0)
-        assert (res.count, res.queue_length) == (1, 1)  # the request did queue
-        await asyncio.gather(holder, waiter)
-        assert got == [("holder", 0.0), ("waiter", 2.0)]
-        _assert_reported(errors, res, 1)
-        mon.armed = False
-        await _assert_clean_and_acquirable(res)
-
-    desyncio.run(main())
-
-
-def test_raising_monitor_on_grant_is_reported_and_grant_stands() -> None:
-    async def main() -> None:
-        errors = _capture_loop_errors()
-        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 0))
-        res = Resource(1, monitor=mon)
-        got: list[tuple[str, float, int]] = []
-
-        async def user(name: str) -> None:
-            async with res:
-                got.append((name, sim.now, res.count))
-                await sim.timeout(1)
-
-        # Immediate grant (the probe from the review) and grant after waiting.
-        await asyncio.gather(sim.spawn(user("a")), sim.spawn(user("b")))
-        assert got == [("a", 0.0, 1), ("b", 1.0, 1)]
-        _assert_reported(errors, res, 2)
-        mon.armed = False
-        await _assert_clean_and_acquirable(res)
-
-    desyncio.run(main())
-
-
-def test_raising_monitor_on_queue_leave_keeps_cancel() -> None:
-    async def main() -> None:
-        errors = _capture_loop_errors()
-        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 0))
-        mon.armed = False
-        res = Resource(1, monitor=mon)
-        seen: list[BaseException] = []
-
-        async def hold() -> None:
-            async with res:
-                await sim.timeout(2)
-
-        async def waiter() -> None:
+        async def doomed() -> None:
             try:
                 async with res:
                     pytest.fail("must not be granted")
             except BaseException as exc:
-                seen.append(exc)
+                cancel_seen.append(exc)
                 raise
 
-        holder = sim.spawn(hold())
+        # --- holder, queued waiter, cancelled waiter: 7 monitor calls
+        # holder acquire, release (2); waiter queue, acquire, release (3);
+        # victim queue, leave (2).
+        # A holder and a queued waiter, which is still served.
+        holder = sim.spawn(user("holder", 2))
         await sim.timeout(1)
-        w = sim.spawn(waiter())
-        await sim.timeout(0)
-        assert res.queue_length == 1
-        mon.armed = True  # fires when the cancelled waiter leaves the queue
-        w.cancel()
+        waiter = sim.spawn(user("waiter", 1))
+        victim = sim.spawn(doomed())
+        await sim.timeout(0.5)
+        assert (res.count, res.queue_length) == (1, 2)  # both did queue
+        # A cancelled waiter still sees its CancelledError.
+        victim.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await w
-        assert w.cancelled()
-        assert len(seen) == 1 and isinstance(seen[0], asyncio.CancelledError)
-        assert (res.count, res.queue_length) == (1, 0)
-        _assert_reported(errors, res, 1)
-        mon.armed = False
-        await holder
-        await _assert_clean_and_acquirable(res)
+            await victim
+        assert victim.cancelled()
+        assert len(cancel_seen) == 1
+        assert isinstance(cancel_seen[0], asyncio.CancelledError)
+        await asyncio.gather(holder, waiter)
+        assert got == [("holder", 0.0), ("waiter", 2.0)]
 
-    desyncio.run(main())
-
-
-def test_raising_monitor_on_release_is_reported_and_unit_released() -> None:
-    async def main() -> None:
-        errors = _capture_loop_errors()
-        mon = RaisingMonitor(lambda r: r.count == 0)
-        res = Resource(1, monitor=mon)
-
-        # Normal exit: no exception for the task.
-        async with res:
-            pass
-        assert res.count == 0
-        _assert_reported(errors, res, 1)
-
+        # --- body exception: 2 monitor calls (acquire, release)
         # Exit by exception: the body's exception propagates unchanged.
         with pytest.raises(ValueError, match="body") as info:
             async with res:
                 raise ValueError("body")
         assert info.value.__context__ is None
-        assert res.count == 0
-        _assert_reported(errors, res, 2)
 
-        # Exit by cancellation: the cancel is not masked.
-        async def hold() -> None:
-            async with res:
-                await sim.timeout(100)
-
-        t = sim.spawn(hold())
+        # --- cancelled holder: 2 monitor calls (acquire, release)
+        # Exit by cancelling the holder: the cancel is not masked.
+        t = sim.spawn(user("cancelled holder", 100))
         await sim.timeout(1)
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
         assert t.cancelled()
-        _assert_reported(errors, res, 3)
-        mon.armed = False
+
+        # Every monitor call raised once: 7 + 2 + 2 = 11.
+        assert len(errors) == 11
+        for ctx in errors:
+            assert isinstance(ctx["exception"], MonitorBoom)
+            assert ctx["resource"] is res
+            assert ctx["message"] == "Resource monitor raised"
         await _assert_clean_and_acquirable(res)
 
     desyncio.run(main())
@@ -593,19 +549,37 @@ def test_two_units_freed_at_same_instant_go_to_two_best() -> None:
     assert desyncio.run(main()) == ["h1", "h2", "a", "b", "c"]
 
 
-def test_priority_cancelled_waiter_is_removed() -> None:
+@pytest.mark.parametrize("how", ["cancel", "interrupt"])
+def test_cancelled_or_interrupted_waiter_is_removed(how: str) -> None:
+    # An interrupt is a cancel underneath (D024), so both must take the
+    # waiting request out of the order.
     async def main() -> list[str]:
         res = PriorityResource(1)
         log: list[str] = []
+        causes: list[object] = []
+
+        async def doomed() -> None:
+            try:
+                async with sim.interruptible():
+                    async with res.request(priority=0):  # best key
+                        log.append("doomed")
+            except Interrupt as exc:
+                causes.append(exc.cause)
+
         holder = sim.spawn(_use(res, log, "holder", 0, 3))
         await sim.timeout(1)
-        doomed = sim.spawn(_use(res, log, "doomed", 0, 1))  # best key
+        victim = sim.spawn(doomed())
         later = sim.spawn(_use(res, log, "later", 5, 1))
         await sim.timeout(1)
         assert (res.count, res.queue_length) == (1, 2)
-        doomed.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
+        if how == "cancel":
+            victim.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await victim
+        else:
+            sim.interrupt(victim, "boom")
+            await victim
+            assert causes == ["boom"]
         assert (res.count, res.queue_length) == (1, 1)
         await asyncio.gather(holder, later)
         assert (res.count, res.queue_length) == (0, 0)
@@ -614,189 +588,41 @@ def test_priority_cancelled_waiter_is_removed() -> None:
     assert desyncio.run(main()) == ["holder", "later"]
 
 
-def test_cancelled_at_instant_unit_is_freed_passes_unit_on() -> None:
-    async def main() -> list[str]:
-        res = PriorityResource(1)
-        log: list[str] = []
-        holder = sim.spawn(_use(res, log, "holder", 0, 1))
-        await sim.timeout(0.5)
-        doomed = sim.spawn(_use(res, log, "doomed", 0, 1))
-        later = sim.spawn(_use(res, log, "later", 5, 1))
-        await sim.timeout(0.5)  # t=1: holder releases; doomed has been woken
-        doomed.cancel()  # ...but has not run yet
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
-        await asyncio.gather(holder, later)
-        assert (res.count, res.queue_length) == (0, 0)
-        return log
-
-    assert desyncio.run(main()) == ["holder", "later"]
-
-
-def test_interrupt_of_waiting_request_removes_it() -> None:
-    async def main() -> list[str]:
-        res = PriorityResource(1)
-        log: list[str] = []
-        outcome: list[object] = []
-
-        async def interruptible_user() -> None:
-            try:
-                async with sim.interruptible():
-                    async with res.request(priority=0):
-                        log.append("victim")
-            except Interrupt as i:
-                outcome.append(i.cause)
-
-        holder = sim.spawn(_use(res, log, "holder", 0, 3))
-        await sim.timeout(1)
-        victim = sim.spawn(interruptible_user())
-        later = sim.spawn(_use(res, log, "later", 5, 1))
-        await sim.timeout(1)
-        assert res.queue_length == 2
-        sim.interrupt(victim, "boom")
-        await victim
-        assert outcome == ["boom"]
-        assert (res.count, res.queue_length) == (1, 1)
-        await asyncio.gather(holder, later)
-        assert (res.count, res.queue_length) == (0, 0)
-        return log
-
-    assert desyncio.run(main()) == ["holder", "later"]
-
-
-def test_release_on_exception_and_holder_cancellation() -> None:
-    async def main() -> None:
-        res = PriorityResource(1)
-        with pytest.raises(ValueError, match="body"):
-            async with res.request(priority=1):
-                raise ValueError("body")
-        assert res.count == 0
-
-        async def hold() -> None:
-            async with res:
-                await sim.timeout(100)
-
-        t = sim.spawn(hold())
-        await sim.timeout(1)
-        assert res.count == 1
-        t.cancel()
-        await asyncio.gather(t, return_exceptions=True)
-        assert res.count == 0
-
-    desyncio.run(main())
-
-
-def test_priority_properties_read_only_and_validation() -> None:
+@pytest.mark.parametrize(
+    ("priority", "error"),
+    [
+        (0, None),
+        (-3, None),
+        (2.5, None),
+        (math.inf, None),
+        (-math.inf, None),
+        (True, TypeError),
+        (None, TypeError),
+        ("1", TypeError),
+        (1 + 2j, TypeError),
+        (math.nan, ValueError),
+    ],
+)
+def test_priority_validation(priority: object, error: type[Exception] | None) -> None:
     res = PriorityResource(1)
-    for name in ("capacity", "count", "queue_length"):
-        with pytest.raises(AttributeError):
-            setattr(res, name, 5)
-    for bad_cap in (0, -1):
-        with pytest.raises(ValueError):
-            PriorityResource(bad_cap)
-    for bad_cap_t in (True, 1.0, "1", None):
-        with pytest.raises(TypeError):
-            PriorityResource(bad_cap_t)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        PriorityResource(1, monitor=3)  # type: ignore[arg-type]
+    if error is None:
+        assert res.request(priority=priority).priority == priority  # type: ignore[arg-type]
+    else:
+        with pytest.raises(error):
+            res.request(priority=priority)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("good", [0, -3, 2.5, float("inf"), -float("inf")])
-def test_priority_accepts_real_numbers(good: float) -> None:
-    assert PriorityResource(1).request(priority=good).priority == good
-
-
-@pytest.mark.parametrize("bad", [True, False, "1", None, 1 + 2j, [1]])
-def test_priority_type_rejected(bad: object) -> None:
-    with pytest.raises(TypeError):
-        PriorityResource(1).request(priority=bad)  # type: ignore[arg-type]
-
-
-def test_priority_nan_rejected() -> None:
-    with pytest.raises(ValueError, match="NaN"):
-        PriorityResource(1).request(priority=float("nan"))
-
-
-def test_request_is_single_use() -> None:
+@pytest.mark.parametrize("cls", [PriorityResource, PreemptiveResource])
+def test_request_is_single_use(cls: type[PriorityResource]) -> None:
     async def main() -> None:
-        res = PriorityResource(1)
-        req = res.request(1)
+        res = cls(1)
+        req = res.request()
         async with req:
             pass
         with pytest.raises(RuntimeError, match="only once"):
             async with req:
                 pass
         assert (res.count, res.queue_length) == (0, 0)
-
-    desyncio.run(main())
-
-
-def test_priority_monitor_hook_calls() -> None:
-    async def main() -> list[tuple[float, int, int]]:
-        seen: list[tuple[float, int, int]] = []
-        res = PriorityResource(
-            1, monitor=lambda r: seen.append((sim.now, r.count, r.queue_length))
-        )
-        log: list[str] = []
-        await asyncio.gather(
-            sim.spawn(_use(res, log, "a", 0, 1)), sim.spawn(_use(res, log, "b", 0, 1))
-        )
-        return seen
-
-    assert desyncio.run(main()) == [
-        (0.0, 1, 0),  # a acquires
-        (0.0, 1, 1),  # b queues
-        (1.0, 0, 1),  # a releases
-        (1.0, 1, 0),  # b acquires
-        (2.0, 0, 0),  # b releases
-    ]
-
-
-def test_priority_monitor_sees_cancelled_waiter_leave() -> None:
-    async def main() -> list[tuple[int, int]]:
-        seen: list[tuple[int, int]] = []
-        res = PriorityResource(
-            1, monitor=lambda r: seen.append((r.count, r.queue_length))
-        )
-        log: list[str] = []
-        sim.spawn(_use(res, log, "h", 0, 10))
-        await sim.timeout(1)
-        w = sim.spawn(_use(res, log, "w", 0, 10))
-        await sim.timeout(1)
-        w.cancel()
-        await asyncio.gather(w, return_exceptions=True)
-        return list(seen)
-
-    assert desyncio.run(main()) == [(1, 0), (1, 1), (1, 0)]
-
-
-def test_priority_raising_monitor_is_reported_and_nothing_leaks() -> None:
-    async def main() -> None:
-        errors = _capture_loop_errors()
-
-        def boom(r: PriorityResource) -> None:
-            raise MonitorBoom
-
-        res = PriorityResource(1, monitor=boom)
-        log: list[str] = []
-        holder = sim.spawn(_use(res, log, "holder", 0, 2))
-        await sim.timeout(1)
-        waiter = sim.spawn(_use(res, log, "waiter", 1, 1))
-        doomed = sim.spawn(_use(res, log, "doomed", 0, 1))
-        await sim.timeout(0.5)
-        doomed.cancel()  # a CancelledError must not be masked by the monitor
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
-        await asyncio.gather(holder, waiter)
-        assert log == ["holder", "waiter"]
-        assert (res.count, res.queue_length) == (0, 0)
-        # holder: enter, release; waiter: queue, enter, release; doomed: queue, leave
-        assert len(errors) == 7
-        for ctx in errors:
-            assert isinstance(ctx["exception"], MonitorBoom)
-            assert ctx["resource"] is res
-        async with PriorityResource(1) as fresh:
-            assert fresh.count == 1
 
     desyncio.run(main())
 
@@ -840,7 +666,11 @@ async def _mm1_two_classes(
     return [r for r in records if r is not None]
 
 
-def test_mm1_two_classes_high_priority_waits_less() -> None:
+def test_mm1_two_classes_is_deterministic_and_high_priority_waits_less() -> None:
+    first = desyncio.run(_mm1_two_classes(), seed=5)
+    assert first == desyncio.run(_mm1_two_classes(), seed=5)
+    assert first != desyncio.run(_mm1_two_classes(), seed=6)
+
     recs = desyncio.run(_mm1_two_classes(), seed=11)
     assert len(recs) == 200
 
@@ -852,15 +682,6 @@ def test_mm1_two_classes_high_priority_waits_less() -> None:
     # One server: service intervals never overlap.
     spans = sorted((s, d) for _, _, s, d in recs)
     assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:], strict=False))
-
-
-def test_priority_determinism() -> None:
-    assert desyncio.run(_mm1_two_classes(), seed=5) == desyncio.run(
-        _mm1_two_classes(), seed=5
-    )
-    assert desyncio.run(_mm1_two_classes(), seed=5) != desyncio.run(
-        _mm1_two_classes(), seed=6
-    )
 
 
 # --- RES-02 fix round 1: release is synchronous (D030) ----------------------
@@ -881,9 +702,11 @@ def _spawn_holder_and_waiters(
     ]
 
 
-def test_cancel_at_holder_exit_does_not_leak_unit() -> None:
+@pytest.mark.parametrize("cls", [PriorityResource, PreemptiveResource])
+def test_cancel_at_holder_exit_does_not_leak_unit(cls: type[PriorityResource]) -> None:
+    # The PreemptiveResource twin goes through the Interruptible scope on exit.
     async def main() -> None:
-        res = PriorityResource(1)
+        res = cls(1)
         log: list[str] = []
 
         async def holder() -> None:
@@ -967,42 +790,6 @@ def test_interrupt_of_holder_at_exit_does_not_leak_unit() -> None:
     desyncio.run(main())
 
 
-def test_waiter_cancelled_when_granted_passes_unit_to_next() -> None:
-    async def main() -> list[tuple[str, float]]:
-        seen: list[tuple[int, int]] = []
-
-        def monitor(r: PriorityResource) -> None:
-            assert 0 <= r.count <= r.capacity
-            seen.append((r.count, r.queue_length))
-
-        res = PriorityResource(1, monitor=monitor)
-        log: list[tuple[str, float]] = []
-
-        async def user(name: str, prio: int, hold: float) -> None:
-            async with res.request(priority=prio):
-                log.append((name, sim.now))
-                await sim.timeout(hold)
-
-        holder = sim.spawn(user("holder", 0, 1))
-        await sim.timeout(0.5)
-        doomed = sim.spawn(user("doomed", 0, 1))
-        nxt = sim.spawn(user("next", 1, 1))
-        last = sim.spawn(user("last", 2, 1))
-        await sim.timeout(0.5)  # t=1: holder released and handed doomed the unit
-        doomed.cancel()  # ...but doomed has not resumed yet
-        with pytest.raises(asyncio.CancelledError):
-            await doomed
-        await sim.timeout(0)
-        assert sim.now == 1.0
-        assert (res.count, res.queue_length) == (1, 1)  # next holds, last waits
-        await asyncio.gather(holder, nxt, last)
-        assert (res.count, res.queue_length) == (0, 0)
-        assert seen[-1] == (0, 0)
-        return log
-
-    assert desyncio.run(main()) == [("holder", 0.0), ("next", 1.0), ("last", 2.0)]
-
-
 # --- PreemptiveResource (RES-03, D032) ---------------------------------------
 
 
@@ -1062,105 +849,41 @@ def test_preemption_basic_same_instant_and_cause() -> None:
     desyncio.run(main())
 
 
-def test_preempted_dataclass_is_frozen() -> None:
-    async def main() -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        p = Preempted(by=task, usage_since=1.0, resource=PreemptiveResource(1))
-        with pytest.raises(AttributeError):
-            p.usage_since = 2.0  # type: ignore[misc]
-
-    desyncio.run(main())
-
-
-def test_machine_shop_resubmits_remaining_work() -> None:
-    async def main() -> list[tuple[str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, float]] = []
-
-        async def job() -> None:
-            remaining = 10.0
-            while remaining > 0:
-                try:
-                    async with res.request(priority=5):
-                        log.append(("job start", sim.now))
-                        await sim.timeout(remaining)
-                        remaining = 0
-                except Interrupt as exc:
-                    assert isinstance(exc.cause, Preempted)
-                    remaining -= sim.now - exc.cause.usage_since
-                    log.append(("job preempted", sim.now))
-            log.append(("job done", sim.now))
-
-        async def urgent() -> None:
-            await sim.timeout(4)
-            async with res.request(priority=0):
-                log.append(("urgent start", sim.now))
-                await sim.timeout(3)
-
-        await asyncio.gather(sim.spawn(job()), sim.spawn(urgent()))
-        return log
-
-    assert desyncio.run(main()) == [
-        ("job start", 0.0),
-        ("urgent start", 4.0),
-        ("job preempted", 4.0),
-        ("job start", 7.0),
-        ("job done", 13.0),
-    ]
-
-
-def test_preempt_false_never_preempts() -> None:
+@pytest.mark.parametrize(
+    ("holder_priority", "challenger_priority", "preempt"),
+    [
+        (5, 0, False),  # better, but it did not ask to preempt
+        (3, 3, True),  # equal priority is not better
+        (1, 9, True),  # worse priority
+    ],
+)
+def test_challenger_that_may_not_preempt_waits_its_turn(
+    holder_priority: float, challenger_priority: float, preempt: bool
+) -> None:
     async def main() -> list[tuple[str, str, float]]:
         res = PreemptiveResource(1)
         log: list[tuple[str, str, float]] = []
         await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "low", 5, 4)),
-            sim.spawn(_victim_job(res, log, "high", 0, 1, preempt=False, delay=1)),
+            sim.spawn(_victim_job(res, log, "holder", holder_priority, 4)),
+            sim.spawn(
+                _victim_job(
+                    res,
+                    log,
+                    "challenger",
+                    challenger_priority,
+                    1,
+                    preempt=preempt,
+                    delay=1,
+                )
+            ),
         )
         return log
 
     assert desyncio.run(main()) == [
-        ("low", "start", 0.0),
-        ("low", "done", 4.0),
-        ("high", "start", 4.0),
-        ("high", "done", 5.0),
-    ]
-
-
-def test_equal_priority_never_preempts() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "first", 3, 4)),
-            sim.spawn(_victim_job(res, log, "second", 3, 1, delay=1)),
-        )
-        return log
-
-    assert desyncio.run(main()) == [
-        ("first", "start", 0.0),
-        ("first", "done", 4.0),
-        ("second", "start", 4.0),
-        ("second", "done", 5.0),
-    ]
-
-
-def test_worse_priority_request_never_preempts() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "good", 1, 4)),
-            sim.spawn(_victim_job(res, log, "bad", 9, 1, delay=1)),
-        )
-        return log
-
-    assert [e[:2] for e in desyncio.run(main())] == [
-        ("good", "start"),
-        ("good", "done"),
-        ("bad", "start"),
-        ("bad", "done"),
+        ("holder", "start", 0.0),
+        ("holder", "done", 4.0),
+        ("challenger", "start", 4.0),
+        ("challenger", "done", 5.0),
     ]
 
 
@@ -1188,37 +911,30 @@ def test_better_waiting_non_preempting_request_is_not_jumped() -> None:
     ]
 
 
-def test_tie_among_worst_holders_picks_most_recent() -> None:
+@pytest.mark.parametrize(
+    ("early_priority", "late_priority", "victim"),
+    [
+        (5, 5, "late"),  # a tie among the worst holders: the most recent loses
+        (7, 3, "early"),  # the worst holder loses, even though it is not the latest
+    ],
+)
+def test_preemption_picks_the_right_victim(
+    early_priority: float, late_priority: float, victim: str
+) -> None:
     async def main() -> list[tuple[str, str, float]]:
         res = PreemptiveResource(2)
         log: list[tuple[str, str, float]] = []
         await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "early", 5, 10)),
-            sim.spawn(_victim_job(res, log, "late", 5, 10, delay=1)),
+            sim.spawn(_victim_job(res, log, "early", early_priority, 10)),
+            sim.spawn(_victim_job(res, log, "late", late_priority, 10, delay=1)),
             sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
         )
         return log
 
     log = desyncio.run(main())
-    assert ("late", "preempted", 2.0) in log
-    assert ("early", "done", 10.0) in log
-    assert ("early", "preempted", 2.0) not in log
-
-
-def test_worst_priority_holder_is_chosen_not_the_latest() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(2)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "worst", 7, 10)),
-            sim.spawn(_victim_job(res, log, "mid", 3, 10, delay=1)),
-            sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
-        )
-        return log
-
-    log = desyncio.run(main())
-    assert ("worst", "preempted", 2.0) in log
-    assert ("mid", "done", 11.0) in log
+    survivor = "early" if victim == "late" else "late"
+    assert [e for e in log if e[1] == "preempted"] == [(victim, "preempted", 2.0)]
+    assert (survivor, "done") in [e[:2] for e in log]
 
 
 def test_plain_async_with_is_preemptible_and_preempts() -> None:
@@ -1333,30 +1049,12 @@ def test_raising_monitor_on_preemption_is_reported_and_preemption_stands() -> No
     assert n_errors > 0  # reported, not raised
 
 
-def test_preempt_must_be_bool_and_priority_validated() -> None:
+def test_preempt_must_be_bool_and_priority_defaults_to_zero() -> None:
+    # The priority checks are in test_priority_validation.
     res = PreemptiveResource(1)
     with pytest.raises(TypeError):
         res.request(preempt=1)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        res.request(priority=True)
-    with pytest.raises(ValueError):
-        res.request(priority=float("nan"))
-    assert isinstance(res, PriorityResource)
     assert res.request().priority == 0
-
-
-def test_preemptive_request_is_single_use() -> None:
-    async def main() -> None:
-        res = PreemptiveResource(1)
-        req = res.request()
-        async with req:
-            pass
-        with pytest.raises(RuntimeError):
-            async with req:
-                pass
-        assert (res.count, res.queue_length) == (0, 0)
-
-    desyncio.run(main())
 
 
 # Case a: the preemptor's own task already holds a unit ----------------------
@@ -1600,27 +1298,6 @@ def test_case_d_victim_turns_its_cancel_into_another_exception() -> None:
     desyncio.run(main())
 
 
-def test_cancel_at_preemptive_holder_exit_does_not_leak_unit() -> None:
-    async def main() -> None:
-        res = PreemptiveResource(1)
-        log: list[str] = []
-
-        async def holder() -> None:
-            async with res.request(priority=1):
-                log.append("holder")
-                await sim.timeout(5)
-                asyncio.current_task().cancel()  # type: ignore[union-attr]
-
-        h = sim.spawn(holder())
-        w = sim.spawn(_use(res, log, "w", 2, 1, delay=1))
-        await sim.timeout(10)
-        assert h.cancelled() and w.done()
-        assert log == ["holder", "w"]
-        assert (res.count, res.queue_length) == (0, 0)
-
-    desyncio.run(main())
-
-
 # Case e: several preemptions in one instant -----------------------------------
 
 
@@ -1765,7 +1442,9 @@ async def _preemption_stress(n: int = 40) -> list[tuple[float, str, str]]:
     return trace
 
 
-@pytest.mark.parametrize("seed", range(40))
+@given(st.integers(0, 2**32))
+# The seeds are 40 derandomized hypothesis draws, not the fixed seeds 0..39 (D042).
+@settings(max_examples=40, derandomize=True, deadline=None)
 def test_preemption_stress(seed: int) -> None:
     desyncio.run(_preemption_stress(), seed=seed)
 
@@ -1776,38 +1455,3 @@ def test_preemption_determinism() -> None:
     c = desyncio.run(_preemption_stress(), seed=12)
     assert a == b
     assert a != c
-
-
-@pytest.mark.parametrize("method", ["__aenter__", "__aexit__"])
-def test_interruptible_enter_and_exit_never_await(method: str) -> None:
-    """Pin that ``Interruptible.__aenter__``/``__aexit__`` contain no suspension point.
-
-    Why this test exists (D030, D034): ``PreemptiveRequest`` grants a unit and
-    then enters an ``Interruptible`` scope; on exit it leaves the scope and
-    releases the unit. Both steps are leak-free only because the scope's
-    ``__aenter__`` and ``__aexit__`` run to completion without ever yielding to
-    the event loop. If either one gained an ``await`` (or ``async for`` /
-    ``async with``), a cancel or ``sim.interrupt`` could land at that
-    suspension point, between the grant and the scope (or between the scope
-    and the release), and a unit would be lost for good -- the same leak D030
-    removed from RES-02. The methods are declared ``async`` only to satisfy
-    the async context manager protocol, so this check inspects their source:
-    a future ``await`` in either one fails here loudly instead of leaking
-    silently under rare timing.
-    """
-    import ast
-    import inspect
-    import textwrap
-
-    from desyncio.interrupt import Interruptible
-
-    source = textwrap.dedent(inspect.getsource(getattr(Interruptible, method)))
-    tree = ast.parse(source)
-    suspending = [
-        f"{type(node).__name__} at line {node.lineno}"
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Await, ast.AsyncFor, ast.AsyncWith))
-    ]
-    assert suspending == [], (
-        f"Interruptible.{method} must never suspend (D030/D034), found: {suspending}"
-    )

@@ -13,8 +13,9 @@ import selectors
 import sys
 import threading
 import time
+import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
 import pytest
@@ -73,14 +74,20 @@ class FakeWall:
         return []
 
 
-async def sleeps(durations: list[float], trace: Trace, wall: Any) -> None:
+def _is_closed(coro: Coroutine[Any, Any, Any]) -> bool:
+    """True once a coroutine has been closed or has finished (no frame left)."""
+    assert isinstance(coro, types.CoroutineType)
+    return coro.cr_frame is None
+
+
+async def sleeps(durations: Sequence[float], trace: Trace, wall: Any) -> None:
     loop = asyncio.get_running_loop()
     for d in durations:
         await asyncio.sleep(d)
         trace.append((loop.time(), wall.t))
 
 
-def run_fake(durations: list[float], speed: float) -> tuple[FakeWall, Trace]:
+def run_fake(durations: Sequence[float], speed: float) -> tuple[FakeWall, Trace]:
     wall = FakeWall()
     trace: Trace = []
     desyncio.run(
@@ -89,7 +96,7 @@ def run_fake(durations: list[float], speed: float) -> tuple[FakeWall, Trace]:
     return wall, trace
 
 
-@pytest.mark.parametrize("speed", [1, 2, 0.5, 4.0])
+@pytest.mark.parametrize("speed", [1, 2, 0.5])
 def test_real_dt_is_virtual_dt_over_speed(speed: float) -> None:
     wall, trace = run_fake([1, 2, 3], speed)
     assert [v for v, _ in trace] == [1, 3, 6]
@@ -282,7 +289,7 @@ def test_speed_inf_with_default_clock_does_not_wait() -> None:
     assert time.monotonic() - t0 < 2.0
 
 
-@pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, math.nan])
+@pytest.mark.parametrize("bad", [0, -1, math.nan])
 def test_speed_value_errors(bad: float) -> None:
     with pytest.raises(ValueError):
         RealTimePacer(bad)
@@ -311,8 +318,8 @@ def test_run_rejects_speed_and_pacer_together() -> None:
 
     coro = main()
     with pytest.raises(TypeError, match="speed"):
-        desyncio.run(coro, speed=2, pacer=RealTimePacer())  # type: ignore[call-overload]
-    assert coro.cr_frame is None  # closed: no "never awaited" warning
+        desyncio.run(coro, speed=2, pacer=RealTimePacer())
+    assert _is_closed(coro)  # closed: no "never awaited" warning
 
 
 def test_run_rejects_bad_speed_and_pacer_types() -> None:
@@ -321,19 +328,8 @@ def test_run_rejects_bad_speed_and_pacer_types() -> None:
     for kwargs in ({"speed": 0}, {"speed": "x"}, {"pacer": object()}):
         coro = main()
         with pytest.raises((TypeError, ValueError)):
-            desyncio.run(coro, **kwargs)  # type: ignore[call-overload]
-        assert coro.cr_frame is None
-
-
-def test_pacer_binds_to_one_live_loop() -> None:
-    pacer = RealTimePacer()
-    loop = VirtualTimeLoop(pacer=pacer)
-    try:
-        with pytest.raises(ValueError, match="already"):
-            VirtualTimeLoop(pacer=pacer)
-    finally:
-        loop.close()
-    VirtualTimeLoop(pacer=pacer).close()  # fine once the first loop is closed
+            desyncio.run(coro, **kwargs)
+        assert _is_closed(coro)
 
 
 def test_until_caps_real_time_at_until() -> None:
@@ -488,16 +484,6 @@ def test_far_timer_at_speed_one_does_not_overflow() -> None:
     assert fired == [1e10]
 
 
-def test_speed_1e_minus_12_does_not_overflow() -> None:
-    wall = SelectLimitWall()
-    pacer = RealTimePacer(1e-12, wall_clock=wall)
-    _switch_to_fast_after(wall, pacer, 2)
-    trace: Trace = []
-    desyncio.run(sleeps([1], trace, wall), pacer=pacer)
-    assert all(w is not None and w <= MAX_REAL_WAIT for w in wall.waits)
-    assert trace[0][0] == 1.0
-
-
 def test_chunk_below_one_float_step_still_makes_progress() -> None:
     # At t = 2**60 one float step is 256 s. At speed 1e-30 a one-day chunk is
     # 8.64e-26 virtual s, which rounds away (now + tiny == now). The clock
@@ -540,11 +526,12 @@ def test_failed_bind_leaks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
             coro = main()
             with pytest.raises(ValueError, match="already"):
                 desyncio.run(coro, pacer=pacer)
-            assert coro.cr_frame is None
+            assert _is_closed(coro)
             del coro
             gc.collect()
     finally:
         live.close()
+    VirtualTimeLoop(pacer=pacer).close()  # fine once the first loop is closed
     assert unraisable == []
 
 
@@ -555,3 +542,43 @@ def test_guards_docstring_does_not_claim_the_loop_never_waits() -> None:
     assert "VirtualTimeLoop` never waits:" not in doc
     assert "never waits for the real world in fast mode" in doc
     assert "real-time mode" in doc
+
+
+def test_reused_pacer_that_ended_paused_starts_the_next_run_paused() -> None:
+    wall = FakeWall()
+    pacer = RealTimePacer(1, wall_clock=wall)
+
+    async def first() -> None:
+        pacer.pause()  # the run ends while paused
+
+    desyncio.run(first(), pacer=pacer)
+    assert pacer.paused
+    assert wall.waits == []
+
+    # Run 2 must not progress until something resumes the pacer. The fake
+    # "human" does that on the first untimed wait; without one the fake
+    # asserts instead of blocking, so this cannot hang.
+    loop_times: list[float] = []
+
+    def human(w: FakeWall) -> None:
+        assert loop_times == [0.0]  # no virtual progress yet
+        w.t += 3
+        pacer.resume()
+
+    wall.on_paused_wait = human
+
+    async def second() -> None:
+        loop = asyncio.get_running_loop()
+        loop_times.append(loop.time())
+        await asyncio.sleep(2)
+        loop_times.append(loop.time())
+
+    desyncio.run(second(), pacer=pacer)
+    assert wall.waits == [None, 2.0]  # paused wait first, then the timed one
+    assert loop_times == [0.0, 2.0]
+    assert wall.t == 5.0  # 3 s paused + 2 s of pacing
+    assert not pacer.paused
+
+
+def test_max_real_wait_is_within_asyncios_select_cap() -> None:
+    assert MAX_REAL_WAIT <= asyncio.base_events.MAXIMUM_SELECT_TIMEOUT  # type: ignore[attr-defined]

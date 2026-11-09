@@ -260,3 +260,43 @@ API-01 therefore also owns those lines.
 ## D038 — DOC-02 review: the docs-examples extractor must not skip examples silently (lead)
 The DOC-02 reviewer listed it as a SHOULD that `tests/test_docs_examples.py` skips an indented fence ("  ```python") without failing. The only guard was "at least 8 examples". The lead promoted it to a MUST: DOC-02's acceptance criterion is "examples are run in a test", and an example that is silently not run makes the guide's D011 guarantee void. Fix round 1 also corrects the one false claim the review found (the value of `cancelling()` after an interrupt when a real cancel also fired) and pins it with an executed example.
 The same false sentence is in the `src/desyncio/interrupt.py` module docstring, which is outside DOC-02's files. It is left as a SHOULD for a clean-up feature.
+
+## D039 — Clean-up batch: no behaviour changes for the two open SHOULDs (lead, the owner may revise)
+- **A reused `RealTimePacer` that ended paused** starts the next run paused. The lead keeps this behaviour and documents it (CLN-03). The pause state belongs to the pacer object the user created; resetting it silently on `bind()` would surprise a user who paused on purpose.
+- **`sim.random` in a task with a fresh `contextvars.Context`** still raises `RuntimeError`, with a message that names the real cause (CLN-01). A fallback would need the streams on the loop (D017: `self._state`), and it would change how streams are reached. That is a design change for the owner, not a clean-up.
+- The float-validator unification is a separate batch (CLN-05), because it touches the files of CLN-01 and CLN-03.
+
+
+## D040 — CLN-05: `speed` with an int too large for a float raises `ValueError` (lead)
+`realtime._check_speed` calls `float(value)` without catching `OverflowError`. So `run(..., speed=10**400)` raises `OverflowError`, which breaks the common rule that bad arguments raise `TypeError`/`ValueError` (module 2 rules; module 1 validators do the same). CLN-05 unifies the validators, and with that `speed` gets the same `ValueError` as the others. This is the one behaviour change that CLN-05 allows. Every other error type, message and returned value stays exactly as it is (for example, `clock` normalises `-0.0` and the others don't).
+
+## D041 — CLN-05: trim the redundant tests before merging (lead, after the owner questioned the suite's size)
+The owner said the test suite may be larger than needed, and a suite-wide audit is running. CLN-05 passed review, but it added about 129 test lines to a refactor. Most of its `to_float` helper tests repeat what the exact-message tests on each caller already prove. The lead promoted the reviewer's SHOULD to a MUST:
+- drop the four redundant helper tests and merge the two option tests into one;
+- move the bool check into a caller test;
+- put the D040 assertion in its own test;
+- use one top-level import;
+- add a comment that `what` in `clock._check_finite` must be a brace-free internal constant.
+The exact-message tests per caller stay. They are the only proof that messages are unchanged, because the older tests use loose `match=` patterns.
+
+## D042 — Trim the test suite (owner: "cut tests")
+The owner approved the cut proposed in `docs/test-audit.md`, with the lead's recommendations on its two cut questions:
+- **Docs examples may be the only guard for a guarantee.** Each such example in `docs/primitives.md` gets a short HTML comment above it saying what it pins (`<!-- pins: ... -->`), so that an edit to it is a visible test change.
+- **Tests that only re-prove asyncio are dropped** (principle 6). One exception: `test_no_barging_same_instant_newcomer` stays, as a guard in case `Resource` is ever moved off `Semaphore`.
+- **Not in scope** (still open for the owner): adding `mypy tests` to the gate, and new tests for the gaps the audit found.
+This is a spec change for the test files involved, so editing, merging and deleting tests is allowed in TST-01..04. Nothing else changes: every logged regression guard and every determinism test stays, and each merged test must fail under the mutations the old tests caught.
+
+## D043 — Type-check the tests, and add the gap tests (owner: "go with 3 4 also")
+The owner extended D042 with the two remaining audit points:
+- **`mypy tests` joins the gate.** `LINT_CMD` type-checks `src` and `tests`. The type errors in `tests/` (34 at the time of the audit) are fixed in the tests, not silenced wholesale. A targeted `# type: ignore[code]` is allowed only where a test deliberately passes a wrong type, and it carries a comment. This makes `test_overload_types` a real check.
+- **Gap tests:**
+  - a late interrupt (`interrupted` is True and no `Interrupt` is raised), plus a docstring line;
+  - the ExceptionGroup limit (a real child failure while interrupting propagates untranslated, with `interrupted` True and `cancelling()` restored);
+  - a raising monitor on `shutdown(immediate=True)` inside a run (the error reaches the loop exception handler, and the shutdown completes);
+  - moving `test_interruptible_enter_and_exit_never_await` from test_resource.py to test_interrupt.py.
+- **Scheduling.** Both points touch files owned by batch 16, so they run after it: TST-06 (gap tests) in batch 17, then TST-05 (mypy) in batch 18, so that mypy checks the final tests.
+- **Out of scope:** the outside-a-loop case of a raising monitor on immediate shutdown ("no running event loop", a STO-01 SHOULD). It needs a src change.
+
+## D044 — Gate changes are verified after merge (lead)
+`scripts/gate.sh` sources `scripts/gate.env` from the main checkout, not from the branch it tests. So a branch that changes `gate.env` passes the gate under the *old* commands. For TST-05 the lead merged on the reviewer's manual run of the new command on the merged tree, then ran `scripts/gate.sh origin/integration`, which used the new `mypy src tests`: GATE PASS. Until `gate.sh` is fixed (a SHOULD), any gate change is verified this way: run it by hand on the merged tree, merge, then gate `integration`.
+

@@ -65,13 +65,17 @@ import threading
 import time
 from typing import Protocol
 
+from desyncio._validate import to_float
+
 Events = list[tuple[selectors.SelectorKey, int]]
 
 #: Longest single real wait, in seconds (one day). ``select`` raises
 #: ``OverflowError`` for timeouts above ~9.2e9 s, which a slow speed easily
 #: reaches (``1 / 1e-12``). asyncio caps its own waits the same way
 #: (``MAXIMUM_SELECT_TIMEOUT`` in ``base_events.py``). A longer wait is done
-#: in chunks; see ``_JumpingSelector._select_paced``.
+#: in chunks; see ``_JumpingSelector._select_paced``. Keep this at or below
+#: asyncio's cap (a test checks it): stock asyncio limits select timeouts to
+#: 24 h for the same overflow reason.
 MAX_REAL_WAIT = 86400.0
 
 
@@ -104,9 +108,13 @@ class SystemWallClock:
 
 
 def _check_speed(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"speed must be a real number, got {type(value).__name__}")
-    speed = float(value)
+    speed = to_float(
+        value,
+        type_error="speed must be a real number, got {type}",
+        overflow_error=(
+            "speed must be > 0 (or math.inf), got an int too large for a float"
+        ),
+    )
     if math.isnan(speed) or speed <= 0.0:
         raise ValueError(f"speed must be > 0 (or math.inf), got {value!r}")
     return speed
@@ -154,7 +162,15 @@ class RealTimePacer:
             return self._paused
 
     def pause(self) -> None:
-        """Freeze virtual time. The loop keeps waiting (interruptibly)."""
+        """Freeze virtual time. The loop keeps waiting (interruptibly).
+
+        Warning: called from inside the simulation (a coroutine or timer
+        callback) with no other thread to call :meth:`resume`, this blocks
+        forever, because the frozen loop never runs the code that would
+        resume it. Also, the paused state belongs to the pacer and is kept
+        across runs: a pacer reused after a run that ended paused starts the
+        next run paused.
+        """
         with self._lock:
             self._paused = True
         self._wake()

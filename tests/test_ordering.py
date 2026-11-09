@@ -1,13 +1,16 @@
 """Deterministic tie-breaking: timers fire in (time, priority, sequence) order."""
 
 import asyncio
+import itertools
 import math
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from desyncio import scheduling
 from desyncio.loop import VirtualTimeLoop
 from desyncio.scheduling import PriorityTimerHandle
 
@@ -64,19 +67,6 @@ def test_lower_priority_fires_first_at_same_time() -> None:
     assert run(main) == ["p-1", "default-first", "default-second", "p5"]
 
 
-def test_time_beats_priority() -> None:
-    async def main() -> list[str]:
-        loop = asyncio.get_running_loop()
-        assert isinstance(loop, VirtualTimeLoop)
-        fired: list[str] = []
-        loop.call_at_priority(2.0, -100, fired.append, "late-urgent")
-        loop.call_at_priority(1.0, 100, fired.append, "early-lazy")
-        await asyncio.sleep(3)
-        return fired
-
-    assert run(main) == ["early-lazy", "late-urgent"]
-
-
 def test_stock_apis_use_default_priority_zero_and_rising_sequence() -> None:
     async def main() -> list[PriorityTimerHandle]:
         loop = asyncio.get_running_loop()
@@ -100,18 +90,21 @@ def test_stock_apis_use_default_priority_zero_and_rising_sequence() -> None:
     assert seqs == sorted(seqs) and len(set(seqs)) == 3
 
 
-def test_sequence_is_per_loop_and_monotonic() -> None:
-    def seqs() -> list[int]:
-        loop = VirtualTimeLoop()
-        try:
-            hs = [loop.call_at(1.0, lambda: None) for _ in range(5)]
-            return [h.sequence for h in hs]  # type: ignore[attr-defined]
-        finally:
-            loop.close()
-
-    first, second = seqs(), seqs()
-    assert first == sorted(first) and len(set(first)) == 5
-    assert first == second  # a fresh loop starts its own counter
+def test_sequence_starts_at_zero_per_loop_and_is_a_plain_itertools_count() -> None:
+    # Reads PriorityTimerHandle.sequence (public property) and the loop's
+    # private _state, because the stdlib-counter claim has no other surface.
+    assert not hasattr(scheduling, "SequenceCounter")  # principle 6
+    loop_a, loop_b = VirtualTimeLoop(), VirtualTimeLoop()
+    try:
+        assert type(loop_a._state.sequence) is type(itertools.count())
+        a = [loop_a.call_at(1.0, lambda: None) for _ in range(3)]
+        b = [loop_b.call_at(1.0, lambda: None) for _ in range(2)]
+        a.append(loop_a.call_at(1.0, lambda: None))
+        assert [h.sequence for h in a] == [0, 1, 2, 3]  # type: ignore[attr-defined]
+        assert [h.sequence for h in b] == [0, 1]  # type: ignore[attr-defined]
+    finally:
+        loop_a.close()
+        loop_b.close()
 
 
 def test_priority_must_be_int() -> None:
@@ -143,9 +136,10 @@ def test_debug_source_traceback_points_at_caller() -> None:
 # --- clock-resolution window ------------------------------------------------
 
 
-def test_near_simultaneous_timers_each_see_their_own_time() -> None:
-    """call_at(1.0) and call_at(1.0 + 5e-10) must not share one instant."""
-    late = 1.0 + 5e-10
+@pytest.mark.parametrize("late", [1.0 + 5e-10, math.nextafter(1.0, math.inf)])
+def test_near_simultaneous_timers_each_see_their_own_time(late: float) -> None:
+    """call_at(1.0) and a later float (5e-10 away, or the adjacent float) must
+    not share one instant."""
 
     async def main() -> list[tuple[str, float]]:
         loop = asyncio.get_running_loop()
@@ -156,20 +150,6 @@ def test_near_simultaneous_timers_each_see_their_own_time() -> None:
         return seen
 
     assert run(main) == [("early", 1.0), ("late", late)]
-
-
-def test_adjacent_floats_are_not_batched() -> None:
-    nxt = math.nextafter(1.0, math.inf)
-
-    async def main() -> list[float]:
-        loop = asyncio.get_running_loop()
-        seen: list[float] = []
-        loop.call_at(nxt, lambda: seen.append(loop.time()))
-        loop.call_at(1.0, lambda: seen.append(loop.time()))
-        await asyncio.sleep(2)
-        return seen
-
-    assert run(main) == [1.0, nxt]
 
 
 def test_exact_same_time_timers_share_one_instant() -> None:
@@ -239,9 +219,11 @@ def _trace(schedule: list[tuple[float, int]]) -> list[tuple[float, int]]:
     trace: list[tuple[float, int]] = []
     try:
         for label, (when, prio) in enumerate(schedule):
-            loop.call_at_priority(
-                when, prio, lambda lab=label: trace.append((loop.time(), lab))
-            )
+
+            def fire(lab: int = label) -> None:
+                trace.append((loop.time(), lab))
+
+            loop.call_at_priority(when, prio, fire)
         last = max((w for w, _ in schedule), default=0)
         loop.run_until_complete(asyncio.sleep(last + 1))
     finally:

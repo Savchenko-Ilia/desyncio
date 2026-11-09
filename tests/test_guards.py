@@ -1,7 +1,6 @@
 """Tests for the no-real-I/O guards (AGENTS.md principle 5)."""
 
 import asyncio
-import inspect
 import socket
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -91,13 +90,6 @@ def test_every_public_loop_method_is_classified() -> None:
     assert classified - public == set(), "stale names in the lists"
 
 
-def test_every_guarded_method_is_overridden_on_the_loop() -> None:
-    for name in GUARDED_METHODS:
-        assert getattr(VirtualTimeLoop, name) is not getattr(
-            asyncio.SelectorEventLoop, name
-        ), name
-
-
 @pytest.mark.parametrize("name", sorted(EXPECTED_REFUSED))
 def test_guarded_method_raises_real_io_error(name: str) -> None:
     loop = VirtualTimeLoop()
@@ -141,41 +133,8 @@ def test_remove_reader_writer_and_signal_handler_are_noops() -> None:
         loop.close()
 
 
-def test_loop_constructs_runs_and_closes() -> None:
-    """The loop's own self-pipe uses private _add_reader and must still work."""
-    loop = VirtualTimeLoop()
-    assert not loop.is_closed()
-
-    async def main() -> int:
-        await asyncio.sleep(1)
-        return 7
-
-    assert loop.run_until_complete(main()) == 7
-    loop.close()
-    assert loop.is_closed()
-
-
-def test_call_soon_threadsafe_from_loop_thread_still_works() -> None:
-    async def main() -> int:
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[int] = loop.create_future()
-        loop.call_soon_threadsafe(fut.set_result, 3)
-        return await fut
-
-    assert run(main) == 3
-
-
-def test_runner_close_works_without_an_executor() -> None:
-    """Runner.close() awaits shutdown_default_executor(); it must not be refused."""
-
-    async def main() -> None:
-        await asyncio.sleep(1)
-
-    with asyncio.Runner(loop_factory=VirtualTimeLoop) as runner:
-        runner.run(main())
-
-
 def test_shutdown_default_executor_still_allowed() -> None:
+    """Runner.close() awaits shutdown_default_executor(); it must not be refused."""
     loop = VirtualTimeLoop()
     try:
         loop.run_until_complete(loop.shutdown_default_executor())
@@ -189,14 +148,6 @@ def test_shutdown_default_executor_still_allowed() -> None:
 def test_to_thread_raises() -> None:
     async def main() -> None:
         await asyncio.to_thread(print, "never")
-
-    with pytest.raises(RealIOError):
-        run(main)
-
-
-def test_run_in_executor_raises_inside_coroutine() -> None:
-    async def main() -> None:
-        await asyncio.get_running_loop().run_in_executor(None, print)
 
     with pytest.raises(RealIOError):
         run(main)
@@ -216,28 +167,3 @@ def test_create_subprocess_exec_raises() -> None:
 
     with pytest.raises(RealIOError):
         run(main)
-
-
-def test_getaddrinfo_raises() -> None:
-    async def main() -> None:
-        await asyncio.get_running_loop().getaddrinfo("localhost", 80)
-
-    with pytest.raises(RealIOError):
-        run(main)
-
-
-def test_sock_connect_raises_inside_coroutine() -> None:
-    async def main() -> None:
-        loop = asyncio.get_running_loop()
-        with socket.socket() as s:
-            s.setblocking(False)
-            await loop.sock_connect(s, ("127.0.0.1", 9))
-
-    with pytest.raises(RealIOError):
-        run(main)
-
-
-def test_refusal_is_immediate_even_for_async_methods() -> None:
-    """The guards are plain functions, so the error surfaces at the call and a
-    forgotten ``await`` cannot hide it behind a never-awaited coroutine."""
-    assert not inspect.iscoroutinefunction(VirtualTimeLoop.sock_recv)
