@@ -31,7 +31,7 @@ async def main() -> None:
     lead_rng = sim.random("lead-time")  # a stdlib random.Random
     on_order = 0  # units ordered but not yet delivered
     orders = stockout_days = 0
-    unmet = 0.0
+    unmet = 0  # an int: demand and stock are whole units
 
     async def deliver(quantity: int) -> None:
         nonlocal on_order
@@ -44,7 +44,9 @@ async def main() -> None:
         # stock.get(n) does NOT fail when the level is below n: it waits until
         # deliveries lift the level to n (back-orders), and everything behind it in
         # the line waits too. To model lost sales we never ask for more than we have.
-        served = min(demand, stock.level)
+        # `level` is typed float; here it only ever changes by whole units, so int()
+        # loses nothing and keeps `served` and `unmet` integers.
+        served = min(demand, int(stock.level))
         if served > 0:
             await stock.get(served)  # enough stock, so this does not wait
         if served < demand:
@@ -65,7 +67,7 @@ async def main() -> None:
     fractions = level.time_fractions(until=sim.now)
     print(f"orders placed: {orders}")
     print(f"days with unmet demand: {stockout_days} of {DAYS}")
-    print(f"units of demand lost: {unmet:g}")
+    print(f"units of demand lost: {unmet}")
     print(f"mean stock level: {level.mean(until=sim.now):.1f}")
     print(f"fraction of time at zero stock: {fractions.get(0, 0.0):.3f}")
 
