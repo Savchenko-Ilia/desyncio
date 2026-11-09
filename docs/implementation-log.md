@@ -1129,3 +1129,63 @@ Branch: feat/DEP-01  ·  Merged: 6790cdf
 **Gotchas.** `numpy>=2.0` is a nominal floor on 3.14: numpy 2.0.0 has no 3.14 wheels, so the real floor there is higher. The spec's reason for 2.0 is weighted `np.quantile`.
 
 **Follow-ups (SHOULD).** Raise the numpy floor to the first release with 3.14 wheels, once checked.
+
+## STA-01 — Tally: statistics of observations (2026-11-09, batch 21)
+Branch: feat/STA-01  ·  Merged: 47dd7f5
+
+**Approach.** New `src/desyncio/tally.py`. `Tally.record(value)` appends a validated float (it reuses `monitor._real`) and never reads `sim.now`. Every statistic converts the list to an array and calls numpy: `np.mean`, `np.var`/`np.std` with `ddof=1`, `np.min`/`np.max`, `np.quantile` (default linear method), `np.histogram`. Results are converted to Python `float`/`int`. numpy is imported inside each method.
+
+**asyncio internals.** None: `record` is a synchronous append.
+
+**Trade-offs.** O(n) per statistic (array conversion) instead of Welford's O(1) running mean: D048 says call numpy, and statistics are read rarely.
+
+**Review findings.** No MUST. Mutations caught: `ddof=0`, `method="lower"`. Deferred to STA-03 (D050): `quantile` accepts `bool`/`str` p, unlike `TimeSeries.quantile`.
+
+**Gotchas.** A numpy array as `p` is not a `Sequence`, so it takes the scalar path and numpy raises a TypeError.
+
+**Follow-ups (SHOULD).** Move `_real` to a shared private module if a third user appears.
+
+## STA-02 — TimeSeries: time-weighted distribution (2026-11-09, batch 21)
+Branch: feat/STA-02 (+ fix/STA-02-1)  ·  Merged: 24856f2
+
+**Approach.** A private `_weighted(until, what)` returns `(values, durations)` with the same checks and order as `mean()`, dropping zero-duration segments. `time_fractions` sums durations per value with `math.fsum`; `quantile` is `np.quantile(values, p, weights=durations, method="inverted_cdf")`; `variance` is `np.average` of squared deviations with duration weights (population). A zero-length span gives `{last: 1.0}`, last, and 0.0.
+
+**asyncio internals.** None beyond `sim.now`.
+
+**Trade-offs.** numpy ≥ 2.0 supports `weights=` only with `method="inverted_cdf"`, so the time-weighted quantile is a step function (no interpolation).
+
+**Review findings.** Round 1 (D050, promoted SHOULD): the M/M/1 test's comment overstated the error (±0.02) and its band was loose (0.05). Measured max error over seeds 1..10 is 0.0123; the band is now 0.04, and a ×1.2 bias on P(N=0) that passed at 0.05 now fails.
+
+**Gotchas.** The M/M/1 test uses its own small model, because `tests/models/mm1.py` records nothing about the number in system. It takes about 0.7 s.
+
+**Follow-ups.** None.
+
+## STA-04 — Replications and confidence intervals (2026-11-09, batch 21)
+Branch: feat/STA-04 (+ fix/STA-04-1)  ·  Merged: 18e16ce
+
+**Approach.** New `src/desyncio/experiment.py`. `replicate(model, n, *, seed, until, speed, pacer, trace)` calls `run(model(), seed=seed + i, ...)` for each i; explicit keyword params instead of `**run_kwargs`, with two `@overload`s mirroring `run` (`list[T]` without `until`, `list[T | None]` with it). `confidence_interval(values, level)` uses `scipy.stats.t.interval(level, n-1, loc=mean, scale=scipy.stats.sem(values))` and returns `(mean, half_width)`; scipy gives nan for a zero scale, so all-equal values return `(mean, 0.0)`.
+
+**asyncio internals.** Each replication is a separate `desyncio.run`, so a fresh loop and fresh random streams per run.
+
+**Trade-offs.** `n` must be an `int` (TypeError for `2.0` or `bool`), which is stricter than the row.
+
+**Review findings.** Round 1, two MUSTs: (1) `cast(T, ...)` hid a real `None` behind `list[T]` when `until` was set; fixed with overloads and `assert_type` tests checked by mypy in the gate. (2) The seed+i contract was not pinned (`seed + i + 1` passed); the test now compares against `run(..., seed=3 + i)` directly. The docstring also says a `pacer` is shared by all runs and keeps its paused state (CLN-03).
+
+**Gotchas.** The coverage test uses a seeded `random.Random`, not a simulation, so it is cheap and deterministic.
+
+**Follow-ups (SHOULD).** A test that `speed`/`pacer`/`trace` reach the run in both overload branches.
+
+## RND-02 — numpy random streams (2026-11-09, batch 21)
+Branch: feat/RND-02 (+ fix/RND-02-1)  ·  Merged: 402bcb4
+
+**Approach.** `RandomStreams.np_stream(name)` caches a `numpy.random.Generator` per name in its own dict, seeded with `default_rng(SeedSequence(int.from_bytes(sha256(f"{seed}:{name}").digest(), "big")))`. `Sim.np_random(name)` mirrors `Sim.random`, including the fresh-context error. numpy is imported inside `np_stream`; annotations use `TYPE_CHECKING`.
+
+**asyncio internals.** The streams live in the run's `contextvars` context (D026), so a task created with a fresh `contextvars.Context` cannot see them.
+
+**Trade-offs.** SHA-256 instead of `hash()`, because `PYTHONHASHSEED` randomises `str` hashes per process. `SeedSequence` spreads the 256-bit entropy into the generator's state.
+
+**Review findings.** Round 1 (D050, promoted SHOULD): the formula was not pinned, so a changed key passed every test. A golden-value test now pins `(0, "x")` and `(42, "service")`; key swap, sha1 and separator mutations all fail it. The cross-process test now inherits `os.environ`.
+
+**Gotchas.** `Sim.np_random` duplicates about 10 lines of `Sim.random`'s error handling; sharing it would have touched CLN-01's tested message.
+
+**Follow-ups (SHOULD).** Factor the shared error handling into one helper with the method name as a parameter.
