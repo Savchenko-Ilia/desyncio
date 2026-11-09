@@ -20,7 +20,8 @@ Give every timer a sort key that is *unique*: ``(when, priority, sequence)``.
 
 * ``when``: the simulation time. Earlier fires first.
 * ``priority``: an int, default 0. At the same time, lower fires first.
-* ``sequence``: a per-loop counter, stamped when the timer is scheduled. Two
+* ``sequence``: a per-loop ``itertools.count()``, stamped when the timer is
+  scheduled. Two
   timers can never share a sequence number, so no two keys are ever equal and
   the heap's arbitrary choices no longer matter: there is exactly one valid
   pop order, and it is the sorted order. Equal ``(when, priority)`` therefore
@@ -30,7 +31,6 @@ Give every timer a sort key that is *unique*: ``(when, priority, sequence)``.
 The heap code in CPython is untouched; it simply calls our ``__lt__``.
 """
 
-import itertools
 from asyncio import AbstractEventLoop, TimerHandle
 from collections.abc import Callable
 from contextvars import Context
@@ -39,21 +39,6 @@ from typing import Any
 DEFAULT_PRIORITY = 0
 """Priority of every timer made through stock asyncio APIs (``sleep``,
 ``call_later``, ``call_at``, ``asyncio.timeout``)."""
-
-
-class SequenceCounter:
-    """A per-loop, strictly increasing counter used as the final tie-break.
-
-    Each loop owns its own instance, so a fresh loop always starts again at 0
-    and two runs of the same model stamp identical sequence numbers.
-    """
-
-    def __init__(self) -> None:
-        self._counter = itertools.count()
-
-    def next(self) -> int:
-        """Return the next number: 0, 1, 2, ... never repeated."""
-        return next(self._counter)
 
 
 class PriorityTimerHandle(TimerHandle):
