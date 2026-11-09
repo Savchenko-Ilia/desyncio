@@ -46,6 +46,9 @@ class Resource:
     a queued request leaving (cancelled) and a release. Read ``count`` and
     ``queue_length`` inside it. It must not block or acquire the resource.
 
+    A Resource is bound to the run in which it is first used (its
+    ``asyncio.Semaphore`` binds to one event loop), so create it inside the run.
+
     A monitor that raises (D023): the exception propagates to the task that
     caused the change, and the resource is never left inconsistent.
 
