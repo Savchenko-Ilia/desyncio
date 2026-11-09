@@ -120,3 +120,11 @@ Resources are used with `async with resource:`, or `async with res.request(prior
 - **Interrupting a non-waiting task:** delivered at its next `await`.
 - **Monitors:** an explicit `monitor=` hook on primitives.
 - **Exports:** every new public name is exported only in API-01, so features don't collide on `__init__.py`.
+
+## D022 — Reuse asyncio first (owner)
+The owner chose option B, thin wrappers that delegate, and set the rule "always reuse asyncio functionality if it exists". It is now AGENTS.md principle 6, and also a check in `.claude/agents/reviewer.md`: a hand-written replacement for existing asyncio functionality is a MUST.
+
+The Module 2 backlog was rewritten accordingly:
+- `Resource` wraps `asyncio.Semaphore`; `Store` wraps `asyncio.Queue`; `PriorityStore` wraps `asyncio.PriorityQueue`, adding a sequence number for ties.
+- `Container`, `FilterStore` and `PriorityResource` are built on `asyncio.Condition`, because asyncio has no equivalent.
+- `Interrupt` is delivered through asyncio cancellation underneath, then translated, with `uncancel()` restoring the count. That way every asyncio primitive cleans up the interrupted wait for free, while `TaskGroup` and `timeout()` don't see a cancel (D020).
