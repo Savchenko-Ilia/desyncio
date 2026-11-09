@@ -174,7 +174,7 @@ def test_plugs_into_resource_monitor_hook() -> None:
 
 # --- M/M/1 -----------------------------------------------------------------
 
-RHO = 0.5
+RHO = 0.6  # Lq = 0.9 != rho, so swapping the two series is caught
 N_CUSTOMERS = 20_000
 SEED = 7
 
@@ -208,13 +208,46 @@ def mm1_stats(seed: int) -> tuple[float, float, TimeSeries]:
 
 def test_mm1_utilisation_and_queue_length_match_theory() -> None:
     util, queue, _ = mm1_stats(SEED)
-    # Theory: utilisation rho = 0.5, Lq = rho^2 / (1 - rho) = 0.5.
-    # Bands: over six seeds checked locally (20k customers, rho=0.5) the error
-    # was within +-0.003 for utilisation and +-0.015 for Lq. The bands are
-    # about 3x that: a sanity check on the integral, not a statistical test.
-    # The seed is fixed.
-    assert util == pytest.approx(RHO, abs=0.01)
-    assert queue == pytest.approx(RHO**2 / (1 - RHO), abs=0.05)
+    # Theory: utilisation rho = 0.6, Lq = rho^2 / (1 - rho) = 0.9.
+    # rho is chosen so that the two differ by 0.3: recording r.count into the
+    # queue series, or swapping the series, fails both asserts.
+    # Bands: over seeds 1..10 checked locally (20k customers, rho=0.6) the
+    # error was within +-0.012 for utilisation and +-0.040 for Lq. The bands
+    # are about 3x that (0.03 and 0.12): a sanity check on the integral, not a
+    # statistical test, and still well below the 0.3 gap. The seed is fixed.
+    assert util == pytest.approx(RHO, abs=0.03)
+    assert queue == pytest.approx(RHO**2 / (1 - RHO), abs=0.12)
+
+
+def test_resource_count_and_queue_length_recorded_separately() -> None:
+    async def main() -> tuple[TimeSeries, TimeSeries]:
+        busy = TimeSeries()
+        waiting = TimeSeries()
+        res = Resource(
+            1,
+            monitor=lambda r: (busy.record(r.count), waiting.record(r.queue_length)),
+        )
+        busy.record(0)
+        waiting.record(0)
+
+        async def user() -> None:
+            async with res:
+                await sim.timeout(2)
+
+        first = sim.spawn(user())
+        await sim.timeout(1)  # first customer in service, nobody waiting
+        assert (busy.last(), waiting.last()) == (1, 0)
+        second = sim.spawn(user())
+        await sim.timeout(0.5)  # second customer queued behind the first
+        assert (busy.last(), waiting.last()) == (1, 1)
+        await asyncio.gather(first, second)
+        return busy, waiting
+
+    busy, waiting = desyncio.run(main())
+    assert busy.last() == 0
+    assert waiting.last() == 0
+    assert waiting.max() == 1
+    assert busy.max() == 1
 
 
 def test_mm1_same_seed_gives_identical_samples() -> None:
