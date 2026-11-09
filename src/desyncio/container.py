@@ -56,8 +56,12 @@ class Container:
     ``get`` holds back smaller later ones until it is served. Puts and gets do
     not block each other's queues.
 
-    ``monitor``, if given, is called as ``monitor(level)`` after every level
-    change (not on blocked or cancelled requests).
+    ``monitor``, if given, is called as ``monitor(container)`` after every level
+    change (not on blocked or cancelled requests), once the state is fully
+    settled: the served ticket is gone and waiters have been notified. It runs
+    while the Condition's lock is still held, so ``level`` cannot change under
+    it. It reads public properties (``level``, ``capacity``) and must not block
+    or call ``put``/``get`` (D023).
     """
 
     def __init__(
@@ -65,7 +69,7 @@ class Container:
         capacity: float = math.inf,
         init: float = 0,
         *,
-        monitor: Callable[[float], object] | None = None,
+        monitor: Callable[["Container"], object] | None = None,
     ) -> None:
         capacity = _check_real("capacity", capacity)
         if not capacity > 0:  # also rejects NaN
@@ -124,11 +128,15 @@ class Container:
             try:
                 await self._cond.wait_for(lambda: queue[0] is ticket and fits())
                 self._level += delta
-                if self._monitor is not None:
-                    self._monitor(self._level)
             finally:
                 # Runs on success and on cancellation (the lock is held either
                 # way). Dropping the ticket promotes the next waiter; notify_all
                 # makes it, and anyone the level change now satisfies, re-check.
+                # notify_all only schedules wakeups: the woken tasks cannot run
+                # until we release the lock below.
                 queue.remove(ticket)
                 self._cond.notify_all()
+            # Only reached on success (a cancellation re-raises out of the
+            # finally above). The state is settled and the lock is still held.
+            if self._monitor is not None:
+                self._monitor(self)

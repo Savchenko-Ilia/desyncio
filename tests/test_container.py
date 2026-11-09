@@ -217,18 +217,28 @@ def test_bad_construction() -> None:
 
 
 def test_monitor_hook() -> None:
-    async def main() -> list[float]:
-        seen: list[float] = []
-        c = Container(10, monitor=seen.append)
+    # D023: the monitor receives the container itself, after the state is
+    # settled, and reads public properties from it.
+    async def main() -> tuple[Container, list[Container], list[float]]:
+        seen: list[Container] = []
+        levels: list[float] = []
+
+        def monitor(c: Container) -> None:
+            seen.append(c)
+            levels.append(c.level)
+
+        c = Container(10, monitor=monitor)
         await c.put(4)
         await c.get(1)
         t = sim.spawn(c.get(9))
         await sim.timeout(1)
         await c.put(6)
         await t
-        return seen
+        return c, seen, levels
 
-    assert desyncio.run(main()) == [4, 3, 9, 0]
+    c, seen, levels = desyncio.run(main())
+    assert seen == [c, c, c, c]
+    assert levels == [4, 3, 9, 0]
 
 
 def test_fuel_tank() -> None:
