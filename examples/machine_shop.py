@@ -57,6 +57,10 @@ async def work(
             if not isinstance(exc.cause, Preempted):
                 raise  # some other interrupt: not ours to handle
             remaining -= sim.now - exc.cause.usage_since  # work done before the loss
+            # Counted per preemption, not per job: one maintenance job can be
+            # preempted several times, so `preemptions` can exceed `maintenance jobs
+            # finished`. (Repairs are never preempted: only a strictly better
+            # priority preempts, and URGENT is already the best.)
             tally["preemptions"] += 1
             # The loop goes round and queues for a repairman again.
 
