@@ -535,3 +535,79 @@ The file takes about 3–4 s, and it runs in `scripts/gate.sh`, since CI is manu
 **Gotchas.** A same-seed test can only catch *nondeterminism*, not a deterministic change in semantics.
 
 **Follow-ups.** The SHOULDs above. With this, Module 1 is complete except LOOP-12 (deferred, D018).
+
+## RES-01 — Resource (2026-11-09, batch 9)
+Branch: feat/RES-01 + fix/RES-01-1  ·  Merged: f13f3bc
+
+**Approach.** `src/desyncio/resource.py`: `Resource(capacity=1, *, monitor=None)` is a thin wrapper over `asyncio.Semaphore(capacity)`, used as `async with res:` (D019).
+- **Delegated to asyncio:** the FIFO waiter queue, no barging, removing a cancelled waiter, and returning a unit granted to a task that was then cancelled.
+- **Ours:** validation (capacity an int ≥ 1, bool rejected), read-only `capacity`/`count`/`queue_length` kept by our own counters (no private semaphore reads), the D023 v2 monitor, and the `__aenter__`/`__aexit__` plumbing. A Resource binds to the run in which it is first used.
+
+**asyncio internals.**
+- `_acquire` checks `sem.locked()` before awaiting `acquire()`. This is race-free, because acquire's fast path doesn't yield. `locked()` means "would wait", including when a waiter has been woken but hasn't run yet, which is where no-barging comes from.
+- A request that has been granted but hasn't resumed still counts in `queue_length`. That state lasts zero virtual time.
+- The cross-check is exact: an M/M/1 model built on `Resource` gives the same per-customer records as `tests/models/mm1.py` (an `asyncio.Lock` server) for the same seed.
+
+**Trade-offs.** Our own counters rather than reading `Semaphore._value`/`_waiters`: that's the only public way to expose `queue_length`.
+
+**Review findings.**
+- Round 0 PASSED, with a 240-run counter stress probe. The lead then promoted one SHOULD to MUST under D023: a raising monitor left a unit held forever.
+- Fix round 1 was redirected mid-round to D023 v2: monitor errors go to `loop.call_exception_handler`, so no undo logic is needed.
+- Re-review PASSED: 300 seeds with a monitor raising at p=0.5 plus random cancels; no unit leaked; 16k errors reached the handler.
+- SHOULD:
+  - `_changed` calls `get_running_loop()`, which fails if the coroutine is driven by hand.
+  - A monitor that raises a `BaseException` (e.g. `CancelledError`) on queue enter leaves `queue_length` incremented.
+
+**Gotchas.** Reusing one Resource across two `desyncio.run` calls raises "bound to a different event loop" (asyncio behaviour). The docstring says so.
+
+**Follow-ups.** The SHOULDs above.
+
+## CON-01 — Container (2026-11-09, batch 9)
+Branch: feat/CON-01 + fix/CON-01-1  ·  Merged: 4831169
+
+**Approach.** `src/desyncio/container.py`: `Container(capacity=inf, init=0, *, monitor=None)`. asyncio has no level/amount primitive, so it is built on `asyncio.Condition` (principle 6).
+- `put(amount)` waits while it would overflow; `get(amount)` waits while the level is too low. Levels are floats.
+- Each direction has a deque of `object()` tickets, and the wait predicate is `queue[0] is ticket and fits()`. That gives strict FIFO, head-of-line (D021).
+- A `finally` removes the ticket and calls `notify_all`. The monitor is then called as `monitor(container)` with the lock still held.
+
+**asyncio internals.**
+- `Condition` wakes its waiters in FIFO order, but each one re-checks only its own predicate. Without the tickets, a small `get` could overtake a large one waiting ahead of it.
+- `Condition.wait` re-acquires the lock even when cancelled, so the `finally` always runs while holding the lock, which `notify_all` requires.
+- Every change wakes all waiters, so a change costs O(N). This is documented.
+
+**Trade-offs.** `Condition` plus tickets, rather than hand-rolled futures. The tickets are the minimum needed for head-of-line order.
+
+**Review findings.**
+- Round 0 FAILED with one MUST: the monitor was called as `monitor(level)` rather than `monitor(container)`.
+- Fix round 1 applied D023 and D023 v2. The edit to `test_monitor_hook` is permitted, because the spec changed.
+- Re-review PASSED: 200 seeds, a monitor raising at p=0.5, random cancels and timeouts. The level stayed within bounds, conservation held, head-of-line order held, and the deques ended empty.
+- SHOULD: a test should pin "settled state" (no ticket left and the lock held when the monitor runs).
+
+**Gotchas.** Amounts are validated when the call is awaited, not when the coroutine is created.
+
+**Follow-ups.** The SHOULD above.
+
+## STO-01 — Store (2026-11-09, batch 9)
+Branch: feat/STO-01 + fix/STO-01-1  ·  Merged: a833dd6
+
+**Approach.** `src/desyncio/store.py`: `Store[T](capacity=inf, *, monitor=None)` is a thin wrapper over `asyncio.Queue(maxsize)` (inf means maxsize 0).
+- **Delegated to asyncio:** FIFO items and waiters, blocking put/get, cancellation cleanup (an item is never lost or duplicated) and `shutdown()`.
+- **Ours:** validation (an int ≥ 1, or inf), `len()` (`qsize`), a read-only `items` snapshot, the shutdown passthrough and the D023 v2 monitor.
+- `items` is a parallel deque, updated in the same synchronous step as the queue operation and cleared on `shutdown(immediate=True)`. `put_nowait`/`get_nowait` are not exposed, because they would bypass the mirror.
+
+**asyncio internals.** In `Queue.put`/`get` the step that completes the operation is synchronous (`put_nowait`/`get_nowait`), so a cancel can't land between Queue finishing and our update. A probe over 600 seeds found no drift.
+
+**Trade-offs.** The mirror vs a documented read of `Queue._queue`. The reviewer prefers the private read (one stable attribute, no second structure). Kept as an open SHOULD.
+
+**Review findings.**
+- Round 0 FAILED: a raising monitor lost the item in `get` (removed from the queue, never returned), and no test covered a raising monitor. This finding is what led to D023 v2.
+- Fix round 1: monitor errors go to the handler, the monitor is also called on immediate shutdown, and the docstring says monitors must not block.
+- Re-review PASSED: 1500 seeds, a randomly raising monitor, cancels and shutdowns. No lost or duplicated item, and the mirror always matched the queue.
+- SHOULD:
+  - `shutdown(immediate=True)` outside a loop with a raising monitor gives "no running event loop" instead of the monitor's error. Fall back to logging.
+  - Add a test for a raising monitor on immediate shutdown.
+  - A monitor raising `CancelledError` loses the item.
+
+**Gotchas.** Capacity `3.0` is rejected; it must be an int.
+
+**Follow-ups.** The SHOULDs above, and the mirror-vs-`_queue` question.

@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, during batch 9 (module 2, first batch)._
+_Last updated: 2026-11-09, batch 9: 3 of 4 merged, INT-01 waiting for the owner's decision._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -26,39 +26,29 @@ The backlog is in `docs/features.md`, Module 2 section. The governing decisions:
 - D022 / AGENTS.md principle 6: **reuse asyncio first**.
 - D023 v2: monitor contract (below).
 
-### Batch 9 (RES-01, INT-01, CON-01, STO-01): state at the time of writing
-| Feature | Branches | State | Next step |
-|---|---|---|---|
-| RES-01 Resource (wraps `asyncio.Semaphore`) | `feat/RES-01`, `fix/RES-01-1` | The first review passed. The lead then promoted "a raising monitor leaks a unit" to MUST (D023). Fix round 1 is being redone under D023 v2. | Re-review `fix/RES-01-1` against D023 v2 → gate → merge |
-| CON-01 Container (`asyncio.Condition` + per-direction FIFO tickets) | `feat/CON-01`, `fix/CON-01-1` | Review FAILED: it called `monitor(level)` instead of `monitor(container)`. Fix round 1 is running. | Re-review → gate → merge |
-| STO-01 Store (wraps `asyncio.Queue`; `items` is a parallel deque mirror) | `feat/STO-01`, `fix/STO-01-1` | Review FAILED: a raising monitor lost the item in `get`, and no test covered it. Fix round 1 is running. | Re-review → gate → merge |
-| INT-01 Interrupts | `feat/INT-01` | Implemented with a **mechanism deviation** (see below). In review. | Act on the review. If accepted, write **D024**. Then gate → merge. |
+### Batch 9 (RES-01, INT-01, CON-01, STO-01)
+| Feature | State |
+|---|---|
+| RES-01 Resource | **merged** f13f3bc (fix round 1) |
+| CON-01 Container | **merged** 4831169 (fix round 1) |
+| STO-01 Store | **merged** a833dd6 (fix round 1) |
+| INT-01 Interrupts (`feat/INT-01`, review round 0 FAILED) | **Waiting for the owner's decision**, then fix round 1 (one round left after it). |
 
-All four are at fix round ≤ 1 (the maximum is 2, CLAUDE.md). They own disjoint files. INT-01 also owns `sim.py` and `tests/test_sim.py`.
-Branches cut before `febc420` lack AGENTS.md principle 6, D022 and D023; fixers merge `integration` in first.
-
-**The INT-01 deviation (D024, to be confirmed).** The spec said "deliver via `task.cancel()`, translate to `Interrupt`, `uncancel()`". The implementer showed that this can't work. A `CancelledError` raised at the innermost await, for example inside `Semaphore.acquire`, propagates through the user's own `except Interrupt:` frames before anything can translate it. `asyncio.timeout()` can translate only because its `__aexit__` runs in the user's frame.
-
-The actual mechanism: read the private `task._fut_waiter` and call `Future.set_exception(Interrupt(cause))` on it. asyncio's normal task wake-up then raises it at the await, and each primitive's own `finally`/`except` cleans up. `cancelling()` is never touched.
-- If that future is already done (a grant race, a task not yet started, a bare `sleep(0)`), the interrupt is queued per task in a module-level WeakKeyDictionary of deques, and retried via `call_soon`.
-- Interrupting a task that is directly awaiting another Task raises `RuntimeError` (workaround: `asyncio.shield`).
-- A `while True: await sleep(0)` loop never receives an interrupt.
-The review checks the grant race with Resource, Container and Store, the retry-chain determinism, and gather/shield semantics.
-
-**D023 v2, the monitor contract (applies to every primitive):**
-- `monitor(primitive)` is called synchronously after every state change, once the state is fully settled.
-- An `Exception` from the monitor goes to `loop.call_exception_handler(...)`, which is asyncio's own callback semantics. `KeyboardInterrupt`/`SystemExit` propagate.
-- The operation always completes normally for the task, and an original `CancelledError` is never masked.
-
-### After batch 9 merges, the lead must:
-1. Mark RES-01, INT-01, CON-01 and STO-01 `done` in `docs/features.md`.
-2. Add four entries to `docs/implementation-log.md`, built from the implementer, fixer and reviewer reports. Key facts to keep:
-   - **RES-01:** counters around `Semaphore.acquire`, with a `sem.locked()` pre-check (race-free, since there is no await before acquire's own check). "Granted but not yet resumed" counts in `queue_length` for zero virtual time. A Resource binds to the first loop that uses it. The M/M/1 cross-check against `tests/models/mm1.py` matches exactly. 240-run stress probe.
-   - **CON-01:** `Condition` wakes waiters FIFO, but each waiter re-checks only its own predicate, hence the per-direction `object()` tickets (`queue[0] is ticket and fits()`). `Condition.wait` re-acquires the lock even when cancelled, so the `finally` runs locked. `notify_all` costs O(N). 300-seed conservation probe.
-   - **STO-01:** in `Queue.put`/`get` the completing step is synchronous, so the mirror can't drift (600-seed probe). The reviewer prefers a documented read of `Queue._queue` over the mirror; that's an open SHOULD. `put_nowait`/`get_nowait` are not exposed.
-   - **INT-01:** the mechanism above, with each primitive's cleanup path.
-3. Write D024 (the INT-01 mechanism), plus any decision taken while acting on the reviews.
-4. Rewrite this file for batch 10.
+**INT-01: mechanism and review.**
+- The spec said "cancel → translate → `uncancel()`". The implementer showed this can't work: the `CancelledError` passes through the user's `except Interrupt:` before anything can translate it. The reviewer confirmed this.
+- The implemented mechanism: fail `task._fut_waiter` with `Interrupt(Exception)`. If that future is already done, the interrupt is queued per task and retried with `call_soon`.
+- The review FAILED it with three MUSTs. All three are asyncio cleanup paths that only run for `CancelledError`:
+  1. **Plain `asyncio.Lock`:** interrupting a waiter strands the next waiter forever, with the lock free.
+  2. **`Condition.wait`'s internal lock re-acquire:** an interrupt escapes without the lock, and the user then releases another task's lock.
+  3. **`TaskGroup.__aexit__`:** after the exit, the child keeps running.
+- Our own Resource, Container and Store passed a 300-seed interrupt+cancel stress test.
+- The owner suggested a `CancelledError` subclass. The reviewer tested it and rejects it: `Semaphore`'s cancel fix-up leaks capacity (300/300 seeds), an uncaught interrupt ends the task as cancelled, and library code treats it as a shutdown. It also contradicts D020.
+- **Lead's proposal, put to the owner:** keep D024 (`Interrupt(Exception)`).
+  - Raise a clear `RuntimeError` ("not interruptible here; use desyncio.Resource") when the target is blocked on a plain `Lock.acquire` or inside `TaskGroup` exit, as is already done for awaiting a Task.
+  - Defer the interrupt to the next await when the target is in `Condition.wait`'s re-acquire, so Container works.
+  - Add tests for all three, and docs notes on gather/shield and the `sleep(0)` spin.
+  - The alternative put to the owner: defer for plain Lock too (the interrupt then arrives later in virtual time).
+- **Next:** on the owner's answer, dispatch the INT-01 fixer, then re-review → gate → merge. Write D024 with the final design, mark INT-01 done, and add the log entry (mechanism, per-primitive cleanup, the rejected variant). Probes are in the old session's scratchpad `probes/`; recreate them as needed.
 
 ## Next batches (module 2)
 - **Batch 10:** RES-02 (PriorityResource, `resource.py`), STO-02 (PriorityStore wraps `PriorityQueue` with a sequence number; FilterStore on `Condition`; `store.py`), MON-01 (`TimeSeries`, `monitor.py`, uses the D023 v2 hook).
@@ -84,6 +74,7 @@ The review checks the grant race with Resource, Container and Store, the retry-c
 - **Specify contracts that cross features up front** (for example the monitor signature). Leaving one open produced three different signatures in batch 9 (D023).
 - **D011:** a docs claim that is false on `integration` is a MUST. **D017:** never add instance attributes to `VirtualTimeLoop`; put state on `self._state`. **D016:** observers never alter the model.
 - Fixers do MUST items only. The lead may promote a SHOULD to MUST, and records why as a D###.
+- **Give every reviewer its own scratch subfolder.** Reviewers sharing one scratchpad deleted each other's worktrees.
 - Tests never sleep in real time. Use the fake wall clock pattern from `tests/test_realtime.py`.
 
 ## Starting a new lead session
