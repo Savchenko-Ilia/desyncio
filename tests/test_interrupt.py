@@ -58,9 +58,10 @@ def test_interrupt_is_exception_not_cancelled_error() -> None:
     assert Interrupt().cause is None
 
 
-def test_not_exported_at_top_level() -> None:
-    assert not hasattr(desyncio, "Interrupt")
-    assert "Interrupt" not in desyncio.__all__
+def test_exported_at_top_level() -> None:
+    """API-01/D036 changed the spec: Interrupt is now a top-level export."""
+    assert desyncio.Interrupt is desyncio.interrupt.Interrupt
+    assert "Interrupt" in desyncio.__all__
 
 
 def test_facade_outside_run_raises() -> None:

@@ -39,7 +39,7 @@ read-only tuple view in ``samples`` (building it is O(n)).
 
 import math
 
-from desyncio import sim
+from desyncio.sim import sim
 
 
 def _real(value: float, what: str) -> float:
