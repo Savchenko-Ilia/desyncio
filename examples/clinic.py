@@ -7,6 +7,12 @@ shift ends, patients still in treatment are sent home and queue up again when th
 clinic reopens, to finish the rest of their treatment. Results are printed per local
 date.
 
+The clinic is overloaded on purpose: patients keep arriving around the clock while
+the doctors work limited hours, with Thursday and Sunday closed, so a large queue
+builds up over the week. That backlog is the point: compare the "treated" column on
+the closed days with the busy days after them, and look at how many patients are
+still waiting at the end.
+
 desyncio features shown: `Calendar` (Europe/Berlin, real start date, one sim time
 unit = one minute), `Shift` and `Schedule` (weekly pattern, a closed date),
 `ScheduledResource` (capacity follows the schedule), `Interrupt` with `ShiftEnded`,
@@ -58,7 +64,12 @@ async def patient(clinic: ScheduledResource, days: Days, treatment_time: float) 
         except Interrupt as exc:
             # The shift change takes the doctor away and the `async with` raises the
             # Interrupt, so we catch it outside the block; the unit is already freed.
-            assert isinstance(exc.cause, ShiftEnded)
+            if not isinstance(exc.cause, ShiftEnded):
+                raise  # some other interrupt: not ours to handle
+            # A doctor can also be granted to us while we wait and taken back by the
+            # shift end before our task resumes: then `async with` itself raises (in
+            # `__aenter__`), `started` stays None and nothing is deducted. Such a
+            # patient is still counted as sent home, although treatment never began.
             if started is not None:
                 remaining -= sim.now - started  # keep the work already done
             days[cal.to_datetime(exc.cause.at).date()]["sent home"] += 1
