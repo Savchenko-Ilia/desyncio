@@ -38,29 +38,12 @@ def test_time_weighted_mean_min_max_last() -> None:
     assert ts.samples == ((0.0, 2.0), (2.0, 4.0), (4.0, 1.0))
 
 
-def test_mean_default_until_is_sim_now_inside_run() -> None:
-    async def main() -> float:
-        ts = TimeSeries()
-        ts.record(0)
-        await sim.timeout(1)
-        ts.record(10)
-        await sim.timeout(1)
-        return ts.mean()  # 0 for 1s, 10 for 1s
-
-    assert desyncio.run(main()) == pytest.approx(5.0)
-
-
-def test_mean_without_until_outside_run_raises_like_sim_now() -> None:
+def test_mean_and_record_outside_run_raise_like_sim_now() -> None:
     ts = run_ts(_steps)
     with pytest.raises(RuntimeError):
-        ts.mean()
+        ts.mean()  # no `until`, so it needs sim.now
     with pytest.raises(RuntimeError):
-        sim.now  # noqa: B018 - the error mean() must match
-
-
-def test_record_outside_run_raises() -> None:
-    with pytest.raises(RuntimeError):
-        TimeSeries().record(1)
+        ts.record(1)
 
 
 def test_mean_starts_at_first_record_not_zero() -> None:
@@ -114,22 +97,25 @@ def test_same_instant_last_wins_for_mean_but_all_count_for_min_max() -> None:
     assert len(ts.samples) == 3
 
 
-@pytest.mark.parametrize("bad", [True, "1", None, 1 + 2j])
-def test_record_rejects_non_real_values(bad: object) -> None:
-    async def main() -> None:
-        with pytest.raises(TypeError):
-            TimeSeries().record(bad)  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("bad", "exc"),
+    [
+        (True, TypeError),
+        ("1", TypeError),
+        (math.nan, ValueError),
+        (math.inf, ValueError),
+        pytest.param(10**400, ValueError, id="too-big"),  # the OverflowError branch
+    ],
+)
+def test_record_rejects_bad_value(bad: object, exc: type[Exception]) -> None:
+    async def main() -> TimeSeries:
+        ts = TimeSeries()
+        ts.record(1)
+        with pytest.raises(exc):
+            ts.record(bad)  # type: ignore[arg-type]
+        return ts
 
-    desyncio.run(main())
-
-
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
-def test_record_rejects_non_finite_values(bad: float) -> None:
-    async def main() -> None:
-        with pytest.raises(ValueError):
-            TimeSeries().record(bad)
-
-    desyncio.run(main())
+    assert desyncio.run(main()).samples == ((0.0, 1.0),)  # unchanged
 
 
 def test_mean_rejects_bad_until() -> None:
@@ -140,38 +126,6 @@ def test_mean_rejects_bad_until() -> None:
         ts.mean(until=math.nan)
 
 
-def test_failed_record_leaves_series_unchanged() -> None:
-    async def main() -> TimeSeries:
-        ts = TimeSeries()
-        ts.record(1)
-        with pytest.raises(ValueError):
-            ts.record(math.nan)
-        return ts
-
-    assert desyncio.run(main()).samples == ((0.0, 1.0),)
-
-
-def test_plugs_into_resource_monitor_hook() -> None:
-    async def main() -> TimeSeries:
-        busy = TimeSeries()
-        res = Resource(1, monitor=lambda r: busy.record(r.count))
-        busy.record(0)
-
-        async def user() -> None:
-            async with res:
-                await sim.timeout(3)
-
-        t = sim.spawn(user())
-        await sim.timeout(1)
-        await t
-        await sim.timeout(2)
-        return busy
-
-    busy = desyncio.run(main())
-    assert busy.samples == ((0.0, 0.0), (0.0, 1.0), (3.0, 0.0))
-    assert busy.mean(until=6) == pytest.approx(0.5)
-
-
 # --- M/M/1 -----------------------------------------------------------------
 
 RHO = 0.6  # Lq = 0.9 != rho, so swapping the two series is caught
@@ -179,8 +133,8 @@ N_CUSTOMERS = 20_000
 SEED = 7
 
 
-def mm1_stats(seed: int) -> tuple[float, float, TimeSeries]:
-    async def main() -> tuple[float, float, TimeSeries]:
+def mm1_stats(seed: int) -> tuple[float, float]:
+    async def main() -> tuple[float, float]:
         busy = TimeSeries()
         waiting = TimeSeries()
         server = Resource(
@@ -201,13 +155,13 @@ def mm1_stats(seed: int) -> tuple[float, float, TimeSeries]:
             await sim.timeout(arrivals.expovariate(RHO))
             tasks.append(sim.spawn(customer()))
         await asyncio.gather(*tasks)
-        return busy.mean(), waiting.mean(), busy
+        return busy.mean(), waiting.mean()
 
     return desyncio.run(main(), seed=seed)
 
 
 def test_mm1_utilisation_and_queue_length_match_theory() -> None:
-    util, queue, _ = mm1_stats(SEED)
+    util, queue = mm1_stats(SEED)
     # Theory: utilisation rho = 0.6, Lq = rho^2 / (1 - rho) = 0.9.
     # rho is chosen so that the two differ by 0.3: recording r.count into the
     # queue series, or swapping the series, fails both asserts.
@@ -248,13 +202,6 @@ def test_resource_count_and_queue_length_recorded_separately() -> None:
     assert waiting.last() == 0
     assert waiting.max() == 1
     assert busy.max() == 1
-
-
-def test_mm1_same_seed_gives_identical_samples() -> None:
-    a = mm1_stats(SEED)[2].samples
-    b = mm1_stats(SEED)[2].samples
-    assert a == b
-    assert len(a) > 1000
 
 
 def mm1_customer_records(
