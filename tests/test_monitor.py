@@ -255,3 +255,59 @@ def test_mm1_same_seed_gives_identical_samples() -> None:
     b = mm1_stats(SEED)[2].samples
     assert a == b
     assert len(a) > 1000
+
+
+def mm1_customer_records(
+    seed: int, monitored: bool
+) -> list[tuple[int, float, float, float]]:
+    """Per-customer ``(id, arrival, service start, departure)`` of an M/M/1 run.
+
+    With ``monitored=False`` the Resource has no monitor at all; with
+    ``monitored=True`` two TimeSeries are wired in as in ``mm1_stats``.
+    """
+
+    async def main() -> list[tuple[int, float, float, float]]:
+        records: list[tuple[int, float, float, float]] = []
+        if monitored:
+            busy = TimeSeries()
+            waiting = TimeSeries()
+            server = Resource(
+                1,
+                monitor=lambda r: (
+                    busy.record(r.count),
+                    waiting.record(r.queue_length),
+                ),
+            )
+            busy.record(0)
+            waiting.record(0)
+        else:
+            server = Resource(1)
+        arrivals = sim.random("arrivals")
+        service = sim.random("service")
+
+        async def customer(i: int) -> None:
+            arrived = sim.now
+            async with server:
+                started = sim.now
+                await sim.timeout(service.expovariate(1.0))
+            records.append((i, arrived, started, sim.now))
+
+        tasks = []
+        for i in range(2_000):
+            await sim.timeout(arrivals.expovariate(RHO))
+            tasks.append(sim.spawn(customer(i)))
+        await asyncio.gather(*tasks)
+        if monitored:
+            assert len(busy) > 1000  # the monitors really fired
+        return records
+
+    return desyncio.run(main(), seed=seed)
+
+
+def test_wiring_timeseries_in_does_not_change_the_model() -> None:
+    # D016 / D029: observability must not alter the model. Same seed, with
+    # and without monitors: identical per-customer records.
+    plain = mm1_customer_records(SEED, monitored=False)
+    observed = mm1_customer_records(SEED, monitored=True)
+    assert len(plain) == 2_000
+    assert observed == plain
