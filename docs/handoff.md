@@ -80,11 +80,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - `gate.sh`: set the cleanup trap right after `mktemp -d` (a bad branch name leaks an empty temp dir; pre-existing).
    - Outside-loop monitor tests for Resource and Container (CLN-07 covered the stores only).
 
-## Lessons learned
-- "Go" with several options open: run the work that needs no owner definition, record the choice as a decision, and say so in the report.
-- Run `gate.sh` with its output redirected to a file and check `$?` directly (D035); it is quiet and reliable that way.
-
 ## Open questions for the owner
+- **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
 - **D028/D031:** confirm the `TimeSeries` wiring, `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
 - **D036:** `Preempted` is exported (lead decision). Should any of these also be exported: `SimulationCleanupError`, `ListSink`/`TraceSink`, `TraceRecord`, `VirtualTimeLoop`, `PriorityRequest`/`PreemptiveRequest`?
@@ -107,6 +104,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **"Go" with several options open:** run the work that needs no owner definition, record the choice as a decision, and say so in the report (batch 19, D045).
+- **Gate quietly:** redirect `gate.sh` output to a file and check `$?` directly (D035).
 - **`git switch integration` before committing docs.** One commit landed on the session branch by mistake and had to be merged back (`febc420`). Check with `git branch --show-current`.
 - **Review on the merged tree.** Feature branches go stale while others merge. Reviewers test `integration` + `git merge --no-commit` of the branch.
 - **Specify contracts that cross features up front** (for example the monitor signature). Leaving one open produced three different signatures in batch 9 (D023).
@@ -132,4 +131,3 @@ Run Claude Code on Opus with `integration` checked out, and send:
 ```
 Read AGENTS.md, CLAUDE.md and docs/handoff.md. Continue from the handoff: finish the in-flight batch if any, then report and wait for "go".
 ```
-- **D045:** confirm that a monitor error outside a running loop should be logged on the `desyncio` logger.
