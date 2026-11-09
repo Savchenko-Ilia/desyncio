@@ -896,3 +896,58 @@ Branch: feat/DOC-02 (+ fix/DOC-02-1)  ·  Merged: b3746f4
 - Split the three preemption edge cases into separate headed examples, for readability.
 - The `src/desyncio/interrupt.py` module docstring repeats the false `cancelling()` sentence (D038).
 - Turn some prose-only claims into examples. The reviewer probed them and they are true: the Resource monitor event sequence, a raising filter leaving the store unchanged, `Container` amount > capacity raising ValueError, no monitor call for a cancelled `Container.get`, and the monitor call on an immediate shutdown.
+
+## CLN-01 — Interrupt docstring; `sim.random` error message (2026-11-09, batch 14)
+Branch: feat/CLN-01 (+ fix/CLN-01-1)  ·  Merged: fa6d5dc
+
+**Approach.**
+- The `interrupt.py` module docstring now says what the guide says (D038): `uncancel()` undoes only the interrupt's own cancel. A new test pins both deltas side by side (interrupt only: +0 and `Interrupt`; interrupt + `task.cancel()`: +1 and `CancelledError`).
+- `sim.random` calls `_loop()` first, so the outside-run message is unchanged. It then catches the `RuntimeError` from `current_random_streams()` and re-raises with a message that names the fresh `contextvars.Context` (D039). It uses `from None`, because the chained error would be the misleading one. There is no fallback, and the stream storage is unchanged.
+
+**asyncio internals.** `loop.create_task(coro, context=ctx)` runs every step of the task inside `ctx` (`Context.run`). A fresh `Context()` therefore has none of the run's ContextVars. The running loop is still found through `asyncio.get_running_loop()`, which is per thread, not a ContextVar. So only `sim.random` fails in such a task; `sim.now`, `timeout`, `spawn` and `interruptible` work.
+
+**Review findings.**
+- FAIL in round 1. The lead and the reviewer each found the same MUST independently: the new "fresh Context" wording had been added to the Raises sections of `now`, `timeout`, `spawn` and `interruptible`, where it is false. The fix reverted those four docstrings and added `test_non_random_methods_work_in_fresh_context_task`. The outside-run message test now matches the real `_NOT_RUNNING` text.
+- PASS on re-review.
+
+**Follow-ups (SHOULD).** In `test_random_in_fresh_context_task_names_the_cause`, `assert "no simulation is running" not in msg` is always true; delete it.
+
+## CLN-02 — `SequenceCounter` → `itertools.count` (2026-11-09, batch 14)
+Branch: feat/CLN-02  ·  Merged: 5142464
+
+**Approach.** The `SequenceCounter` wrapper class is gone. `_LoopState.sequence` is a plain `itertools.count()` made in `__init__` (`__slots__`, one per loop; D017 holds), and `_schedule` calls `next(self._state.sequence)`. The lead fixed `docs/how-the-loop-works.md:144`, which named the old class (e913229, D011).
+
+**asyncio internals.** None new. `itertools.count` is a C iterator, and `next()` on it is atomic under the GIL. The loop is single-threaded anyway.
+
+**Review findings.** PASS. The ordering and determinism tests are unmodified and pass. Two interleaved loops each start at 0.
+
+**Follow-ups (SHOULD).** The new test partly pins the implementation (it reads `_state` and checks the type). The docstring bullet in scheduling.py has a short reflowed line. `uv run mypy src tests` reports 34 errors in tests; the gate runs `mypy src` only. Decide whether tests should be type-checked.
+
+## CLN-03 — Real-time pacer notes (2026-11-09, batch 14)
+Branch: feat/CLN-03  ·  Merged: fea39d8
+
+**Approach.** Docstring warnings were added to `RealTimePacer.pause()` and to `run()`'s `pacer` argument: `pause()` from inside the simulation with no other thread blocks forever, and the paused state persists across runs (D039: documented, not changed). A fake-wall-clock test pins the reuse behaviour. A test asserts `MAX_REAL_WAIT <= asyncio.base_events.MAXIMUM_SELECT_TIMEOUT`, and a comment at the constant explains why.
+
+**asyncio internals.** A paused pacer makes the selector wait with no timeout. Only a thread-safe wake-up (`call_soon_threadsafe` writes to the self-pipe) can end that wait. A coroutine on the frozen loop never runs, so it cannot resume the pacer.
+
+**Review findings.** PASS. The reviewer confirmed "blocks forever" with a real pacer and a watchdog thread, for both a coroutine and a `call_later` callback. Mutating `bind()` to reset `_paused` fails the new test. The new test cannot hang: `FakeWall` asserts instead of blocking.
+
+**Follow-ups (SHOULD).** The test needs `# type: ignore[attr-defined]` on `MAXIMUM_SELECT_TIMEOUT`, which is cosmetic, since mypy checks src only.
+
+## CLN-04 — Test hardening (2026-11-09, batch 14)
+Branch: feat/CLN-04  ·  Merged: 747c800
+
+**Approach.** Tests only.
+- `test_every_fence_language_is_allowed` sets the allowlist to `{python, text}`, the only languages the guide and README use. A `Python`, `python3` or bare fence now fails by name.
+- `test_import_desyncio_succeeds_in_a_fresh_interpreter` is a named subprocess test.
+- `test_no_from_desyncio_import_sim` became `test_no_from_desyncio_import_x`. It forbids any absolute `from desyncio import X` inside the package, which strictly includes the old check.
+- `test_filter_getter_keeps_seniority_after_re_parking[1|2|3]`.
+
+**asyncio internals.** `Condition.notify_all` wakes waiters in park order. Each woken waiter must re-acquire the `Lock`, which is FIFO, so a getter that re-parks keeps its place relative to the others.
+
+**Review findings.**
+- PASS. The reviewer repeated the mutations. A persistent loss of seniority fails all three cases. A toggling mutation (reversing the waiters on every put) fails only the even case, so the parametrization matters for toggling bugs.
+- The implementer reported that relative imports (`from . import X`) are also rejected. They are not: the guard checks only `level == 0`. The old guard had the same gap.
+
+**Follow-ups (SHOULD).** Reject `from . import X` (`level >= 1 and module is None`) too. Optionally, assert the getters' intermediate wake order.
+
