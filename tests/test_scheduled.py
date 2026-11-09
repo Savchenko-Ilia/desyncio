@@ -9,7 +9,7 @@ import pytest
 import desyncio
 from desyncio import Interrupt, sim
 from desyncio.dates import Calendar
-from desyncio.loop import SimulationDeadlock
+from desyncio.loop import SimulationDeadlock, VirtualTimeLoop
 from desyncio.schedule import Schedule, Shift
 from desyncio.scheduled import ScheduledResource, ShiftEnded
 from desyncio.trace import ListSink
@@ -279,6 +279,74 @@ def test_same_seed_same_trace() -> None:
 
     a = run(7)
     assert len(a) > 100 and a == run(7) and a != run(8)
+
+
+def constant(capacity: int) -> Schedule:
+    return clinic(Shift(ALL_DAYS, time(0), time(0), capacity))
+
+
+def test_waiter_cancelled_after_grant_passes_the_unit_on() -> None:
+    got: list[str] = []
+
+    async def main() -> None:
+        res = ScheduledResource(constant(1))
+
+        async def wait(name: str) -> None:
+            async with res:
+                got.append(name)
+
+        async with res:
+            w1, w2 = sim.spawn(wait("w1")), sim.spawn(wait("w2"))
+            await sim.timeout(10)
+        # The release granted w1 its unit; w1 has not resumed yet.
+        assert res.count == 0 and res.queue_length == 2
+        w1.cancel()
+        await asyncio.gather(w1, w2, return_exceptions=True)
+        assert w1.cancelled() and got == ["w2"]
+        assert res.count == 0 and res.queue_length == 0
+
+    desyncio.run(main())
+
+
+def test_real_cancel_beats_shift_end_at_same_instant() -> None:
+    async def main() -> None:
+        res = ScheduledResource(clinic(Shift(ALL_DAYS, time(0), time(1), 1)))
+
+        async def hold() -> None:
+            async with res:
+                await sim.timeout(100 * H)
+
+        victim = sim.spawn(hold())
+        await sim.timeout(H)  # priority 0: runs before the 01:00 drop
+        victim.cancel()  # then the drop interrupts it in the same instant
+        await asyncio.gather(victim, return_exceptions=True)
+        assert victim.cancelled() and res.count == 0 and res.capacity == 0
+
+    desyncio.run(main())
+
+
+def test_taken_back_reservation_then_cancelled() -> None:
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        assert isinstance(loop, VirtualTimeLoop)
+        res = ScheduledResource(clinic(Shift(ALL_DAYS, time(0), time(1), 1)))
+
+        async def use(dt: float) -> None:
+            async with res:
+                await sim.timeout(dt)
+
+        holder, w = sim.spawn(use(H)), sim.spawn(use(1))
+        # Wake after the driver's 01:00 step (priority 2 > 1), before w resumes.
+        after_drop: asyncio.Future[None] = loop.create_future()
+        loop.call_at_priority(H, 2, after_drop.set_result, None)
+        await after_drop
+        assert res.capacity == 0 and res.queue_length == 0  # reservation gone
+        w.cancel()
+        results = await asyncio.gather(holder, w, return_exceptions=True)
+        assert results[0] is None and w.cancelled()
+        assert res.count == 0 and res.queue_length == 0
+
+    desyncio.run(main())
 
 
 @pytest.mark.parametrize("driver_first", [False, True])

@@ -71,7 +71,11 @@ Cancelling a waiter
 -------------------
 A waiter cancelled while queued leaves the queue and never takes a unit. One
 cancelled after it was granted a unit but before it resumed hands the unit to
-the next waiter (``asyncio.Semaphore._acquire``'s fix-up).
+the next waiter (``asyncio.Semaphore._acquire``'s fix-up). If the shift took
+that reservation back meanwhile, there is nothing to hand on. A holder that is
+really cancelled in the same instant its shift ends ends with
+``CancelledError`` (a real cancel wins over an interrupt, INT-01); its unit is
+released once.
 
 What is delegated to asyncio, and what is ours (principle 6)
 ------------------------------------------------------------
