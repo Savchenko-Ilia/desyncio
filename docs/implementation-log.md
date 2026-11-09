@@ -1057,3 +1057,15 @@ Branch: feat/TST-06 (+ fix/TST-06-1)  ·  Merged: afaf4eb
 
 **Follow-ups (SHOULD).** The docstring could also say, in one clause, that the non-eager late case gets RuntimeError "not inside".
 
+## TST-05 — Type-check the tests in the gate (2026-11-09, batch 18)
+Branch: feat/TST-05  ·  Merged: f02743c
+
+**Approach.** `LINT_CMD` now ends with `mypy src tests`. The 33 errors in tests/ were fixed in the tests: typed helpers (`_to_float`, `_record_both`, `_is_closed`), `Sequence[float]` parameters, a named inner `def` in place of a lambda with a default argument, and `list(...)` around results. There are no overrides; tests run under full strict. No `# type: ignore` was added, and 10 unused ones were removed. `test_overload_types` is now a real check: making the `until=` overload return `T` fails `mypy` at test_run.py:340–341.
+
+**Review findings.**
+- PASS.
+- `list(x.items) == [...]` replaced two tuple comparisons. mypy had narrowed `items` to `tuple[int]` after an earlier assert, and then called the next comparison non-overlapping. The tuple type is still pinned by neighbouring asserts.
+- **Gate quirk (D044).** `scripts/gate.sh` sources `gate.env` from the main checkout, not from the branch under test. So a branch that changes the gate is gated with the old gate. The new lint step ran on `integration` after the merge: GATE PASS, mypy on 36 files.
+
+**Follow-ups (SHOULD).** Source `gate.env` from the checked-out worktree in `gate.sh`. The alternative `items: tuple[object, ...] = store.items` keeps the tuple check without narrowing.
+

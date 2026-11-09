@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 15 (clean-up done). Waiting on the owner's decision on the test-suite audit (`docs/test-audit.md`). Module 3 is still undefined._
+_Last updated: 2026-11-09, end of batch 18. The test-suite trim (D042, D043) is done. Nothing is in flight. Next: the owner defines module 3._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -61,19 +61,20 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - `integration` passes the gate with 821 tests on 3.13 and 3.14. Nothing is in flight; no agents are running.
 - D039: no behaviour changes for the reused pacer and `sim.random` in a fresh context. D040: `speed=10**400` raises `ValueError`. D041: CLN-05's tests were trimmed.
 
+## Test-suite trim, batches 16–18 — DONE
+- **Result:** 821 → 556 tests, about 9.4k → 7.4k test lines, about 11 s → 7 s.
+- **Batch 16:** TST-01 (116e770, 1 fix round), TST-02 (8c69f38), TST-03 (cb4fa4c), TST-04 (ff97718, 1 fix round). Fourteen docs examples are now load-bearing and carry `<!-- pins: ... (D042) -->` comments in `docs/primitives.md`. Editing one of them is a test change.
+- **Batch 17:** TST-06, the gap tests (afaf4eb, 1 fix round): late interrupt (eager tasks only), ExceptionGroup limit, raising monitor on immediate shutdown, PriorityStore default priority, the cancelled-putter mirror.
+- **Batch 18:** TST-05 (D043): the gate runs `mypy src tests`. D044: gate.sh reads gate.env from the main checkout, so gate changes are verified after merge.
+- `integration` passes the gate: 556 tests on 3.13 and 3.14, ruff, and mypy on 36 files. Nothing is in flight; no agents are running.
+
 ## Next batches
-1. **Test-suite trim (pending the owner's decision).** The owner said the suite may be larger than needed. Three audits are condensed in `docs/test-audit.md`: about 801 → 525 items and about 9.4k → 7.1k lines, keeping every regression guard. Owner decisions asked:
-   - accept that docs examples become the only guard for some guarantees (with comments marking them);
-   - drop the tests that re-prove asyncio;
-   - add `mypy tests` to the gate (34 errors to fix first) or not;
-   - add the four gap tests.
-   If approved, write TST-01..04 into `docs/features.md`, split by files:
-   - resource + container;
-   - store + monitor;
-   - interrupt + asyncio_compat;
-   - the other module 1 files + docs_examples + import.
-   Brief each implementer from `docs/test-audit.md`. The rules: a mutation proof per merge, and no regression tests dropped.
-2. **Module 3: undefined.** Ask the owner. Candidates: calendar/shift handling, LOOP-12 benchmark, statistics consumers.
+1. **Module 3 is undefined. Ask the owner.** Candidates: calendar/shift handling (AGENTS.md open question), LOOP-12 benchmark (deferred, D018), statistics consumers on the monitor hook.
+2. **Small SHOULD clean-ups, if the owner wants them:**
+   - `gate.sh` should source `gate.env` from the worktree under test (D044).
+   - The raising-monitor-on-immediate-shutdown case outside a loop gives "no running event loop" (STO-01; needs a src change).
+   - CLN-04: guard relative `from . import X`.
+   - The TST-06 docstring could add one clause about the non-eager case.
 
 ## Open questions for the owner
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
@@ -110,6 +111,9 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Never pipe `scripts/gate.sh` inside a `&&` chain** (D035): the chain sees the status of the last pipe stage. When the gate changes, gate older branches on the merged tree.
 - **No history rewrites:** the environment blocks force-pushes and amends of pushed commits. Ask agents for new commits on top.
 - **Promote a reviewer's SHOULD when it voids an acceptance criterion** (D038: a test that can skip an example silently voids "examples are run"). Let the re-review hunt for the same class of hole: in batch 13 it found another one, the fence-language case.
+- **Gate changes need a post-merge gate run** (D044): gate.sh reads gate.env from the main checkout.
+- **Delete `src/desyncio/__pycache__` between mutation runs.** A same-second restore leaves stale .pyc files.
+- **The shared scratchpad gets overwritten by concurrent agents.** Give every agent a private subfolder, and tell implementers to keep scratch files untracked inside their worktree and delete them before ruff runs.
 - **Check test volume in review.** The owner cares about suite size: ask reviewers to judge new tests for redundancy, not just correctness (D041).
 - **Verify implementer claims that a reviewer can check.** CLN-04's implementer said relative imports were guarded; they weren't.
 - **Run the gate while the re-review runs.** They are independent, and doing both at once saves a round trip.

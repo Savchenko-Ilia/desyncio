@@ -296,3 +296,7 @@ The owner extended D042 with the two remaining audit points:
   - moving `test_interruptible_enter_and_exit_never_await` from test_resource.py to test_interrupt.py.
 - **Scheduling.** Both points touch files owned by batch 16, so they run after it: TST-06 (gap tests) in batch 17, then TST-05 (mypy) in batch 18, so that mypy checks the final tests.
 - **Out of scope:** the outside-a-loop case of a raising monitor on immediate shutdown ("no running event loop", a STO-01 SHOULD). It needs a src change.
+
+## D044 — Gate changes are verified after merge (lead)
+`scripts/gate.sh` sources `scripts/gate.env` from the main checkout, not from the branch it tests. So a branch that changes `gate.env` passes the gate under the *old* commands. For TST-05 the lead merged on the reviewer's manual run of the new command on the merged tree, then ran `scripts/gate.sh origin/integration`, which used the new `mypy src tests`: GATE PASS. Until `gate.sh` is fixed (a SHOULD), any gate change is verified this way: run it by hand on the merged tree, merge, then gate `integration`.
+
