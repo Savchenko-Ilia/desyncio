@@ -230,3 +230,9 @@ The RES-03 spec text tied `preempt=True` to the holder opting in to preemption. 
 - **When preemption happens:** a `preempt=True` request preempts only when no unit is free, it would be at the head of the queue (no live waiter has a better-or-equal key, which keeps RES-02's no-barging rule), and its priority is strictly lower than the worst holder's. The worst holder is the one with the largest `(priority, request order)` key, i.e. the most recent among the worst priority (owner).
 - **Mechanism (lead, following D030):** preemption is synchronous. It removes the victim from the holders, decrements the count, grants the unit to the preemptor in the same step, then calls `sim.interrupt(victim, Preempted(by=preemptor_task, usage_since=t))`, where `t` is the virtual time the victim got the unit. The victim's `async with` exits with `Interrupt` and does not release a second time. Release stays free of awaits.
 - **The rest of the batch:** the RES-02 SHOULD clean-ups are folded into RES-03 (owner): remove the dead `_hold_round0_lock` helper, fix the stale comment, share the duplicated `_changed` monitor helper.
+
+## D033 — The gate tests Python 3.14 and checks formatting (owner, answers D027)
+The owner chose: "Test python 3.14. Add ruff format." Scheduled as CI-03 in batch 11, in parallel with RES-03 (no shared files).
+- `scripts/gate.sh` runs the full test suite on 3.13 and on 3.14. Both must pass.
+- The lint step adds `ruff format --check .`. The 6 files that fail it now are formatted once.
+- From the merge of CI-03 onward, every branch must be `ruff format`-clean and pass on 3.14. Branches cut before it must pass the new gate when they merge.
