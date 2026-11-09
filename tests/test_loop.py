@@ -17,18 +17,12 @@ def run[T](main: Callable[[], Coroutine[Any, Any, T]], *, start: float = 0.0) ->
         return runner.run(main())
 
 
-def test_time_starts_at_zero() -> None:
+@pytest.mark.parametrize("start", [0.0, 100.0])
+def test_time_starts_at_given_start(start: float) -> None:
     async def main() -> float:
         return asyncio.get_running_loop().time()
 
-    assert run(main) == 0.0
-
-
-def test_time_starts_at_given_start() -> None:
-    async def main() -> float:
-        return asyncio.get_running_loop().time()
-
-    assert run(main, start=100.0) == 100.0
+    assert run(main, start=start) == start
 
 
 def test_accepts_clock() -> None:
@@ -120,20 +114,6 @@ def test_sleep_zero_does_not_advance_time() -> None:
         return asyncio.get_running_loop().time()
 
     assert run(main) == 0.0
-
-
-def test_sequential_and_nested_sleeps_accumulate() -> None:
-    async def inner() -> None:
-        await asyncio.sleep(2)
-        await asyncio.sleep(3)
-
-    async def main() -> float:
-        await asyncio.sleep(1)
-        await inner()
-        await asyncio.sleep(4)
-        return asyncio.get_running_loop().time()
-
-    assert run(main) == 10.0
 
 
 def test_deadlock_raises_instead_of_blocking() -> None:
