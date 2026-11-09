@@ -35,8 +35,14 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
+      - name: Tests (Python 3.14)
+        run: UV_PROJECT_ENVIRONMENT=.venv-3.14 uv run --locked --python 3.14 pytest -q
+
       - name: Ruff
         run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
 
       - name: Mypy
         run: uv run mypy src

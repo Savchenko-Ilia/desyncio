@@ -326,7 +326,7 @@ Branch: feat/DOC-01 + fix/DOC-01-1  ·  Merged: 30fcc79
 **Follow-ups.** The SHOULDs above.
 
 ## CI-02 — CI manual-only (2026-11-08, batch 6, owner request)
-Branch: feat/CI-02  ·  Merged: (this commit's parent merge)
+Branch: feat/CI-02  ·  Merged: 29e5222
 
 **Approach.** `.github/workflows/ci.yml` now has only `workflow_dispatch` under `on:`; `pull_request` was removed. The header comment explains why (no Actions credits, D013), names `scripts/gate.sh` as the merge check, and says how to re-enable. The job, steps, permissions and concurrency are unchanged.
 
@@ -342,3 +342,557 @@ Branch: feat/CI-02  ·  Merged: (this commit's parent merge)
 **Gotchas.** The two failed runs on PR #2 (about 3 s each, no steps run) were caused by billing, not by test failures.
 
 **Follow-ups.** Restore `pull_request:` when credits are available.
+
+## LOOP-05 — Sim facade (2026-11-08, batch 6)
+Branch: feat/LOOP-05  ·  Merged: 6a3920c
+
+**Approach.** `src/desyncio/sim.py` has a `Sim` class and the singleton `sim`, exported as `from desyncio import sim` (D012). Every member looks up the running loop each time. If there is no running `VirtualTimeLoop`, it raises `RuntimeError` saying to use it inside `desyncio.run(...)`.
+- `sim.now` is `loop.time()`.
+- `await sim.timeout(dt, value=None)` is `asyncio.sleep(dt, value)` with validation: `dt` must be finite, `>= 0`, and not a bool. It is an `async def`, so the check happens at `await`.
+- `sim.spawn(coro, name=None)` calls `loop.create_task(coro, name=...)`. Default names are `proc-N`, from a per-loop counter in a `WeakKeyDictionary` (loop.py wasn't owned). Bad input closes the coroutine before raising.
+- `sim.rng(name)` is `current_rng_streams().stream(name)`.
+
+**asyncio internals.**
+- asyncio names tasks `Task-N` from a counter shared by the whole process, so a second run in the same process gets different names. That is why spawn has its own counter.
+- Tasks copy the current context when created, which is how `sim.rng` reaches the run's `RngStreams`.
+- The loop keeps only weak references to tasks, so callers must keep the `Task` that `spawn` returns.
+
+**Trade-offs.** A singleton plus a running-loop lookup, rather than passing a `Sim` into `main`. It reads like asyncio's own functions.
+
+**Review findings.** PASS. SHOULD:
+- **Fresh context:** a task created with `loop.create_task(..., context=contextvars.Context())` gets a misleading "no simulation is running" from `sim.rng`. Fall back to the loop, or improve the message.
+- **Names only for `sim.spawn`:** only spawned tasks get deterministic names. `asyncio.create_task`, `TaskGroup` and the main task keep the process-wide `Task-N`. LOOP-09 should install a task factory so all names are deterministic.
+- **More tests:** spawn order with simultaneous spawns; the log line for a failed task nobody awaited; an un-awaited `sim.timeout(-1)`; checking that the re-raised exception is the same object.
+- **Non-str `name`:** accepted and converted with `str()`.
+
+**Gotchas.** Validation in `timeout` only happens when it is awaited.
+
+**Follow-ups.** The task-factory note is for LOOP-09. The other SHOULDs above.
+
+## LOOP-11 — Scaled real-time mode (2026-11-08, batch 6)
+Branch: feat/LOOP-11 + fix/LOOP-11-1  ·  Merged: 2d06d94
+
+**Approach.**
+- `src/desyncio/realtime.py` has three pieces:
+  - `RealTimePacer(speed=1.0, wall_clock=None)`, with `speed` (get/set), `pause()`, `resume()` and `paused`, all behind a lock;
+  - a `WallClock` Protocol with `monotonic()` and `wait(timeout, selector)`;
+  - `SystemWallClock`, which waits by calling the real `selector.select(timeout)`.
+- The pacer is wired in through `VirtualTimeLoop(..., pacer=None)` and `desyncio.run(..., speed=None, pacer=None)`. `speed=x` is shorthand for `pacer=RealTimePacer(x)`, and giving both raises `TypeError`.
+- When the loop is idle, `_JumpingSelector._select_paced` waits `(min(when, until) - now) / speed` of real time, through the wall clock:
+  - **Full wait:** it calls `advance_to(when)`, so `_BoundedClock` still stops at `until`.
+  - **Interrupted wait** (a byte arrives on the self-pipe): it advances by `elapsed*speed`, capped, and returns the events.
+  - **Paused:** it waits with no timeout until resumed. Virtual time doesn't move.
+- **Fast mode** (no pacer, `speed=inf`, or the cleanup freeze) uses exactly the old code path.
+- **Thread safety:** every `speed=`, `pause()` and `resume()` calls `loop.call_soon_threadsafe(noop)` to wake the loop.
+
+**asyncio internals.** The self-pipe makes the real-time wait interruptible. A thread's `call_soon_threadsafe` writes one byte, which ends `select(timeout)` early. From inside the loop thread, the same call lands in `_ready`, so the next `_run_once` uses timeout 0 and no wait is interrupted. Stock asyncio caps select timeouts at `MAXIMUM_SELECT_TIMEOUT` (24 h) for the same overflow reason as the fix below.
+
+**Trade-offs.**
+- Waits are relative per timer, not anchored to a start time. Real time can drift a little behind the ideal schedule, by the time callbacks take to run.
+- With no timers and not paused, the loop still raises `SimulationDeadlock` (consistent with D006). While paused, it waits.
+
+**Review findings.**
+- Round 0 FAILED with two MUSTs, and the lead promoted a third (D014):
+  - the real wait wasn't capped: `select` raises `OverflowError` above ~9.2e9 s, e.g. `speed=1e-300` or a `1e10` timer;
+  - the `guards.py` docstring said "never waits", now false (D011);
+  - (promoted) a failed `pacer.bind` leaked the half-built loop and its sockets.
+- Fix round 1:
+  - `MAX_REAL_WAIT = 86400`. A cut-short chunk advances by `elapsed*speed`, or at least one float step so it can't spin forever.
+  - The loop closes itself if `bind` fails. `run()` builds the loop inside its validation block, so `main` is closed on failure.
+  - The `guards.py` docstring is qualified.
+  - Re-review: PASS. The reviewer checked chunked runs under every `until` value against fast-mode traces and found them identical. There were no ResourceWarnings on any `run()` path under `-X dev -W error`.
+- SHOULD:
+  - `pause()` from inside the simulation, with no other thread, blocks forever. Add a one-line warning to the `pause()` and `run()` docstrings.
+  - A pacer reused after a run that ended paused starts the next run paused.
+  - If the float-step floor regresses, `test_chunk_below_one_float_step_still_makes_progress` hangs instead of failing. Bound its fake wall clock.
+  - Add a comment explaining the floor's effect: at most one float step per day, only for absurdly small speeds.
+
+**Gotchas.**
+- `_select_paced` reads `getattr(clock, "limit", inf)`, a light coupling to `runners._BoundedClock`.
+- The `run()` tests for `speed` and `pacer` are in `tests/test_realtime.py`, not `tests/test_run.py`.
+
+**Follow-ups.** The SHOULDs above. Time anchoring, for long real-time runs.
+
+## LOOP-06 — asyncio compatibility suite (2026-11-08, batch 7)
+Branch: feat/LOOP-06  ·  Merged: e95ae83
+
+**Approach.** `tests/test_asyncio_compat.py` has 47 tests, all on the public API. Each one records `(virtual_time, label)` events and checks the whole timeline. The tests cover:
+- `asyncio.Runner(loop_factory=VirtualTimeLoop)` and wall-time negligibility;
+- `Queue`: blocking get and put, FIFO getters, and `shutdown()` (graceful, `immediate=True` with `join()` release, waking blocked getters and putters);
+- `Lock`, `Event`, `Semaphore`;
+- `gather`: `return_exceptions`, first failure, cancellation propagation;
+- `TaskGroup`: siblings cancelled at the failure time, `ExceptionGroup`;
+- `as_completed` as an async iterator, and with a timeout;
+- `wait_for`;
+- `timeout()`/`timeout_at()` with `reschedule` (later, earlier, `None`, into the past);
+- cancellation: landing time, cleanup that takes virtual time, suppression, cancel before the first step;
+- `shield`.
+No desyncio bugs were found, and there are no xfails.
+
+**asyncio internals.**
+- `reschedule()` into the past uses `call_soon`, so the timeout fires at the current time.
+- `gather` without `return_exceptions` does not cancel the other children.
+- Two TaskGroup child failures at the same t arrive together, because both timers fire in the same `_run_once` iteration.
+- These are plain sync tests that call `desyncio.run`, which cannot nest inside pytest-asyncio's loop.
+
+**Trade-offs.** Same-instant order is asserted only where asyncio or desyncio guarantees it (FIFO waiters, D008 timer ties).
+
+**Review findings.** PASS. Mutation results:
+- clock off by +1 (implementer): 47/47 tests fail;
+- jump to `when + 0.5`: 47/47 fail;
+- LIFO timer ties: 0/47 fail. That case is covered by `tests/test_ordering.py`'s 1,000-sleeper test.
+SHOULD:
+- Add a FIFO-wake test here, citing D008.
+- Comment on the `in log` check.
+- Graceful `shutdown()` with a blocked putter.
+- `timeout()` combined with a TaskGroup.
+
+**Gotchas.** Mutating `time()` to return 0 makes the loop spin forever, because no timer is ever due. Don't use that mutation.
+
+**Follow-ups.** The SHOULDs above.
+
+## LOOP-09 — Trace hook (2026-11-09, batch 7)
+Branch: feat/LOOP-09 + fix/LOOP-09-1 + fix/LOOP-09-2  ·  Merged: 62caa24
+
+**Approach.** `src/desyncio/trace.py` defines `TraceRecord(t, seq, task_name, kind)` (`kind` ∈ start/resume/finish/cancel), a `Tracer`, a `ListSink`, and `_TracedCoroutine`, a subclass of `collections.abc.Coroutine`.
+- Tracing is enabled with `desyncio.run(..., trace=sink)` or `VirtualTimeLoop(..., trace=sink)`, and is off by default.
+- `VirtualTimeLoop.create_task` is overridden, not `set_task_factory`, so a user's own factory still works. It does two things:
+  - gives every unnamed task `proc-N` from one per-loop counter, shared with `sim.spawn`; `desyncio.run` names the main task `main` via `name_next_task`;
+  - wraps the coroutine only when tracing is on.
+- The wrapper records `start` on the first send/throw and `resume` on later ones. A `StopIteration` or other exception records `finish`, and an escaping `CancelledError` records `cancel`. Records are made inside the step, so `t` is that step's virtual time.
+- `stop_tracing_new_tasks()` runs before `Runner.close()`, so Runner's housekeeping tasks don't appear in the trace. Pending tasks still get their cleanup `cancel` records, at the frozen clock.
+- **Sink errors (D016):** `Tracer.emit` catches the first sink exception, turns the sink off and calls the loop's `_on_trace_error`, which records it and calls `stop()`. The `run_forever` override re-raises it after `super().run_forever()`. During cleanup it is only recorded, and `run` raises it after close.
+- All loop state of ours is in one `__slots__` `_LoopState` at `self._state`, which replaced `_sequence`.
+
+**asyncio internals.**
+- The C `Task.__step` can't be overridden. A coroutine-protocol object (`send`/`throw`/`close`) is the observable seam, and Task falls back from its fast path to generic `send` for such objects.
+- `asyncio.create_task`, `TaskGroup`, `gather`, `ensure_future` and `Runner.run` all call `loop.create_task`.
+- **CPython 3.13 instance-dict limit:** after construction, a loop has 28 `vars()` entries. Adding three more pushed it past the inline-values / shared-keys layout limit and slowed attribute access in stock `_run_once` by about 8–10% per step, even with tracing off. `test_loop_instance_dict_is_not_larger_than_before_loop_09` pins `len(vars(loop)) <= 28`.
+- `loop.stop()` only sets a flag. Callbacks already in `_ready` in that iteration still run.
+
+**Trade-offs.**
+- A `create_task` override rather than a task factory, so user factories keep working.
+- Containing sink errors and aborting the run, rather than letting them propagate into tasks (principle 4).
+
+**Review findings.**
+- Round 0 FAILED:
+  - (MUST) tracing off was ~8–10% slower per step, due to the attribute count; the old benchmark test could not detect it because both sides used `VirtualTimeLoop`;
+  - (MUST) §10's zero-cost claim was false;
+  - (promoted to MUST, D016) a sink error replaced the task's result or its `CancelledError`, changing TaskGroup and timeout semantics.
+- Fix round 1:
+  - `_LoopState`. Re-measured by the reviewer: integration 0.76–0.81 s vs the fix branch 0.757–0.759 s for 100k sleeps, best of 7;
+  - the deterministic attribute-count test replaces the vacuous benchmark test;
+  - §10 rewritten with measured per-task numbers (the override adds ~0.3 µs to a ~2.5 µs `create_task`);
+  - sink containment, with tests for start, finish and cancel errors, the main task, TaskGroup and cleanup. A subprocess check runs under `-W error -X dev`.
+  Re-review FAILED with one MUST: §11 listed `run_forever` as stock although it is overridden.
+- Fix round 2 corrected §11 and §2 and added a docs test. Re-review: PASS.
+- The reviewer also ran all 47 LOOP-06 compat tests with tracing forced on, and they all pass.
+- SHOULD:
+  - A `KeyboardInterrupt`/`SystemExit` raised by the sink is deferred to the end of the iteration. Stock asyncio aborts immediately. Document it, or re-raise those two at once.
+  - `run()`'s `finally` can replace an in-flight exception with a pending sink error. Chain it instead.
+  - Direct `asyncio.Runner` use with a failing sink during cleanup is undocumented.
+  - With tracing on, `inspect.iscoroutine(task.get_coro())` is False.
+  - Tasks created by GC (async-generator finalisation) are traced and use up a `proc-N`. This is deterministic on CPython only.
+  - §11 should list the `_clock_resolution` override.
+
+**Gotchas.**
+- **Adding attributes to `VirtualTimeLoop` is a performance hazard.** Put new state on `self._state`.
+- A test that deliberately makes `run` fail with a bad argument needs `# type: ignore[call-overload]`.
+
+**Follow-ups.** The SHOULDs above.
+
+## LOOP-10 — Determinism invariant (2026-11-09, batch 8)
+Branch: feat/LOOP-10  ·  Merged: 30103ad
+
+**Approach.** `tests/models/mm1.py` is a reference M/M/1 queue, heavily commented for learners, using the public API only:
+- exponential inter-arrival times from `sim.rng("arrivals")` and service times from `sim.rng("service")` (λ=0.9, μ=1.0);
+- each customer is a `sim.spawn`ed task;
+- the single FIFO server is an `asyncio.Lock`.
+It returns frozen `CustomerRecord(arrival, service_start, departure)` objects.
+
+`tests/test_determinism.py` covers:
+- the same seed gives an identical full trace (over 10k `TraceRecord`s) and identical results;
+- a different seed gives a different trace and results;
+- the same seed in a subprocess, with `PYTHONHASHSEED` 0 and 12345, gives identical SHA-256 digests of `repr(trace)` and `repr(records)`;
+- a sanity check: the mean time in system is 8.64 for seed 42 (theory 10, band 8–12), plus FIFO and single-server invariants.
+The file takes about 3–4 s, and it runs in `scripts/gate.sh`, since CI is manual-only (D013).
+
+**asyncio internals.** `asyncio.Lock` can't be barged in 3.13. `acquire`'s fast path needs no un-cancelled waiters. `release` → `_wake_up_first` resolves the first waiter's future, but the waiter stays in `_waiters` until it resumes, so a same-instant arrival queues behind it. That is why a Lock is a correct FIFO server.
+
+**Trade-offs.** The same-seed comparison covers the whole trace, not just the statistics. Any nondeterminism anywhere in the stack (names, ordering, RNG) shows up as a diff.
+
+**Review findings.** PASS.
+- Mutations:
+  - an unseeded RNG is caught by 3 tests;
+  - swapped rates are caught by the sanity band (mean 582);
+  - LIFO timer ties are NOT caught here. The model has no equal timestamps (20,001 distinct), and any deterministic mutation passes a same-seed test by construction. `tests/test_ordering.py` catches it (6 tests).
+- SHOULD:
+  - `from models.mm1 import` depends on pytest's default `prepend` import mode (`--import-mode=importlib` fails). Add a note, or load the model by path.
+  - The band's lower bound is 0.64 below the seeded value; a change to RNG derivation might need it widened.
+  - Add a model variant with quantised service times so ties occur.
+  - Use `itertools.pairwise`.
+
+**Gotchas.** A same-seed test can only catch *nondeterminism*, not a deterministic change in semantics.
+
+**Follow-ups.** The SHOULDs above. With this, Module 1 is complete except LOOP-12 (deferred, D018).
+
+## RES-01 — Resource (2026-11-09, batch 9)
+Branch: feat/RES-01 + fix/RES-01-1  ·  Merged: f13f3bc
+
+**Approach.** `src/desyncio/resource.py`: `Resource(capacity=1, *, monitor=None)` is a thin wrapper over `asyncio.Semaphore(capacity)`, used as `async with res:` (D019).
+- **Delegated to asyncio:** the FIFO waiter queue, no barging, removing a cancelled waiter, and returning a unit granted to a task that was then cancelled.
+- **Ours:** validation (capacity an int ≥ 1, bool rejected), read-only `capacity`/`count`/`queue_length` kept by our own counters (no private semaphore reads), the D023 v2 monitor, and the `__aenter__`/`__aexit__` plumbing. A Resource binds to the run in which it is first used.
+
+**asyncio internals.**
+- `_acquire` checks `sem.locked()` before awaiting `acquire()`. This is race-free, because acquire's fast path doesn't yield. `locked()` means "would wait", including when a waiter has been woken but hasn't run yet, which is where no-barging comes from.
+- A request that has been granted but hasn't resumed still counts in `queue_length`. That state lasts zero virtual time.
+- The cross-check is exact: an M/M/1 model built on `Resource` gives the same per-customer records as `tests/models/mm1.py` (an `asyncio.Lock` server) for the same seed.
+
+**Trade-offs.** Our own counters rather than reading `Semaphore._value`/`_waiters`: that's the only public way to expose `queue_length`.
+
+**Review findings.**
+- Round 0 PASSED, with a 240-run counter stress probe. The lead then promoted one SHOULD to MUST under D023: a raising monitor left a unit held forever.
+- Fix round 1 was redirected mid-round to D023 v2: monitor errors go to `loop.call_exception_handler`, so no undo logic is needed.
+- Re-review PASSED: 300 seeds with a monitor raising at p=0.5 plus random cancels; no unit leaked; 16k errors reached the handler.
+- SHOULD:
+  - `_changed` calls `get_running_loop()`, which fails if the coroutine is driven by hand.
+  - A monitor that raises a `BaseException` (e.g. `CancelledError`) on queue enter leaves `queue_length` incremented.
+
+**Gotchas.** Reusing one Resource across two `desyncio.run` calls raises "bound to a different event loop" (asyncio behaviour). The docstring says so.
+
+**Follow-ups.** The SHOULDs above.
+
+## CON-01 — Container (2026-11-09, batch 9)
+Branch: feat/CON-01 + fix/CON-01-1  ·  Merged: 4831169
+
+**Approach.** `src/desyncio/container.py`: `Container(capacity=inf, init=0, *, monitor=None)`. asyncio has no level/amount primitive, so it is built on `asyncio.Condition` (principle 6).
+- `put(amount)` waits while it would overflow; `get(amount)` waits while the level is too low. Levels are floats.
+- Each direction has a deque of `object()` tickets, and the wait predicate is `queue[0] is ticket and fits()`. That gives strict FIFO, head-of-line (D021).
+- A `finally` removes the ticket and calls `notify_all`. The monitor is then called as `monitor(container)` with the lock still held.
+
+**asyncio internals.**
+- `Condition` wakes its waiters in FIFO order, but each one re-checks only its own predicate. Without the tickets, a small `get` could overtake a large one waiting ahead of it.
+- `Condition.wait` re-acquires the lock even when cancelled, so the `finally` always runs while holding the lock, which `notify_all` requires.
+- Every change wakes all waiters, so a change costs O(N). This is documented.
+
+**Trade-offs.** `Condition` plus tickets, rather than hand-rolled futures. The tickets are the minimum needed for head-of-line order.
+
+**Review findings.**
+- Round 0 FAILED with one MUST: the monitor was called as `monitor(level)` rather than `monitor(container)`.
+- Fix round 1 applied D023 and D023 v2. The edit to `test_monitor_hook` is permitted, because the spec changed.
+- Re-review PASSED: 200 seeds, a monitor raising at p=0.5, random cancels and timeouts. The level stayed within bounds, conservation held, head-of-line order held, and the deques ended empty.
+- SHOULD: a test should pin "settled state" (no ticket left and the lock held when the monitor runs).
+
+**Gotchas.** Amounts are validated when the call is awaited, not when the coroutine is created.
+
+**Follow-ups.** The SHOULD above.
+
+## STO-01 — Store (2026-11-09, batch 9)
+Branch: feat/STO-01 + fix/STO-01-1  ·  Merged: a833dd6
+
+**Approach.** `src/desyncio/store.py`: `Store[T](capacity=inf, *, monitor=None)` is a thin wrapper over `asyncio.Queue(maxsize)` (inf means maxsize 0).
+- **Delegated to asyncio:** FIFO items and waiters, blocking put/get, cancellation cleanup (an item is never lost or duplicated) and `shutdown()`.
+- **Ours:** validation (an int ≥ 1, or inf), `len()` (`qsize`), a read-only `items` snapshot, the shutdown passthrough and the D023 v2 monitor.
+- `items` is a parallel deque, updated in the same synchronous step as the queue operation and cleared on `shutdown(immediate=True)`. `put_nowait`/`get_nowait` are not exposed, because they would bypass the mirror.
+
+**asyncio internals.** In `Queue.put`/`get` the step that completes the operation is synchronous (`put_nowait`/`get_nowait`), so a cancel can't land between Queue finishing and our update. A probe over 600 seeds found no drift.
+
+**Trade-offs.** The mirror vs a documented read of `Queue._queue`. The reviewer prefers the private read (one stable attribute, no second structure). Kept as an open SHOULD.
+
+**Review findings.**
+- Round 0 FAILED: a raising monitor lost the item in `get` (removed from the queue, never returned), and no test covered a raising monitor. This finding is what led to D023 v2.
+- Fix round 1: monitor errors go to the handler, the monitor is also called on immediate shutdown, and the docstring says monitors must not block.
+- Re-review PASSED: 1500 seeds, a randomly raising monitor, cancels and shutdowns. No lost or duplicated item, and the mirror always matched the queue.
+- SHOULD:
+  - `shutdown(immediate=True)` outside a loop with a raising monitor gives "no running event loop" instead of the monitor's error. Fall back to logging.
+  - Add a test for a raising monitor on immediate shutdown.
+  - A monitor raising `CancelledError` loses the item.
+
+**Gotchas.** Capacity `3.0` is rejected; it must be an int.
+
+**Follow-ups.** The SHOULDs above, and the mirror-vs-`_queue` question.
+
+## INT-01 — Interrupts, timeout-style (2026-11-09, batch 9)
+Branch: feat/INT-01-v2 + fix/INT-01-v2-1  ·  Merged: f5d2caa  ·  (discarded: feat/INT-01, design 2 of D024)
+
+**Approach.** In `src/desyncio/interrupt.py`, `Interrupt(Exception)` carries `.cause`, and `Interruptible` is the scope returned by `sim.interruptible()`, with `.interrupted` and `.cause`. `sim.interrupt(task, cause)` is on the `Sim` facade.
+- **Registry:** a module-level `WeakKeyDictionary[Task, list[Interruptible]]` holds each task's open blocks, innermost last. The blocks keep only a `weakref.ref` to their task, so entries really are dropped on GC (unless the cause refers back to the task).
+- **Delivery:** `sim.interrupt` marks the innermost block (first cause wins) and calls `task.cancel()`. The block's `__aexit__` then calls `task.uncancel()` once, and if the result is ≤ the `cancelling()` value recorded on entry, it raises `Interrupt(cause) from CancelledError`. So a real cancel always wins.
+- **RuntimeError** for: a target with no open block, a finished target, or the current task.
+
+**asyncio internals.**
+- An exception raised at the innermost `await` can only be translated by a frame it passes through on the way out. `asyncio.timeout()` works because its `__aexit__` runs in the user's frame, and this design copies exactly that (D024).
+- Delivery is an ordinary cancel, so every primitive cleans up through its standard cancel path: the `Lock` waiter handover, `Condition` re-acquire, `Semaphore`'s grant fix-up, the `Queue` waiter, and a `TaskGroup` cancelling its children.
+- In 3.13, `uncancel()` also clears a pending `_must_cancel` once the count reaches 0. So an interrupt that arrives after the body's last await leaves no stray `CancelledError`: the block exits normally with `interrupted=True`.
+- Nesting with `asyncio.timeout()` firing at the same instant follows asyncio's own double-fire semantics, so the outer scope wins.
+- A ContextVar is the wrong registry: the interrupter runs in another task, and child tasks copy the context.
+
+**Trade-offs.** Interruptible code must be marked explicitly; in exchange, the mental model is the familiar `asyncio.timeout()` one and only public APIs are used. D024 records the two rejected designs:
+- failing the awaited future: three proven bugs (Lock, Condition, TaskGroup exit) and a private `_fut_waiter`;
+- `Interrupt(CancelledError)`: leaked `Semaphore` capacity and ended tasks as cancelled.
+
+**Review findings.**
+- The first design (`feat/INT-01`) FAILED review, with three MUSTs, and the design was replaced.
+- v2, round 0 FAILED on one MUST: the code is adapted from CPython's `asyncio.Timeout` (`_State`, `__aenter__`, `__aexit__`, `_on_timeout`: same states, error strings and `uncancel()` condition), so it needs the PSF marking (AGENTS §3, as D009). The lead also promoted, under D011, a false docstring claim that registry entries are dropped on GC (the blocks held a strong reference to the task).
+- Fix round 1: a marking block plus a list of changes, `interrupt.py` added to the `LICENSES/PSF.txt` header, a notice test, a `weakref.ref` to the task, a dead-task-safe `__aexit__`, and a GC test.
+- Re-review PASSED: the adversarial probes all held (Lock handover, Condition re-acquire under contention, TaskGroup, nesting, real cancel in both orders, late interrupt), plus 300 stress seeds against Resource, Container and Store with zero failures and determinism checked.
+- SHOULD:
+  - Add a test and a docstring line for a late interrupt (`interrupted` can be True with no `Interrupt` raised).
+  - Add a test pinning the ExceptionGroup limit: a real child failure while interrupting propagates untranslated, with `interrupted` True and `cancelling()` restored. `asyncio.timeout()` splices its error into the group; we don't.
+  - Document that an interrupt aimed at an already-unwinding inner block is dropped, not passed to the outer block.
+  - The shipped stress test has only 20 seeds; add the same-instant interrupt+cancel mix.
+  - The "changes from the original" list misses the state rename (`EXPIRING`→`INTERRUPTING`), `expired()`→`interrupted`, the dropped assert, and `__repr__`.
+
+**Gotchas.**
+- `except Interrupt` *inside* a block never catches that block's own interrupt: translation happens at that block's exit, as with `TimeoutError`.
+- The PR to `main` must flag the PSF-adapted code in `interrupt.py`.
+
+**Follow-ups.** The SHOULDs above. RES-03 (preemption) builds on `interruptible()`.
+
+## RND-01 — Random streams: rename and reuse stdlib seeding (2026-11-09, batch 10a)
+Branch: feat/RND-01 + fix/RND-01-1  ·  Merged: ddc6dda
+
+**Approach.** `git mv rng.py randomness.py`, with no shim. `RngStreams` became `RandomStreams`, `current_rng_streams()` became `current_random_streams()`, the ContextVar became `_random_streams` (`"desyncio_random_streams"`), and `sim.rng(name)` became `sim.random(name)`. `derive_seed` and the SHA-256 encoding are gone. A stream is `random.Random(f"{seed}:{name}")`, cached in the per-run `RandomStreams`, so repeated calls continue one sequence and a new `desyncio.run` restarts it. Seed and name validation are unchanged. Every caller in tests now uses `sim.random`.
+
+**asyncio internals.** None new. The run's `RandomStreams` still reaches tasks through a ContextVar set in a fresh `contextvars.Context` (see LOOP-04). `random.Random(str)` uses version-2 seeding: the string is hashed with SHA-512, never with `hash()`, so `PYTHONHASHSEED` does not affect it. A subprocess test checks that with two hash seeds.
+
+**Trade-offs.** The `:` separator needs no length prefix, because a seed is a non-negative int (digits only, `bool` rejected). The first `:` always ends it, even when the name contains `:`. A test covers `(1,"23")`/`(12,"3")` and `(1,":2")`/`(1,"2")`. Every random sequence changed once (D026). The new known values are pinned in `tests/test_randomness.py`, and the M/M/1 band was re-picked (D026 outcome).
+
+**Review findings.**
+- Round 0 FAILED on one MUST: on Python 3.14, `def random(self, name) -> random.Random` inside `Sim` resolves `random` to the method (PEP 649 evaluates annotations lazily, in class scope), so `typing.get_type_hints(Sim.random)` raised `AttributeError`. 3.13, mypy and ruff all miss it.
+- Fix round 1: `from random import Random`, `-> Random`, and `test_random_return_annotation_resolves_to_random_class`, which was shown to fail on 3.14 before the fix. The fixer scanned src/ for other class members shadowing imported names and found none.
+- Re-review PASSED. The gate passes with 468 tests.
+- SHOULD:
+  - Explain in the M/M/1 band comment that the band is about ±2 sd.
+  - The cross-process test passes `env={"PYTHONHASHSEED": ...}` only, dropping PATH. Use `{**os.environ, ...}`.
+  - Add an explicit test that a second `desyncio.run` with the same seed restarts a stream (covered indirectly by `tests/test_sim.py::_draw`).
+  - `ruff format --check` flags 6 files, all predating this feature. The gate does not run the formatter.
+
+**Gotchas.**
+- Naming a method after a module the class uses breaks annotations on 3.14 only. Import the class itself (`from random import Random`).
+- Reviewers twice ran a command in the main checkout before their worktree existed (harmless). Tell them to `mkdir -p` the scratch dir and `cd` in the same command.
+
+**Follow-ups.** The SHOULDs above. D027: the gate tests only 3.13. Older log entries keep the old names (`sim.rng`, `RngStreams`, `derive_seed`) as history.
+
+## MON-01 — Monitors / TimeSeries (2026-11-09, batch 10b)
+Branch: feat/MON-01 + fix/MON-01-1  ·  Merged: 457ab52
+
+**Approach.** `src/desyncio/monitor.py` defines `TimeSeries`, which imports only `sim` and nothing from the primitives (principle 4). You wire it into a primitive with the D023 v2 hook, e.g. `Resource(1, monitor=lambda r: busy.record(r.count))`, and record the initial value yourself (D028).
+- `record(value)` stamps the value with `sim.now`, adds the area of the previous segment, and tracks min and max as it goes. `record` and `mean` are O(1); `samples` returns a tuple copy, which is O(n).
+- `mean(until=None)` integrates over `[first, until]`, where the last value holds until `until`; `None` means `sim.now`.
+- Rules, all tested: values must be finite int or float (`bool` is rejected); a rejected record changes nothing; for same-instant records the last one wins in the mean but all of them count for min and max; an empty series or an `until` before the last record raises `ValueError`; a zero-length span returns the last value; a `record` earlier than the last record raises `ValueError` (D029: one series per run).
+
+**asyncio internals.** None. It is a plain observer called synchronously from the primitives' monitor hook.
+
+**Trade-offs.** Incremental area against recomputing from the samples: a 1e5-record probe agreed with an `fsum` recomputation to within about 1e-14 relative error.
+
+**Review findings.**
+- Round 0 FAILED. At ρ=0.5, Lq equals utilisation (both 0.5), so recording `count` as the queue length, or swapping the two series, still passed. The lead also promoted two items under D029: a test for D016, and the time-going-backwards bug, where a reused series silently added negative area.
+- Fix round 1:
+  - ρ is now 0.6 (Lq=0.9), with bands of ±0.03 and ±0.12. Over seeds 1..10 the worst errors were 0.011 and 0.040.
+  - A deterministic count/queue_length test was added.
+  - A with/without-monitor test was added; it compares per-customer records.
+  - `record` now rejects a time before the last record.
+- Re-review PASSED. Each mutation was applied and caught by a failing test: count recorded as Lq, the series swapped, the time check removed, and a monitor that draws from `sim.random`.
+- SHOULD: add a floating-point `mean(until=...)` assertion on random data.
+
+**Gotchas.** A same-instant pair `(0,0),(0,1)` is normal when a task acquires at t=0. Pick an M/M/1 test load where the statistics you compare differ.
+
+**Follow-ups.** The SHOULD above. API-01 exports `TimeSeries`.
+
+## STO-02 — PriorityStore and FilterStore (2026-11-09, batch 10b)
+Branch: feat/STO-02  ·  Merged: 11f488a
+
+**Approach.** Both stores live in `src/desyncio/store.py`. They are separate classes, not subclasses of `Store`. The capacity check, the monitor check and the D023 v2 monitor call moved into module-level helpers that all three stores share. `Store`'s behaviour and messages are unchanged.
+- **PriorityStore:** `put(item, priority=0)`. A thin wrapper over `asyncio.PriorityQueue`, holding `(priority, next(itertools.count()), item)` entries. A dict keyed by sequence number mirrors the entries, so `items` (in get order) never reads `PriorityQueue._queue`. `shutdown` is a passthrough.
+- **FilterStore:** one `asyncio.Condition`.
+  - `get(filter=None)` does `wait_for(take_first_match)`, removing the item inside the predicate. `put` does `wait_for(len < capacity)`.
+  - Both call `notify_all()` under the lock; the monitor runs after the lock is released.
+  - It has no `shutdown()` (D031).
+
+**asyncio internals.**
+- `Condition.wait_for` returns as soon as the predicate is true, with no `await` in between, so the removal is atomic with `get` returning.
+- A getter cancelled after a notify re-acquires the lock inside `Condition.wait` and raises before its predicate runs, so nothing is removed.
+- Unlike RES-02 round 0 (D030), nothing needs the lock *after* a state change that must not be skipped. The release of the lock in `__aexit__` is synchronous.
+- `notify_all` wakes waiters in park order and the `Lock` admits them FIFO. So the longest-waiting matching getter takes the first matching item, and a non-matching getter re-parks without blocking a later one.
+
+**Trade-offs.** Priority via `put(..., priority=)` or a key function: the first was chosen (D031). Same-instant barging is accepted, because it matches `asyncio.Queue` (D031).
+
+**Review findings.**
+- PASS on round 0, with no MUSTs.
+- The reviewer ran a seeded stress test over 400 seeds per store: random putters and getters, cancels, and `sim.interrupt` inside `interruptible()`. There were no lost, duplicated or half-inserted items, and the mirror stayed consistent.
+- SHOULD:
+  - Pin same-instant barging parity with a test.
+  - Add a test that a getter keeps its seniority after re-parking.
+  - Add a test of a filter that reads `len(store)` or `items`.
+  - Record the missing `shutdown` as a decision (done: D031).
+
+**Gotchas.** `get(filter=...)` shadows a builtin, hence `# noqa: A002`. A filter runs under the store's lock, so it must not `await` or call `put`/`get`.
+
+**Follow-ups.** The SHOULDs above. A possible async `FilterStore.shutdown()`.
+
+## RES-02 — PriorityResource (2026-11-09, batch 10b)
+Branch: feat/RES-02 + fix/RES-02-1  ·  Merged: 40e9dca
+
+**Approach.** `PriorityResource(capacity=1, *, monitor=None)` lives in `src/desyncio/resource.py`, beside `Resource`. `request(priority=0)` returns a single-use `PriorityRequest`, a class so that RES-03 can add `preempt=`. Plain `async with res:` uses priority 0. Priorities must be int or float; `bool` and NaN are rejected, and negative and infinite values are allowed. Request order is fixed when the `async with` is entered.
+- **Final design (D030), modelled on `asyncio.Semaphore`:** each waiter awaits its own `loop.create_future()`. Waiters sit in a sorted list of `(priority, seq, fut)`, kept with `insort`. `seq` comes from `itertools.count()`, so a future is never compared.
+- **Release** is synchronous: decrement, then `_grant_free_units()`, which pops the best live waiters and calls `set_result`. A `_granted` counter covers units handed to waiters that have not resumed yet, so a same-instant newcomer finds no free unit and can't barge.
+- **Fast path:** take a unit without suspending only if one is free and no live waiter has priority <= ours.
+- **Cancellation:** a waiter that was already granted does `_granted -= 1` and passes the unit on; a pending waiter removes its own entry. Either way it then calls `_grant_free_units()`.
+- **Counts:** `queue_length = len(_waiters) + _granted`, the same semantics as RES-01.
+
+**asyncio internals.**
+- `Condition.notify_all()` must hold the lock. After a notify, the woken waiters queue on `Lock._waiters` to re-acquire it, and `Lock.acquire()` skips its fast path whenever others are queued. So under round 0's Condition design, a holder's `__aexit__` could really suspend. A cancel at that point skipped the decrement for good (D030).
+- `Semaphore` avoids this by releasing synchronously and fixing up on `CancelledError` in `_acquire`. RES-02 now copies that pattern; no code is copied.
+
+**Trade-offs.**
+- A sorted list, not a heap: a cancelled pending waiter must leave the order at once so that `queue_length` is right, and a list does that with `bisect_left` plus `del`. Insertion is O(n), which is fine at simulation queue sizes.
+- The futures design also removes round 0's O(waiters) thundering herd.
+
+**Review findings.**
+- Round 0 FAILED: the Condition design leaked a unit when the holder was cancelled while `__aexit__` waited for the lock. The probe ended with `count 1 queue 1` and no grant.
+- Fix round 1 moved to per-request futures (D030). It added tests for cancel at exit, body exception plus cancel (the body error is kept), interrupt at exit, and a waiter cancelled in the step it was granted.
+- Re-review PASSED. A seeded stress test over 3000 seeds (capacity 1-3, random priorities, cancels and interrupts) found no leak, the invariants held at every monitor call, and service order was consistent. 573 tests pass.
+- SHOULD:
+  - Delete the dead `_hold_round0_lock` test helper, which reads the removed `_cond`, along with its spawns.
+  - Fix the stale "Condition FIFO" comment in `test_two_units_freed_at_same_instant_go_to_two_best`.
+  - Document in `queue_length` that a waiter cancelled while pending is counted until its task runs (the same lag as `Semaphore`).
+  - `_changed` is duplicated between `Resource` and `PriorityResource`.
+
+**Gotchas.**
+- Any `await` in a context manager's `__aexit__` is a cancellation point. A release that must not be skipped has to be synchronous.
+- A public-API test could not make round 0 fail, because the lock was contended only in a particular window. The fixer reproduced it by holding the private lock (see the SHOULD above).
+
+**Follow-ups.** The SHOULDs above. RES-03 extends `PriorityRequest` with `preempt=True`.
+
+## CI-03 — Gate: Python 3.14 and ruff format (2026-11-09, batch 11)
+Branch: feat/CI-03  ·  Merged: d17d8d3
+
+**Approach.**
+- `scripts/gate.sh` has a new optional `TEST_CMD_314`. It runs after `TEST_CMD` and before lint, and fails with "tests failed on Python 3.14". When the variable is unset, the gate behaves as before.
+- `gate.env` sets `TEST_CMD_314="UV_PROJECT_ENVIRONMENT=.venv-3.14 uv run --locked --python 3.14 pytest -q"` and adds `ruff format --check .` to `LINT_CMD`.
+- `ci.yml` stays manual-only (D013) and mirrors both changes.
+- One separate commit (7232114) formats the 6 files that were failing; the reviewer confirmed the ASTs are identical.
+
+**asyncio internals.** The 3.14 failure was in `test_loop_instance_dict_is_not_larger_than_before_loop_09`. Stock `asyncio.SelectorEventLoop` has 26 instance attributes on 3.13 and 27 on 3.14, and `VirtualTimeLoop` adds a net +2 on both (28 and 29).
+- **Test change (permitted by D033):** the hard-coded limit of 28 became `len(vars(SelectorEventLoop())) + 2`, measured on the running interpreter. The limit on 3.13 is still 28, so D017 is enforced exactly as before.
+- A mutation that adds one instance attribute fails on both interpreters.
+
+**Trade-offs.** The 3.14 run uses its own environment, so the 3.13 run and lint keep the default `.venv`. `ruff` skips `.venv-3.14` only because uv writes a `.gitignore` containing `*` into every venv it creates.
+
+**Review findings.**
+- PASS. The reviewer checked that a missing interpreter (`--python 3.99`) and a misformatted file both make the gate fail loudly. 573 tests pass on 3.13 and on 3.14.
+- SHOULD:
+  - Make the venv exclusion robust: add `.venv-3.14` to `.gitignore` or to ruff's `extend-exclude`.
+  - Add an explicit `uv python install 3.14` step to ci.yml.
+
+**Gotchas.** From now on, every branch must be `ruff format`-clean and pass on 3.14 (D033).
+
+**Follow-ups.** The SHOULDs above.
+
+## RES-03 — PreemptiveResource (2026-11-09, batch 11)
+Branch: feat/RES-03 + fix/RES-03-1  ·  Merged: 525deb1
+
+**Approach.** `PreemptiveResource(PriorityResource)` and `Preempted(by, usage_since, resource)`, a frozen dataclass, are in `src/desyncio/resource.py`. The semantics follow D032 (SimPy-style, chosen by the owner).
+- `request(priority=0, preempt=True)` returns a `PreemptiveRequest`. It acquires a unit, then enters an `Interruptible()`, so every holder's body is preemptible. Plain `async with res:` keeps a per-task stack of requests.
+- `PriorityResource._acquire` gained four no-op hooks (`_arriving`, `_unit_assigned`, `_became_holder`, `_unit_dropped`) and a ticket slot in each waiter entry. A `_Ticket` records the task, priority, preempt flag, seq, `since`, `held` and `evicted`.
+- **Preemption (`_arriving`):** it happens only when all three hold: no unit is free, the request is at the head of the queue, and the worst holder of another task (max `(priority, seq)`) is strictly worse.
+- **Eviction (`_evict`)** is synchronous. It removes the victim, decrements `count` (or `_granted`, for a reservation), and then calls `interrupt_task(victim, Preempted(...))`. The preemptor then takes the freed unit on the fast path, and the monitor is called once.
+- **`__aexit__`:** it releases synchronously, unless the request was evicted, and only then exits the scope.
+
+**asyncio internals.**
+- `Interruptible.__aenter__` and `__aexit__` are `async` but never await. That is what makes "grant, then scope" and "release, then scope exit" free of leaks. `test_interruptible_enter_and_exit_never_await` pins it (D034).
+- `sim.interrupt` delivers to the innermost `interruptible()` block. So a victim with its own nested block receives the preemption there, after the unit is already gone (documented).
+- A real cancel always wins over a preemption (INT-01).
+
+**Trade-offs.**
+- **Hooks in RES-02 vs a separate acquire:** hooks keep a single acquire path. The cost is a few no-op calls per acquire on a plain `PriorityResource`.
+- **A reservation can be preempted** (D034, for the owner to confirm): a granted waiter whose task has not resumed yet counts as held. Its `__aenter__` raises `Interrupt(Preempted)` itself, without any cancellation.
+
+**Review findings.**
+- Round 0 FAILED on formatting only: `resource.py` was not `ruff format`-clean under D033.
+  - The reviewer's stress test (1000 seeds: preempt on and off, cancels, `asyncio.timeout()`, nested `interruptible()`) found no leaked or double-released unit.
+  - The D032 rules and cases a–e held.
+  - The lead promoted the no-await guard to MUST (D034).
+- Fix round 1: `ruff format` (the ASTs are identical) and the AST guard test (a mutation that adds `await` fails it).
+- Re-review PASSED on the merged tree: 642 tests on 3.13 and on 3.14, ruff format clean.
+- The merge itself deviated from the process (D035).
+- SHOULD:
+  - The AST guard can't see an await reached through a helper.
+  - Add a test that would catch a future `await` between `_acquire` and `Interruptible.__aenter__`.
+- The clean-ups D032 folded in are done: the dead `_hold_round0_lock` is removed, the stale comment is fixed, and `_call_monitor` is shared between `Resource` and `PriorityResource`.
+
+**Gotchas.**
+- Within one instant, the preemptor's body runs before the victim's `except Interrupt` handler.
+- A task that holds every unit and asks for another one waits for itself. Avoid nesting there.
+
+**Follow-ups.** API-01 exports `PreemptiveResource` and `Preempted`. DOC-02 adds the machine-shop example.
+
+## API-01 — Public exports (2026-11-09, batch 12)
+Branch: feat/API-01  ·  Merged: aaa8bba
+
+**Approach.**
+- `src/desyncio/__init__.py` re-exports the D036 list: `Resource`, `PriorityResource`, `PreemptiveResource`, `Preempted`, `Container`, `Store`, `PriorityStore`, `FilterStore`, `Interrupt`, `TimeSeries`, `RealIOError`, `SimulationDeadlock` and `RealTimePacer`, plus `run`, `sim` and `__version__`. It has one import line per module, sorted, and a docstring listing the public API.
+- `tests/test_import.py` checks:
+  - the exact `__all__` set;
+  - that each name is the same object as in its defining module;
+  - that a star-import gives exactly `__all__`;
+  - that each submodule imports first, then `desyncio`, in a fresh subprocess;
+  - an AST guard against `from desyncio import sim` inside the package.
+
+**asyncio internals.** None. The trap is Python's import system. `desyncio.sim` is both a submodule and, once `__init__` runs, the `sim` facade object bound over it. `monitor.py`'s `from desyncio import sim` could therefore get the *module*, depending on import order. That broke 16 monitor tests and failed mypy once `__init__` imported monitor. The fix is `from desyncio.sim import sim` (D037).
+
+**Trade-offs.** The implementer's first fix was an import-order workaround in `__init__` (`# isort: skip`). It was replaced by fixing the import at its source.
+
+**Review findings.**
+- The implementer stopped on two blockers outside its files. The lead extended ownership under D037: the INT-01 test `test_not_exported_at_top_level` was inverted (a permitted spec change), and the monitor.py import was fixed.
+- PASS on the first review. 688 tests pass on 3.13 and on 3.14.
+- The mutations were caught: reverting the `sim` import fails the AST guard, and an import cycle in resource.py fails the suite.
+- SHOULD:
+  - add a named subprocess test that `import desyncio` succeeds, so a cycle fails by name and not as a collection error;
+  - generalise the AST guard to any `from desyncio import X` inside the package.
+- Process note: the lead asked the implementer to squash its WIP commit and force-push, but the environment blocked that as a destructive git action, so the WIP commit `843549e` stays in history.
+
+**Gotchas.** Inside the package, never write `from desyncio import <name>`, because a package attribute can shadow a submodule of the same name. Import from the defining module.
+
+**Follow-ups.** The SHOULDs above. DOC-02 uses top-level imports, and the README lists the exports.
+
+
+## DOC-02 — Primitives guide (2026-11-09, batch 13)
+Branch: feat/DOC-02 (+ fix/DOC-02-1)  ·  Merged: b3746f4
+
+**Approach.**
+- `docs/primitives.md` gives each primitive (Resource, PriorityResource, PreemptiveResource/Preempted, Container, Store, FilterStore, PriorityStore, interrupts, the monitor hook and TimeSeries, and `sim.random`) three things: an example, a "what is asyncio, what is ours" table, and a guarantees section.
+- The six scenarios are bank tellers, fuel tank, producer/consumer, machine breakdown, machine-shop preemption and car wash (`sim.random`, D026). The guide has 24 executed examples, and most guarantees are pinned by one.
+- Convention: a ```` ```python ```` block is a complete example, and the ```` ```text ```` block right after it is its exact stdout. `tests/test_docs_examples.py` runs every python block with `exec` in fresh globals, compares the stdout, and runs it twice for determinism. It also checks:
+  - imports are top-level only (`from desyncio import ...`);
+  - the guide mentions every primitive and the D030, D031, D034 and D023 limits;
+  - the README links the guide, its example runs, and its "Public API" bullet list equals `desyncio.__all__`.
+- `ruff format` also formats python blocks inside Markdown, so the gate's `ruff format --check .` covers the guide's examples.
+- The README status note ("target API") was false and was rewritten.
+
+**asyncio internals.** The guide explains, from the source:
+- `Store` and `PriorityStore` delegate to `asyncio.Queue` and `asyncio.PriorityQueue`.
+- `Container` and `FilterStore` are built on `asyncio.Condition` with tickets.
+- `PriorityResource` waiting is hand-written per-request futures (D030).
+- Interrupts are `task.cancel()` plus `uncancel()` (D024).
+- A detail found in review: `uncancel()` at `__aexit__` undoes only the interrupt's own cancel. If a real cancel also fired, `task.cancelling()` stays one higher after the block. That is how an enclosing `timeout()` or `TaskGroup` knows the cancel is still pending.
+
+**Trade-offs.**
+- The examples are checked by exact stdout, not by doctest. Whole programs read better than `>>>` sessions, and a changed number fails loudly.
+- The car-wash output depends on CPython's `Random(str)` seeding and its `expovariate`/`uniform` algorithms. It passes on 3.13 and 3.14. If CPython changes those algorithms, the example fails on purpose.
+
+**Review findings.**
+- FAIL in round 1:
+  - MUST: the guide claimed `cancelling()` is restored after an interrupted block even when a real cancel also fired. That is false (it stays +1). The wording was corrected and an executed example pins both cases.
+  - Lead promotion (D038): the extractor silently skipped indented fences, so an example could go unrun with the suite still green. Guards were added against indented and tilde fences, and fence lines must equal twice the parsed blocks. The tests are also parametrized per example (ids such as `19-guarantees`), so one failure no longer hides the rest.
+- PASS on re-review. 788 tests on 3.13 and 3.14; `GATE PASS`.
+
+**Gotchas.** Read the README export list and the guide's claims as tests: changing the public API or a guarantee breaks `tests/test_docs_examples.py`, by design (D011).
+
+**Follow-ups (SHOULD).**
+- A ```` ```Python ```` or ```` ```python3 ```` fence is parsed but never run, and the suite stays green (only the test count drops). Fix it with an allowlist of fence languages.
+- The substring tests (`test_guide_covers_every_primitive`, `test_guide_documents_the_known_limits`) pin little.
+- Split the three preemption edge cases into separate headed examples, for readability.
+- The `src/desyncio/interrupt.py` module docstring repeats the false `cancelling()` sentence (D038).
+- Turn some prose-only claims into examples. The reviewer probed them and they are true: the Resource monitor event sequence, a raising filter leaving the store unchanged, `Container` amount > capacity raising ValueError, no monitor call for a cancelled `Container.get`, and the monitor call on an immediate shutdown.

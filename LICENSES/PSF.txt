@@ -9,6 +9,10 @@ Adapted portions:
   adapted from the _source_traceback trimming in BaseEventLoop.call_at
   (Lib/asyncio/base_events.py) and TimerHandle.__init__
   (Lib/asyncio/events.py), CPython 3.13
+- src/desyncio/interrupt.py, _State and Interruptible.__aenter__,
+  __aexit__ and _deliver
+  adapted from Lib/asyncio/timeouts.py, class Timeout (_State,
+  __aenter__, __aexit__, _on_timeout), CPython 3.13
 
 Copyright (c) 2001 Python Software Foundation; All Rights Reserved
 

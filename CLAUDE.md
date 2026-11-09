@@ -1,6 +1,7 @@
 # Orchestration protocol
 
-Read `AGENTS.md` first: it holds the project's principles and conventions.
+Read `AGENTS.md` first: it holds the project's principles and conventions. Then read
+`docs/handoff.md`: it holds the current state, in-flight branches and next steps.
 Every agent you spawn must follow it too; tell them to read it.
 
 You are the **lead**. Run this session on Opus (`claude --model opus`).
@@ -40,3 +41,15 @@ You plan, dispatch, review results and merge. You do **not** write feature code 
 - A test edited to make it pass is a MUST finding unless the spec changed.
 - No new dependencies, no secrets, no network calls in tests without a recorded decision.
 - If a feature's spec is ambiguous, ask the human instead of inventing behaviour.
+
+## Sessions and handoff
+- Start each new module in a **fresh lead session** (a new context window). Also start one when the
+  current context is getting long. The repo, not the conversation, carries the state.
+- At the end of every batch, and before a session ends mid-batch, rewrite `docs/handoff.md`:
+  - what is merged and what is in flight, with branch names, fix-round counts and next step per feature;
+  - decisions still to record;
+  - next batches;
+  - lessons learned.
+- Push every unmerged `feat/*` and `fix/*` branch, so the next session (a fresh container) can see it.
+- Subagent reports go only to the session that spawned them. Finish or abandon in-flight agents before
+  handing off, and record their findings in the handoff.

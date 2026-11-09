@@ -21,32 +21,19 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 """
 
 import asyncio
-import itertools
 import math
-import random
-import weakref
 from collections.abc import Coroutine
+from random import Random
 from typing import Any
 
+from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
-from desyncio.runners import current_rng_streams
+from desyncio.runners import current_random_streams
 
 _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
     "VirtualTimeLoop; there is no such loop running here"
 )
-
-# Per-loop counter for default task names.
-#
-# asyncio names tasks "Task-N" from a counter shared by the whole process, so
-# a second desyncio.run() in the same process would get different names than
-# the first. We keep one counter per loop instead. It lives here (not on the
-# loop object) because loop.py is not ours to edit. A WeakKeyDictionary keyed
-# by the loop means the entry disappears when the loop is garbage collected,
-# so closed loops do not leak and a new loop always starts at 1.
-_proc_counters: weakref.WeakKeyDictionary[
-    VirtualTimeLoop, "itertools.count[int]"
-] = weakref.WeakKeyDictionary()
 
 
 def _loop() -> VirtualTimeLoop:
@@ -123,9 +110,10 @@ class Sim:
         Args:
             coro: a coroutine object (``worker()``, not ``worker``).
             name: the task's name (``task.get_name()``). Default
-                ``"proc-N"`` with N counting from 1 per run, so names are
-                identical in every run of the same model. Trace consumers
-                should read ``Task.get_name()``.
+                ``"proc-N"`` from the loop's one per-run counter, shared with
+                ``asyncio.create_task`` and ``TaskGroup`` (see
+                ``VirtualTimeLoop.create_task``), so names are identical in
+                every run of the same model.
 
         Raises:
             TypeError: ``coro`` is not a coroutine object.
@@ -143,12 +131,9 @@ class Sim:
             if asyncio.iscoroutine(coro):
                 coro.close()
             raise
-        if name is None:
-            counter = _proc_counters.setdefault(loop, itertools.count(1))
-            name = f"proc-{next(counter)}"
         return loop.create_task(coro, name=name)
 
-    def rng(self, name: str) -> random.Random:
+    def random(self, name: str) -> Random:
         """Return the named random stream of this run (same object each call).
 
         Streams derive from the ``seed`` given to ``desyncio.run``: the same
@@ -158,7 +143,48 @@ class Sim:
             RuntimeError: outside ``desyncio.run(...)``.
         """
         _loop()
-        return current_rng_streams().stream(name)
+        return current_random_streams().stream(name)
+
+    def interruptible(self) -> Interruptible:
+        """Return an async context manager marking code that may be interrupted.
+
+        Use it like ``asyncio.timeout()``::
+
+            try:
+                async with sim.interruptible() as scope:
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                print(exc.cause, scope.interrupted)
+
+        Another process calls ``sim.interrupt(task, cause)``; the block then
+        exits with ``desyncio.interrupt.Interrupt``. See that module's
+        docstring for the full analogy and mechanism.
+
+        Raises:
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        _loop()
+        return Interruptible()
+
+    def interrupt(self, task: "asyncio.Task[Any]", cause: object = None) -> None:
+        """Interrupt ``task``'s innermost active ``interruptible()`` block.
+
+        The interrupt is delivered at the current virtual time, at the task's
+        current ``await`` (or the next one, if its wait already completed this
+        instant): the block exits with ``Interrupt(cause)``. Like a timeout
+        firing, it is ``task.cancel()`` underneath, and the block translates
+        the cancellation in ``__aexit__``. A real ``task.cancel()`` always
+        wins. A second ``interrupt`` to a block that is already interrupted
+        is ignored (the first cause is kept); once the block has exited a new
+        ``interruptible()`` block is needed.
+
+        Raises:
+            RuntimeError: ``task`` is finished, is the calling task itself, or
+                is not inside an ``interruptible()`` block; or outside
+                ``desyncio.run(...)``.
+        """
+        _loop()
+        interrupt_task(task, cause)
 
 
 sim = Sim()

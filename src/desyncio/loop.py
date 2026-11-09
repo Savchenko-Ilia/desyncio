@@ -14,11 +14,13 @@ Every iteration of ``BaseEventLoop._run_once`` does roughly this:
    ``_scheduled`` to ``_ready``.
 5. Run everything in ``_ready``.
 
-A simulation must never wait in step 3. :class:`VirtualTimeLoop` therefore
-(a) answers ``time()`` from a :class:`~desyncio.clock.VirtualClock`, and
+A simulation must not wait for the real world in step 3. :class:`VirtualTimeLoop`
+therefore (a) answers ``time()`` from a :class:`~desyncio.clock.VirtualClock`, and
 (b) swaps the selector for :class:`_JumpingSelector`, whose ``select`` moves
-the clock to the earliest timer instead of sleeping. Step 4 then sees that
-timer as due and the loop carries on, having skipped the wait entirely.
+the clock to the earliest timer. In fast mode it does so at once, skipping the
+wait entirely. In real-time mode (a :class:`~desyncio.realtime.RealTimePacer`)
+it first waits ``virtual_dt / speed`` of wall time, interruptibly. Step 4 then
+sees the timer as due and the loop carries on.
 
 Same-time ordering and the resolution window
 --------------------------------------------
@@ -46,19 +48,22 @@ loudly.
 
 import asyncio
 import heapq
+import itertools
 import math
 import selectors
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextvars import Context
 from typing import Any
 
 from desyncio.clock import VirtualClock
 from desyncio.guards import RealIOGuardMixin
+from desyncio.realtime import MAX_REAL_WAIT, RealTimePacer
 from desyncio.scheduling import (
     DEFAULT_PRIORITY,
     PriorityTimerHandle,
     SequenceCounter,
 )
+from desyncio.trace import Tracer, TraceSink, _TracedCoroutine
 
 
 class SimulationDeadlock(RuntimeError):
@@ -70,7 +75,7 @@ class SimulationDeadlock(RuntimeError):
 
 
 class _JumpingSelector(selectors.BaseSelector):
-    """Wraps a real selector; ``select`` advances virtual time, never sleeps.
+    """Wraps a real selector; ``select`` advances virtual time.
 
     The real selector is still used for registration and is still polled
     (with timeout 0) on every call. That matters because the loop's
@@ -79,11 +84,17 @@ class _JumpingSelector(selectors.BaseSelector):
     loop's own thread (the byte is already in the pipe) is seen on the next
     iteration.
 
-    This does **not** support wake-ups from other threads. The poll never
-    waits, so if the loop is idle it jumps the clock or raises
-    :class:`SimulationDeadlock` before a real thread can write its byte
-    (D006). Real threads are unsupported; ``run_in_executor`` and
-    ``to_thread`` are refused by :mod:`desyncio.guards`.
+    **Fast mode** (no pacer, or speed ``inf``): the poll never waits. If the
+    loop is idle it jumps the clock or raises :class:`SimulationDeadlock`
+    before a real thread can write its byte, so wake-ups from other threads
+    are not waited for (D006). ``run_in_executor`` and ``to_thread`` are
+    refused by :mod:`desyncio.guards`.
+
+    **Real-time mode** (a pacer with finite speed): an idle ``select`` first
+    waits on the real selector for ``(when - now) / speed`` seconds, so a
+    byte in the self-pipe (speed change, pause, resume, or a user thread's
+    ``call_soon_threadsafe``) ends the wait early. The deadlock rule is
+    unchanged unless the pacer is paused.
     """
 
     def __init__(self, real: selectors.BaseSelector, loop: "VirtualTimeLoop") -> None:
@@ -112,10 +123,71 @@ class _JumpingSelector(selectors.BaseSelector):
     def close(self) -> None:
         self._real.close()
 
+    def _select_paced(
+        self, pacer: RealTimePacer
+    ) -> list[tuple[selectors.SelectorKey, int]] | None:
+        """Real-time mode's idle step. ``None`` means "use the fast path".
+
+        Called only when idle (nothing ready, no events). Steps:
+
+        1. Paused: wait with no timeout for a wake-up; virtual time stays put.
+        2. Else wait ``(min(when, limit) - now) / speed`` real seconds. The
+           limit is a ``_BoundedClock``'s ``until``, so we never wait for
+           time beyond it.
+        3. Full wait: ``advance_to(when)`` (a bounded clock raises there if
+           ``when`` is past ``until``). Interrupted wait: advance only by
+           ``elapsed * speed``, capped at the target, and return the events.
+
+        A real wait longer than ``MAX_REAL_WAIT`` (one day) is cut to one
+        chunk. A chunk that ends with no events is *not* a full wait: the
+        clock advances by ``elapsed * speed`` (capped at the target), we
+        return ``[]`` and ``_run_once`` comes back for the next chunk.
+        """
+        loop = self._loop
+        clock = loop.clock
+        now = clock.now
+        # ``limit`` exists on runners._BoundedClock. When the runner freezes
+        # it at ``now`` for cleanup, real-time pacing must not apply: cleanup
+        # either needs no time to pass or fails exactly as in fast mode.
+        limit: float = getattr(clock, "limit", math.inf)
+        if limit <= now:
+            return None
+        speed, paused = pacer.snapshot()
+        wall = pacer.wall_clock
+        if paused:
+            return wall.wait(None, self._real)
+        scheduled = loop._scheduled  # type: ignore[attr-defined]  # noqa: SLF001
+        if speed == math.inf or not scheduled:
+            return None  # fast mode, or deadlock (raised by the fast path)
+        when: float = scheduled[0]._when
+        target = min(when, limit)
+        real_timeout = (target - now) / speed
+        # select() overflows above ~9.2e9 s, so wait at most one chunk.
+        chunked = real_timeout > MAX_REAL_WAIT
+        if chunked:
+            real_timeout = MAX_REAL_WAIT
+        started = wall.monotonic()
+        events = wall.wait(real_timeout, self._real) if real_timeout > 0 else []
+        if not events and not chunked:
+            clock.advance_to(when)  # waited the full time
+            return events
+        elapsed = wall.monotonic() - started
+        advanced = now + elapsed * speed
+        if chunked and not events:
+            # A whole chunk passed but the timer is still ahead. If
+            # ``elapsed * speed`` is below half a float step of ``now`` the
+            # sum rounds back to ``now`` and the loop would never progress;
+            # move at least one float step instead.
+            advanced = max(advanced, math.nextafter(now, math.inf))
+        # Returning [] (chunk) or the events makes _run_once iterate again;
+        # the next idle select waits the next chunk (or the rest).
+        clock.advance_to(min(target, advanced))
+        return events
+
     def select(
         self, timeout: float | None = None
     ) -> list[tuple[selectors.SelectorKey, int]]:
-        """Poll real fds without blocking; if idle, jump to the next timer.
+        """Poll real fds; if idle, advance to the next timer.
 
         ``_run_once`` passes ``timeout == 0`` when callbacks are ready (or the
         loop is stopping): then we only poll. Otherwise it is positive or
@@ -124,6 +196,13 @@ class _JumpingSelector(selectors.BaseSelector):
         events = self._real.select(0)
         if events or timeout == 0:
             return events
+
+        pacer = self._loop.pacer
+        if pacer is not None:
+            paced = self._select_paced(pacer)
+            if paced is not None:
+                return paced
+            # None: fast behaviour applies (speed inf, frozen, or no timers).
 
         # _run_once already popped cancelled timers off the head of the heap
         # before computing the timeout, so [0] is a live timer. Cancelled
@@ -146,13 +225,60 @@ class _JumpingSelector(selectors.BaseSelector):
         )
 
 
+class _LoopState:
+    """desyncio's own per-loop state, kept off the loop's instance dict.
+
+    Why a separate object: CPython 3.13 stores an instance's attributes
+    inline (keys shared by all instances, values in the object) only up to a
+    small fixed count. ``BaseEventLoop`` and its subclasses already use 28;
+    adding more made the loop fall back to a real per-instance dict, and the
+    attribute loads in the stock ``_run_once`` (``self._ready``,
+    ``self._scheduled``, ...) lost their specialised fast path, which cost
+    ~10% per ``asyncio.sleep`` even with tracing off. So the loop has exactly
+    one attribute of ours, ``_state``, and everything else lives here.
+    ``tests/test_loop.py`` guards the count.
+
+    Attributes:
+        sequence: the timer tie-break counter (see :mod:`desyncio.scheduling`).
+        task_names: the ``proc-N`` counter for default task names (D015).
+        next_task_name: one-shot name for the next unnamed task, or ``None``.
+        tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
+            are wrapped with, or ``None`` (tracing off, or switched off for
+            new tasks by ``stop_tracing_new_tasks``).
+        closing: set by ``stop_tracing_new_tasks``; a sink error from then
+            on no longer stops the loop.
+        trace_error: the first exception the trace sink raised, or ``None``.
+        trace_error_pending: ``trace_error`` has not been raised yet.
+    """
+
+    __slots__ = (
+        "closing",
+        "next_task_name",
+        "sequence",
+        "task_names",
+        "trace_error",
+        "trace_error_pending",
+        "tracer",
+    )
+
+    def __init__(self) -> None:
+        self.sequence = SequenceCounter()
+        self.task_names = itertools.count(1)
+        self.next_task_name: str | None = None
+        self.tracer: Tracer | None = None
+        self.closing = False
+        self.trace_error: BaseException | None = None
+        self.trace_error_pending = False
+
+
 class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     """A ``SelectorEventLoop`` whose ``time()`` is a virtual clock.
 
     Use it with ``asyncio.Runner(loop_factory=VirtualTimeLoop)``. Timers
     (``sleep``, ``call_later``, ``call_at``, ``timeout``) are measured on the
     virtual clock, and whenever the loop would otherwise wait it jumps the
-    clock straight to the earliest pending timer.
+    clock straight to the earliest pending timer (or, with a ``pacer``, waits
+    the scaled real time first).
 
     Real I/O (sockets, subprocesses, executors, signals) is refused with
     :class:`~desyncio.guards.RealIOError`; see :mod:`desyncio.guards` for
@@ -160,20 +286,54 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     comes first in the bases so its overrides win.
     """
 
-    def __init__(self, start: float = 0.0, clock: VirtualClock | None = None) -> None:
+    def __init__(
+        self,
+        start: float = 0.0,
+        clock: VirtualClock | None = None,
+        pacer: RealTimePacer | None = None,
+        trace: TraceSink | None = None,
+    ) -> None:
         """Create the loop.
 
         Args:
             start: initial simulation time; ignored if ``clock`` is given.
             clock: an existing clock to drive instead of a fresh one.
+            pacer: if given, run in scaled real time under this pacer
+                (see :mod:`desyncio.realtime`); ``None`` is fast mode.
+            trace: a callable taking one :class:`~desyncio.trace.TraceRecord`;
+                it receives every task start, resume, finish and cancel (see
+                :mod:`desyncio.trace`). ``None`` (default) means no tracing
+                and no tracing code on any path.
         """
         # Set before super().__init__: the base constructor may call time().
         self.clock = clock if clock is not None else VirtualClock(start)
         super().__init__()
+        if trace is not None and not callable(trace):
+            self.close()  # the base constructor opened a selector and sockets
+            raise TypeError(
+                f"trace must be callable or None, got {type(trace).__name__}"
+            )
         # The base constructor created the real selector and registered the
         # self-pipe on it. Wrap it so the registrations carry over.
         self._selector = _JumpingSelector(self._selector, self)  # type: ignore[has-type]
-        self._sequence = SequenceCounter()
+        # All of desyncio's per-loop state is in one attribute; see
+        # _LoopState for why (instance-dict size and _run_once speed). Task
+        # naming (D015) uses one counter per loop, so names do not depend on
+        # how many tasks other loops (or plain asyncio) created before.
+        self._state = _LoopState()
+        if trace is not None:
+            self._state.tracer = Tracer(trace, self.time, self._on_trace_error)
+        self.pacer = pacer
+        if pacer is not None:
+            try:
+                pacer.bind(self)
+            except BaseException:
+                # The base constructor already opened a selector and the
+                # self-pipe sockets; close them or they leak (ResourceWarning
+                # "unclosed event loop" when this half-built loop is freed).
+                self.pacer = None
+                self.close()
+                raise
 
     @property
     def _clock_resolution(self) -> float:
@@ -238,9 +398,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         ``call_at`` uses 0.
         """
         if not isinstance(priority, int) or isinstance(priority, bool):
-            raise TypeError(
-                f"priority must be an int, got {type(priority).__name__}"
-            )
+            raise TypeError(f"priority must be an int, got {type(priority).__name__}")
         timer = self._schedule(
             when, priority, callback, args, context, "call_at_priority"
         )
@@ -278,12 +436,123 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             self._check_thread()  # type: ignore[attr-defined]
             self._check_callback(callback, api_name)  # type: ignore[attr-defined]
         timer = PriorityTimerHandle(
-            when, priority, self._sequence.next(), callback, args, self, context
+            when, priority, self._state.sequence.next(), callback, args, self, context
         )
         timer.drop_creation_frame()
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]
         timer.mark_scheduled()
         return timer
+
+    def name_next_task(self, name: str) -> None:
+        """Give the next task created without an explicit name this ``name``.
+
+        One-shot. ``desyncio.run`` uses it to call the main task ``main``,
+        because ``asyncio.Runner`` creates that task itself and cannot pass a
+        name.
+        """
+        self._state.next_task_name = name
+
+    def stop_tracing_new_tasks(self) -> None:
+        """Stop wrapping tasks created from now on (existing ones keep tracing).
+
+        ``desyncio.run`` calls this before ``Runner.close()``: closing makes
+        the runner create its own housekeeping tasks (async-generator and
+        executor shutdown), which are not part of the model and would only
+        add noise to the trace. Tasks that are still pending keep their
+        wrapper, so their cleanup ``cancel`` records are still emitted.
+
+        It also marks the start of shutdown: a sink error after this call no
+        longer stops the loop (stopping would abandon the cleanup and leave
+        tasks pending); it is only recorded, for :meth:`pop_trace_error`.
+        """
+        self._state.tracer = None
+        self._state.closing = True
+
+    @property
+    def trace_error(self) -> BaseException | None:
+        """The first exception the trace sink raised, or ``None``."""
+        return self._state.trace_error
+
+    def pop_trace_error(self) -> BaseException | None:
+        """Return the sink's exception if it has not been raised yet, once.
+
+        ``desyncio.run`` calls this after closing the loop, to raise a sink
+        error that happened during cleanup.
+        """
+        state = self._state
+        if not state.trace_error_pending:
+            return None
+        state.trace_error_pending = False
+        return state.trace_error
+
+    def _on_trace_error(self, exc: BaseException) -> None:
+        """The tracer's ``on_error``: record the sink's exception, stop the loop.
+
+        Called from inside a task's step, so it must not raise. ``stop()``
+        only sets a flag: the current ``_run_once`` iteration finishes (every
+        callback already in ``_ready`` runs, as it would have anyway) and
+        then ``run_forever`` returns, and our override raises ``exc``. This
+        is the same "unwind at an iteration boundary" idea as ``until``
+        (``runners._LimitReached``), which unwinds from the clock jump.
+        """
+        state = self._state
+        state.trace_error = exc
+        state.trace_error_pending = True
+        if not state.closing:
+            self.stop()
+
+    def run_forever(self) -> None:
+        """Run the loop; raise the trace sink's exception if it stopped it.
+
+        ``run_until_complete`` (and so ``asyncio.Runner.run``) call this, so
+        the sink's exception also comes out of those, instead of "Event loop
+        stopped before Future completed".
+        """
+        super().run_forever()
+        state = self._state
+        if state.trace_error_pending and not state.closing:
+            error = self.pop_trace_error()
+            assert error is not None
+            raise error
+
+    def create_task[T](
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        name: object = None,
+        context: Context | None = None,
+        eager_start: bool | None = None,
+    ) -> asyncio.Task[T]:
+        """Create a task with a deterministic default name; trace it if enabled.
+
+        Every route that makes a task ends here: ``asyncio.create_task``,
+        ``TaskGroup.create_task``, ``gather``/``ensure_future`` on a coroutine,
+        ``sim.spawn`` and ``asyncio.Runner.run`` all call
+        ``loop.create_task``. (A ``Task(...)`` built by hand bypasses it.)
+
+        *Naming.* Without an explicit ``name`` the task is called ``proc-N``,
+        N counting from 1 on this loop (stock asyncio uses a process-global
+        ``Task-N``, which differs between runs in one process).
+
+        *Tracing.* If the loop has a trace sink, the coroutine is wrapped in a
+        :class:`~desyncio.trace._TracedCoroutine` (see :mod:`desyncio.trace`).
+        Otherwise the user's coroutine goes to the Task untouched.
+        """
+        self._check_closed()  # type: ignore[attr-defined]
+        state = self._state
+        if name is None:
+            if state.next_task_name is not None:
+                name, state.next_task_name = state.next_task_name, None
+            else:
+                name = f"proc-{next(state.task_names)}"
+        tracer = state.tracer
+        if tracer is not None and asyncio.iscoroutine(coro):
+            coro = _TracedCoroutine(coro, str(name), tracer)
+        if eager_start is None:  # 3.13's create_task has no such keyword
+            return super().create_task(coro, name=name, context=context)
+        return super().create_task(
+            coro, name=name, context=context, eager_start=eager_start
+        )
 
     def time(self) -> float:
         """Return the current simulation time instead of ``time.monotonic()``."""

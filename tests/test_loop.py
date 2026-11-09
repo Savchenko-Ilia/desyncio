@@ -163,12 +163,15 @@ def test_threadsafe_wakeup_from_loop_thread_is_polled() -> None:
 def test_worker_thread_wakeup_is_a_deadlock() -> None:
     """D006: a real thread's ``call_soon_threadsafe`` is not waited for.
 
-    The worker sleeps 0.3 s of real time, then wakes the loop. But main awaits a
-    future with no timers pending, so the loop sees nothing to do and raises
-    ``SimulationDeadlock`` at once rather than waiting for the thread.
+    The worker is blocked on a ``threading.Event`` that the test only sets
+    *after* ``run`` has raised. So the worker provably has not woken the loop
+    when the loop gives up: main awaits a future with no timers pending, the
+    loop sees nothing to do and raises ``SimulationDeadlock`` at once instead
+    of waiting for the thread. No sleeps, no wall-clock bounds.
     """
     import threading
 
+    release = threading.Event()
     worker_done = threading.Event()
     threads: list[threading.Thread] = []
 
@@ -177,7 +180,7 @@ def test_worker_thread_wakeup_is_a_deadlock() -> None:
         fut: asyncio.Future[int] = loop.create_future()
 
         def worker() -> None:
-            time.sleep(0.3)
+            release.wait()
             try:
                 loop.call_soon_threadsafe(fut.set_result, 1)
             except RuntimeError:
@@ -189,11 +192,12 @@ def test_worker_thread_wakeup_is_a_deadlock() -> None:
         t.start()
         return await fut
 
-    t0 = time.perf_counter()
-    with pytest.raises(SimulationDeadlock):
-        run(main)
-    assert time.perf_counter() - t0 < 0.25  # failed before the worker woke
-    threads[0].join()
+    try:
+        with pytest.raises(SimulationDeadlock):
+            run(main)
+    finally:
+        release.set()  # only now may the worker proceed
+        threads[0].join()
     assert worker_done.is_set()
 
 
@@ -215,3 +219,37 @@ def test_cpython_adapted_code_carries_psf_notice() -> None:
     doc = loop_module.__doc__ or ""
     assert "No CPython code is copied" not in doc
     assert "not a substantive copy" not in doc
+
+
+# On the integration branch before LOOP-09, ``len(vars(VirtualTimeLoop()))``
+# was 28 (measured with CPython 3.13), i.e. 2 more than the stock
+# ``SelectorEventLoop`` (26 on 3.13). The stock loop's own count differs between
+# interpreters (27 on 3.14), so the limit is relative to the running
+# interpreter's baseline. Do not add instance attributes to the loop: put new
+# per-loop state on ``loop._state`` instead.
+_EXTRA_LOOP_ATTRS = 2
+
+
+def test_loop_instance_dict_is_not_larger_than_before_loop_09() -> None:
+    """Guard the loop's per-step speed through its instance-dict size.
+
+    CPython 3.13 keeps an object's attributes "inline" (no separate dict,
+    keys shared by every instance of the class) only up to a fixed number of
+    attributes. Past that limit the instance gets a real dict, and attribute
+    loads such as ``self._ready`` or ``self._scheduled`` in the stock
+    ``BaseEventLoop._run_once`` lose their specialised fast path. LOOP-09
+    first added three attributes (28 -> 31) and every ``asyncio.sleep``
+    became ~10% slower with tracing off. This count is deterministic, unlike
+    a timing test, so it is the regression guard; the benchmark numbers are
+    in docs/how-the-loop-works.md section 10.
+    """
+    stock = asyncio.SelectorEventLoop()
+    try:
+        limit = len(vars(stock)) + _EXTRA_LOOP_ATTRS
+    finally:
+        stock.close()
+    loop = VirtualTimeLoop()
+    try:
+        assert len(vars(loop)) <= limit, sorted(vars(loop))
+    finally:
+        loop.close()

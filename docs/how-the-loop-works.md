@@ -15,6 +15,7 @@ numbers drift):
 
 desyncio sources: [`clock.py`](../src/desyncio/clock.py), [`loop.py`](../src/desyncio/loop.py),
 [`scheduling.py`](../src/desyncio/scheduling.py), [`guards.py`](../src/desyncio/guards.py),
+[`realtime.py`](../src/desyncio/realtime.py), [`trace.py`](../src/desyncio/trace.py),
 and the runner behind `desyncio.run(...)`.
 
 ## 1. The idea in one paragraph
@@ -22,14 +23,19 @@ and the runner behind `desyncio.run(...)`.
 An asyncio loop does not know about wall-clock time except through two things: it
 asks `self.time()` what time it is, and it waits in exactly one place, the selector's
 `select(timeout)`. desyncio replaces `time()` with a virtual clock and replaces the
-selector with one whose `select` moves the clock forward instead of waiting. Everything
-else (tasks, futures, `sleep`, `Queue`, `TaskGroup`) is untouched stock asyncio.
+selector with one whose `select` moves the clock forward instead of waiting (in
+real-time mode, section 7: after waiting a scaled amount of real time). Everything
+else (tasks, futures, `sleep`, `Queue`, `TaskGroup`) is stock asyncio. The one thing
+desyncio adds around tasks is `create_task`, which gives every task a deterministic
+name and, if tracing is on, wraps its coroutine (section 10).
 
 ## 2. `_run_once`: one iteration of the loop
 
 `run_forever` just calls
 [`BaseEventLoop._run_once`](https://github.com/python/cpython/blob/3.13/Lib/asyncio/base_events.py)
-in a loop until `stop()` is called. One call is one *iteration*. It has five steps:
+in a loop until `stop()` is called. (That is the base class's `run_forever`;
+desyncio's override calls it unchanged and only adds re-raising the trace sink's
+error afterwards, see section 10.) One call is one *iteration*. It has five steps:
 
 ```
  _run_once()
@@ -157,7 +163,9 @@ property depends on `now` and is recomputed on each read. The setter discards th
 
 ## 4. Jumping the clock
 
-A virtual-time loop has two jobs: answer `time()` from a clock, and never wait.
+A virtual-time loop has two jobs: answer `time()` from a clock, and not wait for the
+real world. This section describes fast mode (no pacer, the default); section 7 adds
+the optional real-time wait.
 
 - [`VirtualClock`](../src/desyncio/clock.py) holds a float. `now` reads it, `advance_to(t)`
   moves it forward. It refuses to go backwards, and `t == now` is a no-op. It has no
@@ -166,7 +174,7 @@ A virtual-time loop has two jobs: answer `time()` from a clock, and never wait.
 - After `super().__init__()` has built the real selector and registered the loop's
   self-pipe on it, `VirtualTimeLoop` wraps it: `self._selector = _JumpingSelector(...)`.
 
-### `_JumpingSelector.select`
+### `_JumpingSelector.select` (fast mode)
 
 Because step 3 is the one place a loop waits, it is the one place to intervene.
 `select(timeout)` does this:
@@ -197,7 +205,9 @@ virtual loop must not block, because blocking means waiting on the real world, w
 the opposite of a simulation. So `select` raises `SimulationDeadlock`. A deadlock in a
 model is a bug, and failing loudly is better than hanging.
 
-Consequence for threads (decision D006): the loop does not wait for them. A thread
+(While a real-time pacer is *paused* the loop does wait; see section 7.)
+
+Consequence for threads (decision D006): in fast mode the loop does not wait for them. A thread
 resolves work by calling `call_soon_threadsafe`, which writes a byte to the self-pipe,
 and the loop would have to *wait* for that byte. The poll is `select(0)`, which does not
 wait. So, for a `threading.Thread` you start yourself that later calls
@@ -292,7 +302,65 @@ and the runner converts it to `SimulationCleanupError`. The loop is still closed
 The same freeze applies when `main` finishes normally: the limit becomes the finish
 time.
 
-## 7. Private attributes desyncio depends on, and PSF-adapted code
+## 7. Real-time mode
+
+Fast mode jumps the clock. Real-time mode (`desyncio.run(main(), speed=2)` or
+`pacer=RealTimePacer(...)`, in [`realtime.py`](../src/desyncio/realtime.py)) is the same
+`select`, with one extra step: **wait first, then advance**. `real_dt = virtual_dt / speed`.
+
+```
+events = real_selector.select(0)
+if events or timeout == 0:  return events
+(speed, paused) = pacer.snapshot()
+if paused:        return wall.wait(None, real_selector)     # until woken
+if speed is inf or no timer:  -> fast path (jump, or SimulationDeadlock)
+target = min(next_timer.when, until)
+real_timeout = (target - now) / speed
+chunked = real_timeout > MAX_REAL_WAIT                       # one day
+events = wall.wait(min(real_timeout, MAX_REAL_WAIT), real_selector)
+if no events and not chunked:  clock.advance_to(next_timer.when)   # full wait
+else:          clock.advance_to(min(target, now + elapsed_real * speed))
+return events
+```
+
+**Chunked waits.** `select` overflows above ~9.2e9 s, so a longer wait (slow speed or a
+far timer) is split into one-day chunks (`MAX_REAL_WAIT`, like asyncio's
+`MAXIMUM_SELECT_TIMEOUT`); a chunk that ends with no events advances the clock by
+`elapsed * speed` only (at least one float step) and the loop comes back for the next chunk.
+
+**The wait is the real selector's `select(real_timeout)`.** That is the one call a stock
+loop blocks in, and it returns early when a registered fd becomes readable. The
+self-pipe is such an fd: `loop.call_soon_threadsafe` writes a byte to it. So any thread
+(or the simulation itself) that changes the pacer wakes the loop at once, even in the
+middle of a one-hour wait.
+
+**Interrupted waits.** If the wait ends early after `elapsed` real seconds, virtual time
+advances by `elapsed * speed`, capped at the timer, and the events are returned. The woken
+callback runs, and the next idle `select` re-reads speed and pause state, so a new speed
+applies to the *rest* of the wait. Virtual time therefore always matches the real time
+that actually passed.
+
+**Pause and resume.** `pacer.pause()` sets a flag and pokes the self-pipe. While paused
+an idle `select` waits with no timeout, so virtual time cannot move; `resume()` pokes the
+pipe again. Ready callbacks still run while paused (they take no virtual time). Calls are
+safe from inside the simulation and from other threads. A pause issued inside the
+simulation can only be undone from another thread, because virtual time is frozen.
+
+**Deadlock rule.** Not paused, no timers, nothing ready: `SimulationDeadlock`, exactly as
+in fast mode (D006: real-time mode does not wait for threads). Paused: wait for resume.
+
+**`until`.** `_BoundedClock` exposes its `limit`. The wait covers only
+`min(next_timer, until) - now`, so real time is never spent on virtual time beyond
+`until`; after the full wait, `advance_to(next_timer)` raises `_LimitReached` as before.
+Once the runner freezes the limit for cleanup (section 6), pacing is skipped.
+
+**Wall clock seam.** `WallClock` has `monotonic()` and `wait(timeout, selector)`.
+`SystemWallClock` calls `selector.select(timeout)`; tests inject a fake whose `wait` adds
+to a fake time and returns, so they never sleep. The event order is identical at every
+speed; only wall time differs. Time spent running callbacks is not subtracted, so real
+time can drift slightly behind the ideal schedule.
+
+## 8. Private attributes desyncio depends on, and PSF-adapted code
 
 desyncio overrides and wraps rather than copying `_run_once`, but it still reads private
 state. If a CPython release changes any of these, the tests in `tests/` fail.
@@ -303,7 +371,7 @@ state. If a CPython release changes any of these, the tests in `tests/` fail.
 | `TimerHandle._when` | `_JumpingSelector.select`, `PriorityTimerHandle.sort_key` | the timer's due time |
 | `loop._selector` | `VirtualTimeLoop.__init__` | swap in `_JumpingSelector` |
 | `loop._clock_resolution` | property override | width of step 4's due window |
-| `loop._check_closed`, `_debug`, `_check_thread`, `_check_callback` | `_schedule` | same validation as stock `call_at` |
+| `loop._check_closed`, `_debug`, `_check_thread`, `_check_callback` | `_schedule`; `create_task` (`_check_closed` only) | same validation as stock `call_at` / `create_task` |
 | `Handle._source_traceback` | `PriorityTimerHandle.drop_creation_frame` | debug-mode creation stack trim |
 | `TimerHandle._scheduled` | `mark_scheduled` | lets `cancel()` count cancelled timers in the heap |
 | `BaseSelectorEventLoop._add_reader`, `_remove_reader` | not called; `RealIOGuardMixin` relies on them | the loop registers its own self-pipe through these private methods, so refusing the public `add_reader` does not break the loop |
@@ -322,7 +390,7 @@ it is marked with comments in the source and the license text is in
 [`LICENSES/PSF.txt`](../LICENSES/PSF.txt). Everything else only subclasses and overrides.
 `test_cpython_adapted_code_carries_psf_notice` guards this.
 
-## 8. Worked example
+## 9. Worked example
 
 Three tasks, run on `VirtualTimeLoop` via `asyncio.Runner(loop_factory=...)`:
 
@@ -377,13 +445,15 @@ To reproduce it, subclass `VirtualTimeLoop` and wrap `_run_once`:
 import asyncio
 from desyncio.loop import VirtualTimeLoop
 
+
 class Traced(VirtualTimeLoop):
     def _run_once(self):
         ready = list(self._ready)
-        heap = sorted(self._scheduled)       # PriorityTimerHandle sorts by its key
+        heap = sorted(self._scheduled)  # PriorityTimerHandle sorts by its key
         before = self.time()
         super()._run_once()
         print(before, len(ready), [(h._when, h.sequence) for h in heap], self.time())
+
 
 with asyncio.Runner(loop_factory=Traced) as runner:
     runner.run(main())
@@ -392,14 +462,113 @@ with asyncio.Runner(loop_factory=Traced) as runner:
 (The full script used to produce the table also patches `Handle._run` to record what ran;
 it is instrumentation only and lives outside the repository.)
 
-## 9. Where to read next
+## 10. Tracing and task names
+
+`desyncio.run(main(), trace=sink)` (or `VirtualTimeLoop(trace=sink)`) calls
+`sink(TraceRecord(t, seq, task_name, kind))` for every task `start`, `resume`, `finish`
+and `cancel`. `t` is virtual time, `seq` counts 0, 1, 2... per run. A task that ends with
+an exception records `finish`; only a `CancelledError` escaping it records `cancel`.
+
+**How a task step works.** A `Task` is a callback, `Task.__step`. The loop runs it from
+`_ready`; it calls `coro.send(None)` (first step) or `coro.send(value)` / `coro.throw(exc)`
+(later steps) on your coroutine and looks at what comes back:
+
+- a future was *yielded*: the task is waiting, and `__step` registers itself as that
+  future's done-callback, so a later step resumes it;
+- `StopIteration(value)`: the coroutine returned, the task's result is `value`;
+- an exception: the task ends with it (`CancelledError` marks the task cancelled).
+
+`__step` is C code (`_asyncio`) and cannot be overridden, but `send` and `throw` are the
+whole interface it uses. So with tracing on, `VirtualTimeLoop.create_task` wraps your
+coroutine in `desyncio.trace._TracedCoroutine`, an object with `send`, `throw`, `close`
+and `__await__` (it subclasses `collections.abc.Coroutine`, so `asyncio.iscoroutine` is
+true and the C `Task` accepts it). It records `start` on the first call, `resume` on later
+ones, and `finish` / `cancel` when the inner call raises `StopIteration` / an exception.
+Records are made inside the step, so `t` is the virtual time the step runs at.
+
+**What tracing off costs.** With `trace=None` nothing is wrapped: `task.get_coro()` is your
+own coroutine object and no tracing code runs per step, so the per-step cost is zero.
+There is a per-task cost, with or without tracing: `VirtualTimeLoop.create_task` is a
+Python-level override that names the task (`proc-N`) and checks for a tracer before
+calling the stock `create_task`. It runs once per task, never per step. Measured on
+CPython 3.13 (100,000 `loop.create_task` calls, best of 7, one machine): about 2.2 to
+2.8 µs per task before LOOP-09 and about 2.5 to 2.9 µs with it, so the override adds
+roughly 0.3 µs to a call that already cost about 2.5 µs.
+
+*Instance-dict layout.* The first version of LOOP-09 stored its state as three new loop
+attributes. That alone made every step slower: CPython 3.13 keeps an object's attributes
+inline in the object (keys shared by every instance of the class) only up to a fixed
+count, and the loop already has 28. Past it the loop gets an ordinary instance dict and
+the attribute loads in the stock `_run_once` (`self._ready`, `self._scheduled`, ...) lose
+their specialised fast path. Measured with 100,000 `await asyncio.sleep(0.001)` under
+`desyncio.run`, tracing off, best of 7 (lowest of six interleaved rounds): 0.732 s before
+LOOP-09, 0.819 s with the three attributes (31 entries in `vars(loop)`), 0.737 s now. All of
+desyncio's per-loop state (timer sequence counter, name counter, one-shot name, tracer)
+therefore lives in one `__slots__` object, `loop._state`, and `vars(loop)` has 28 entries
+as before. `test_loop_instance_dict_is_not_larger_than_before_loop_09` guards the count;
+it is deterministic, unlike a timing test.
+
+**Names.** Without an explicit name, a task created on a `VirtualTimeLoop` is `proc-N`
+from one per-loop counter, whoever creates it (`asyncio.create_task`, `TaskGroup`,
+`gather`, `sim.spawn`); `desyncio.run`'s main task is `main`. Stock asyncio's `Task-N`
+counter is process-global, so two runs in one process would differ. Mechanism:
+`VirtualTimeLoop.create_task` is overridden; all of those paths call
+`loop.create_task`. Naming is always on, with or without tracing. `Runner.close()`
+creates housekeeping tasks (async-generator and executor shutdown); `desyncio.run`
+stops wrapping new tasks before closing so they do not appear in the trace.
+
+**If the sink raises**, the simulation is not changed (principle 4, D016). The sink runs
+inside a task's step, so letting its exception out of `send`/`throw` would replace the
+task's result, exception or `CancelledError`, and with it what `TaskGroup`, `timeout()` and
+any awaiter see. Instead `Tracer.emit` catches the first exception (any `BaseException`),
+switches tracing off for the rest of the run and tells the loop, which calls
+`loop.stop()`. Like every `stop()`, that lets the current `_run_once` iteration finish:
+the callbacks already in `_ready` run exactly as they would have. Then `run_forever`
+returns, and `VirtualTimeLoop.run_forever` raises the sink's exception (the same object).
+So the model is unchanged up to the end of the iteration in which the sink failed, and
+nothing runs after it. This is the same idea as `until`, which unwinds the loop at an
+iteration boundary from the clock jump (`_LimitReached`, section 6). `desyncio.run` then
+closes the loop as usual (leftover tasks are cancelled, without tracing) and the
+exception comes out of `run`. A sink that fails during that cleanup (on a leftover task's
+`cancel` record) does not stop the loop, which would leave tasks pending; `run` raises
+its exception after the loop is closed. `loop.trace_error` keeps the first sink error.
+
+## 11. What desyncio reuses from asyncio
+
+Stock, unmodified CPython code:
+
+- `_run_once` (the five steps in section 2), the `_ready` deque and
+  `call_soon`, and the `_scheduled` heap with `heapq`;
+- `Task`, `Future`, `sleep`, `timeout`, `Queue`, `Lock`, `gather`, `TaskGroup`, and
+  `asyncio.Runner` (which `desyncio.run` drives; it only supplies the loop).
+
+Overridden or wrapped (our code, subclassing only):
+
+- `time()`, answered by the virtual clock;
+- the selector, wrapped by `_JumpingSelector` so that waiting becomes a clock jump;
+- `call_at` / `call_later`'s scheduling path, to key timers by `(when, priority, sequence)`;
+- the real-I/O entry points (sockets, subprocesses, executors, signals), which raise
+  `RealIOError`;
+- `create_task`, for deterministic names and optional tracing;
+- `run_forever`, which calls the stock one and then re-raises the trace sink's error
+  if the sink stopped the loop (section 10).
+
+Adapted from CPython (PSF License, D009): about ten lines, the body of
+`BaseEventLoop.call_at` re-created in `VirtualTimeLoop._schedule` because the stock method
+hardcodes `events.TimerHandle`. It is marked in the source and the license text is in
+[`LICENSES/PSF.txt`](../LICENSES/PSF.txt).
+
+## 12. Where to read next
 
 - [`tests/test_loop.py`](../tests/test_loop.py): the jumping, deadlock and cancelled-timer
   behaviour above, as executable specs.
 - [`tests/test_ordering.py`](../tests/test_ordering.py): tie-breaking and the resolution window.
+- [`tests/test_realtime.py`](../tests/test_realtime.py): pacing, speed changes, pause/resume,
+  `until` with real time, all on a fake wall clock.
 - [`tests/test_run.py`](../tests/test_run.py): `until`, cleanup freezing and seeds.
+- [`tests/test_trace.py`](../tests/test_trace.py): trace records, naming and zero cost.
 - [`tests/test_guards.py`](../tests/test_guards.py): which loop methods raise
   `RealIOError`, and that every `AbstractEventLoop` method is classified.
 - [`docs/decisions.md`](decisions.md): D006 (deadlock and threads), D008 (`until` and
-  priority semantics), D009 (PSF-adapted code).
+  priority semantics), D009 (PSF-adapted code), D015 (task names and tracing).
 - [`docs/implementation-log.md`](implementation-log.md): how each piece was built.

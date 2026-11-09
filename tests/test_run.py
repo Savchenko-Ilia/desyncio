@@ -16,8 +16,8 @@ import pytest
 
 import desyncio
 from desyncio.loop import SimulationDeadlock
-from desyncio.rng import RngStreams
-from desyncio.runners import SimulationCleanupError, current_rng_streams, run
+from desyncio.randomness import RandomStreams
+from desyncio.runners import SimulationCleanupError, current_random_streams, run
 
 
 def test_exported_from_package() -> None:
@@ -283,15 +283,15 @@ def test_seed_visible_in_main_and_spawned_task() -> None:
     got: dict[str, float] = {}
 
     async def child() -> None:
-        got["child"] = current_rng_streams().stream("x").random()
+        got["child"] = current_random_streams().stream("x").random()
 
     async def main() -> None:
-        got["main_seed"] = current_rng_streams().seed
+        got["main_seed"] = current_random_streams().seed
         await asyncio.create_task(child())
 
     run(main(), seed=7)
     assert got["main_seed"] == 7
-    assert got["child"] == RngStreams(7).stream("x").random()
+    assert got["child"] == RandomStreams(7).stream("x").random()
 
 
 def test_same_seed_same_stream_different_seed_differs() -> None:
@@ -299,7 +299,7 @@ def test_same_seed_same_stream_different_seed_differs() -> None:
         out: list[float] = []
 
         async def main() -> None:
-            out.extend(current_rng_streams().stream("a").random() for _ in range(3))
+            out.extend(current_random_streams().stream("a").random() for _ in range(3))
 
         run(main(), seed=seed)
         return out
@@ -310,8 +310,8 @@ def test_same_seed_same_stream_different_seed_differs() -> None:
 
 def test_streams_shared_within_one_run_and_fresh_per_run() -> None:
     async def main() -> tuple[float, float]:
-        s = current_rng_streams()
-        assert current_rng_streams() is s
+        s = current_random_streams()
+        assert current_random_streams() is s
         return s.stream("a").random(), s.stream("a").random()
 
     assert run(main(), seed=3) == run(main(), seed=3)
@@ -319,14 +319,14 @@ def test_streams_shared_within_one_run_and_fresh_per_run() -> None:
 
 def test_default_seed_is_zero() -> None:
     async def main() -> int:
-        return current_rng_streams().seed
+        return current_random_streams().seed
 
     assert run(main()) == 0
 
 
 def test_accessor_outside_run_raises() -> None:
     with pytest.raises(RuntimeError, match="run"):
-        current_rng_streams()
+        current_random_streams()
 
 
 def test_accessor_does_not_leak_after_run() -> None:
@@ -334,21 +334,21 @@ def test_accessor_does_not_leak_after_run() -> None:
 
     run(main(), seed=5)
     with pytest.raises(RuntimeError):
-        current_rng_streams()
+        current_random_streams()
 
 
 def test_no_submodule_named_run_shadows_the_function() -> None:
     assert callable(desyncio.run)
     assert desyncio.run is run
     runners = importlib.import_module("desyncio.runners")
-    assert hasattr(runners, "current_rng_streams")
+    assert hasattr(runners, "current_random_streams")
     assert importlib.util.find_spec("desyncio.run") is None
     with pytest.raises(ImportError):
         importlib.import_module("desyncio.run.nothing")
     # patching by dotted path hits the module attribute, not the function
-    with mock.patch("desyncio.runners.current_rng_streams") as fake:
-        assert runners.current_rng_streams is fake
-    assert runners.current_rng_streams is current_rng_streams
+    with mock.patch("desyncio.runners.current_random_streams") as fake:
+        assert runners.current_random_streams is fake
+    assert runners.current_random_streams is current_random_streams
 
 
 def test_overload_types() -> None:

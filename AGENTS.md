@@ -39,6 +39,11 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
    visualisation are consumers built on top, not part of the core.
 5. **No real I/O inside a simulation.** Sockets, subprocesses and executors are refused with a
    clear error.
+6. **Reuse asyncio first.** If asyncio already provides the behaviour (a queue, a lock, a semaphore,
+   a condition, cancellation, task groups, timeouts), use it: delegate to it or wrap it thinly, and
+   never re-implement it. Write our own waiting/queueing logic only where asyncio has no equivalent,
+   and then build it on asyncio's building blocks (`Condition`, futures). Say in the docstring what is
+   delegated. A hand-written replacement for existing asyncio functionality is a MUST review finding (D022).
 
 ---
 
@@ -84,8 +89,11 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
 - Name: **desyncio** (PyPI and GitHub).
 - License: **Apache-2.0**.
 - Python 3.13+.
+- Time is a unitless float, "seconds by convention" (D004).
+- Primitives use asyncio-style context managers: `async with resource:` (D019).
+- Interrupts work like `asyncio.timeout()`: `async with sim.interruptible():` blocks exit with a dedicated
+  `Interrupt` exception, delivered through cancellation underneath and translated at `__aexit__` (D020, D024).
 
 ## 7. Open questions
 
-- Base time unit (seconds vs configurable) and calendar/shift handling.
-- Public API shape for primitives (SimPy-like `request()` vs asyncio-like `async with resource`).
+- Calendar/shift handling (time unit itself is settled by D004).
