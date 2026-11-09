@@ -137,5 +137,14 @@ def test_validation() -> None:
         cal.to_sim(datetime(2026, 1, 1))  # naive
     with pytest.raises(TypeError):
         cal.to_sim(5)  # type: ignore[arg-type]  # deliberate
+    # In range locally, out of range once converted to UTC: ValueError, as
+    # to_datetime, not a bare OverflowError.
+    for out_of_range in (
+        datetime.max.replace(tzinfo=NEW_YORK),
+        datetime.max.replace(tzinfo=timezone(timedelta(hours=-5))),
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=5))),
+    ):
+        with pytest.raises(ValueError, match="out of the range"):
+            cal.to_sim(out_of_range)
     odd = timezone(timedelta(hours=5))
     assert Calendar(datetime(2026, 1, 1, tzinfo=odd)).tz is odd

@@ -119,9 +119,18 @@ class Calendar:
 
         Raises:
             TypeError: ``dt`` is not a ``datetime`` or is naive.
+            ValueError: ``dt`` is out of the range of ``datetime`` once
+                converted to UTC (e.g. ``datetime.max`` in a zone west of
+                UTC), as in ``to_datetime``.
         """
         _check_aware(dt, "dt")
-        return (dt.astimezone(UTC) - self._start_utc) / self._unit
+        try:
+            dt_utc = dt.astimezone(UTC)
+        except OverflowError:
+            raise ValueError(
+                f"dt={dt!r} is out of the range of datetime in UTC"
+            ) from None
+        return (dt_utc - self._start_utc) / self._unit
 
     def now(self) -> datetime:
         """``to_datetime(sim.now)``.
