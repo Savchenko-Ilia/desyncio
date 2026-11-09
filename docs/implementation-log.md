@@ -951,3 +951,19 @@ Branch: feat/CLN-04  ·  Merged: 747c800
 
 **Follow-ups (SHOULD).** Reject `from . import X` (`level >= 1 and module is None`) too. Optionally, assert the getters' intermediate wake order.
 
+## CLN-05 — One float validator (2026-11-09, batch 15)
+Branch: feat/CLN-05 (+ fix/CLN-05-1)  ·  Merged: fb22adf
+
+**Approach.** The new private module `src/desyncio/_validate.py` has `to_float(value, *, type_error, overflow_error, finite_error=None, normalise_zero=False)`. It rejects bool and non-numbers with `TypeError`, turns `OverflowError` into `ValueError`, and can check finiteness and normalise `-0.0`. The messages are `str.format` templates (`{type}`, `{value!r}`). Each of the four validators (clock, until, dt, speed) is now one call plus its own range check, with its exact old messages. D040 is the one behaviour change: `speed=10**400` raises `ValueError` instead of `OverflowError`.
+
+**asyncio internals.** None.
+
+**Trade-offs.** The source is the same size as before (a 44-line helper replaces about 40 lines in the callers). The gain is one place for the bool/overflow/NaN rules, not fewer lines. The clock builds its templates with an f-string around `what`. That is safe only while `what` is a brace-free internal constant, and a comment now says so.
+
+**Review findings.**
+- PASS. The reviewer compared old and new behaviour on 190 (input × validator) cases: type, message, return value and the sign of zero. The only differences were the D040 inputs.
+- The lead promoted the test-volume SHOULD to a MUST (D041): the redundant helper tests were dropped, the per-caller messages became one exact-message table with a bool row, and D040 got its own test. That took tests/test_clock.py from 264 lines to 229.
+- PASS on re-review.
+
+**Follow-ups (SHOULD).** `_helper_kwargs()` is only used once. The ids of the `_BIG` table rows print the full `10**400` value.
+

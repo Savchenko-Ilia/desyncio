@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 13. Module 2 is complete. The next session starts a clean-up batch or module 3, after the owner decides which and says "go"._
+_Last updated: 2026-11-09, end of batch 15 (clean-up done). Waiting on the owner's decision on the test-suite audit (`docs/test-audit.md`). Module 3 is still undefined._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -56,14 +56,24 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 
 **Release must be synchronous (D030).** Any `await` in an `__aexit__` is a cancellation point. RES-03 must keep `PriorityResource`'s release free of awaits.
 
-## Next batches
-Module 2 is done, and `docs/features.md` has nothing `todo`. AGENTS.md section 1 names only two scope items (the loop and the primitives). **Module 3 is not defined yet: ask the owner.** Candidates from the open questions are calendar/shift handling, LOOP-12 (the deferred benchmark) and statistics consumers.
+## Clean-up batches 14–15 — DONE
+- CLN-01 (fa6d5dc, 1 fix round), CLN-02 (5142464), CLN-03 (fea39d8), CLN-04 (747c800), CLN-05 (fb22adf, 1 fix round, D040/D041).
+- `integration` passes the gate with 821 tests on 3.13 and 3.14. Nothing is in flight; no agents are running.
+- D039: no behaviour changes for the reused pacer and `sim.random` in a fresh context. D040: `speed=10**400` raises `ValueError`. D041: CLN-05's tests were trimmed.
 
-A proposed clean-up batch (the owner must accept it and the lead must write it into `docs/features.md` first) groups the SHOULDs below by owned files so the features don't overlap:
-- **CLN-01 (interrupt/sim):** fix the false `cancelling()` sentence in the `interrupt.py` docstring (D038); `sim.random` from a fresh `contextvars.Context`.
-- **CLN-02 (loop internals):** use `itertools.count` instead of `SequenceCounter`; unify the four float validators; check `MAX_REAL_WAIT`.
-- **CLN-03 (real time):** the `pause()` warnings in docstrings; a reused pacer that ended paused.
-- **CLN-04 (tests/docs):** the fence-language allowlist in `tests/test_docs_examples.py`; a named `import desyncio` cycle test; the generalised AST import guard; the FilterStore re-park seniority test.
+## Next batches
+1. **Test-suite trim (pending the owner's decision).** The owner said the suite may be larger than needed. Three audits are condensed in `docs/test-audit.md`: about 801 → 525 items and about 9.4k → 7.1k lines, keeping every regression guard. Owner decisions asked:
+   - accept that docs examples become the only guard for some guarantees (with comments marking them);
+   - drop the tests that re-prove asyncio;
+   - add `mypy tests` to the gate (34 errors to fix first) or not;
+   - add the four gap tests.
+   If approved, write TST-01..04 into `docs/features.md`, split by files:
+   - resource + container;
+   - store + monitor;
+   - interrupt + asyncio_compat;
+   - the other module 1 files + docs_examples + import.
+   Brief each implementer from `docs/test-audit.md`. The rules: a mutation proof per merge, and no regression tests dropped.
+2. **Module 3: undefined.** Ask the owner. Candidates: calendar/shift handling, LOOP-12 benchmark, statistics consumers.
 
 ## Open questions for the owner
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
@@ -100,6 +110,8 @@ A proposed clean-up batch (the owner must accept it and the lead must write it i
 - **Never pipe `scripts/gate.sh` inside a `&&` chain** (D035): the chain sees the status of the last pipe stage. When the gate changes, gate older branches on the merged tree.
 - **No history rewrites:** the environment blocks force-pushes and amends of pushed commits. Ask agents for new commits on top.
 - **Promote a reviewer's SHOULD when it voids an acceptance criterion** (D038: a test that can skip an example silently voids "examples are run"). Let the re-review hunt for the same class of hole: in batch 13 it found another one, the fence-language case.
+- **Check test volume in review.** The owner cares about suite size: ask reviewers to judge new tests for redundancy, not just correctness (D041).
+- **Verify implementer claims that a reviewer can check.** CLN-04's implementer said relative imports were guarded; they weren't.
 - **Run the gate while the re-review runs.** They are independent, and doing both at once saves a round trip.
 - **Statistical tests:** pick parameters where the quantities you compare differ, and give the band against a spread over several seeds.
 
