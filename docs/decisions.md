@@ -215,3 +215,9 @@ RES-02 round 0 was built on `asyncio.Condition`. The review proved a leak. `Cond
 - A waiter cancelled after its future was resolved hands the unit to the next waiter instead of leaking it, as `Semaphore._acquire` does on `CancelledError`.
 - The waiting itself stays on asyncio futures. Only the ordering is ours (principle 6).
 This also removes the O(waiters) thundering herd.
+
+## D031 — STO-02 API calls (lead, accepted from the implementer)
+- **PriorityStore priority:** `put(item, priority=0)` (lower is served first). It follows SimPy's `PriorityItem`, but needs no wrapper class, and items are never compared. A key function is `put(x, priority=key(x))`. `items` is returned in get order.
+- **FilterStore has no `shutdown()`:** `Condition.notify_all()` needs the lock, so a synchronous `shutdown` (as in `Queue.shutdown`) can't be built on it. It is omitted rather than half-done. API-01 and DOC-02 must not claim it exists. An async variant can be a follow-up if the owner wants one.
+- **Same-instant barging:** a fresh `get` in the instant of a `put` can take the item ahead of a parked waiter. The reviewer showed that `Store`, `PriorityStore` and `FilterStore` behave identically here (all follow `asyncio.Queue`), so FilterStore is no less fair than STO-01. Strict arrival-order fairness would need hand-written ticket logic, which principle 6 rules out.
+

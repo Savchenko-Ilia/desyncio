@@ -674,3 +674,60 @@ Branch: feat/RND-01 + fix/RND-01-1  ·  Merged: ddc6dda
 
 **Follow-ups.** The SHOULDs above. D027: the gate tests only 3.13. Older log entries keep the old names (`sim.rng`, `RngStreams`, `derive_seed`) as history.
 
+## MON-01 — Monitors / TimeSeries (2026-11-09, batch 10b)
+Branch: feat/MON-01 + fix/MON-01-1  ·  Merged: 457ab52
+
+**Approach.** `src/desyncio/monitor.py` defines `TimeSeries`, which imports only `sim` and nothing from the primitives (principle 4). You wire it into a primitive with the D023 v2 hook, e.g. `Resource(1, monitor=lambda r: busy.record(r.count))`, and record the initial value yourself (D028).
+- `record(value)` stamps the value with `sim.now`, adds the area of the previous segment, and tracks min and max as it goes. `record` and `mean` are O(1); `samples` returns a tuple copy, which is O(n).
+- `mean(until=None)` integrates over `[first, until]`, where the last value holds until `until`; `None` means `sim.now`.
+- Rules, all tested: values must be finite int or float (`bool` is rejected); a rejected record changes nothing; for same-instant records the last one wins in the mean but all of them count for min and max; an empty series or an `until` before the last record raises `ValueError`; a zero-length span returns the last value; a `record` earlier than the last record raises `ValueError` (D029: one series per run).
+
+**asyncio internals.** None. It is a plain observer called synchronously from the primitives' monitor hook.
+
+**Trade-offs.** Incremental area against recomputing from the samples: a 1e5-record probe agreed with an `fsum` recomputation to within about 1e-14 relative error.
+
+**Review findings.**
+- Round 0 FAILED. At ρ=0.5, Lq equals utilisation (both 0.5), so recording `count` as the queue length, or swapping the two series, still passed. The lead also promoted two items under D029: a test for D016, and the time-going-backwards bug, where a reused series silently added negative area.
+- Fix round 1:
+  - ρ is now 0.6 (Lq=0.9), with bands of ±0.03 and ±0.12. Over seeds 1..10 the worst errors were 0.011 and 0.040.
+  - A deterministic count/queue_length test was added.
+  - A with/without-monitor test was added; it compares per-customer records.
+  - `record` now rejects a time before the last record.
+- Re-review PASSED. Each mutation was applied and caught by a failing test: count recorded as Lq, the series swapped, the time check removed, and a monitor that draws from `sim.random`.
+- SHOULD: add a floating-point `mean(until=...)` assertion on random data.
+
+**Gotchas.** A same-instant pair `(0,0),(0,1)` is normal when a task acquires at t=0. Pick an M/M/1 test load where the statistics you compare differ.
+
+**Follow-ups.** The SHOULD above. API-01 exports `TimeSeries`.
+
+## STO-02 — PriorityStore and FilterStore (2026-11-09, batch 10b)
+Branch: feat/STO-02  ·  Merged: 11f488a
+
+**Approach.** Both stores live in `src/desyncio/store.py`. They are separate classes, not subclasses of `Store`. The capacity check, the monitor check and the D023 v2 monitor call moved into module-level helpers that all three stores share. `Store`'s behaviour and messages are unchanged.
+- **PriorityStore:** `put(item, priority=0)`. A thin wrapper over `asyncio.PriorityQueue`, holding `(priority, next(itertools.count()), item)` entries. A dict keyed by sequence number mirrors the entries, so `items` (in get order) never reads `PriorityQueue._queue`. `shutdown` is a passthrough.
+- **FilterStore:** one `asyncio.Condition`.
+  - `get(filter=None)` does `wait_for(take_first_match)`, removing the item inside the predicate. `put` does `wait_for(len < capacity)`.
+  - Both call `notify_all()` under the lock; the monitor runs after the lock is released.
+  - It has no `shutdown()` (D031).
+
+**asyncio internals.**
+- `Condition.wait_for` returns as soon as the predicate is true, with no `await` in between, so the removal is atomic with `get` returning.
+- A getter cancelled after a notify re-acquires the lock inside `Condition.wait` and raises before its predicate runs, so nothing is removed.
+- Unlike RES-02 round 0 (D030), nothing needs the lock *after* a state change that must not be skipped. The release of the lock in `__aexit__` is synchronous.
+- `notify_all` wakes waiters in park order and the `Lock` admits them FIFO. So the longest-waiting matching getter takes the first matching item, and a non-matching getter re-parks without blocking a later one.
+
+**Trade-offs.** Priority via `put(..., priority=)` or a key function: the first was chosen (D031). Same-instant barging is accepted, because it matches `asyncio.Queue` (D031).
+
+**Review findings.**
+- PASS on round 0, with no MUSTs.
+- The reviewer ran a seeded stress test over 400 seeds per store: random putters and getters, cancels, and `sim.interrupt` inside `interruptible()`. There were no lost, duplicated or half-inserted items, and the mirror stayed consistent.
+- SHOULD:
+  - Pin same-instant barging parity with a test.
+  - Add a test that a getter keeps its seniority after re-parking.
+  - Add a test of a filter that reads `len(store)` or `items`.
+  - Record the missing `shutdown` as a decision (done: D031).
+
+**Gotchas.** `get(filter=...)` shadows a builtin, hence `# noqa: A002`. A filter runs under the store's lock, so it must not `await` or call `put`/`get`.
+
+**Follow-ups.** The SHOULDs above. A possible async `FilterStore.shutdown()`.
+
