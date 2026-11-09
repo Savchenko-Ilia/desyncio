@@ -196,3 +196,10 @@ Implemented as RND-01 (batch 10a), merged in ddc6dda after one fix round.
 ## D027 — Python 3.14 is supported but not gated (lead, open for the owner)
 `requires-python = ">=3.13"`, but `scripts/gate.sh` runs only the locked 3.13 interpreter. During RND-01 review, `uv run --python 3.14` showed one failure already present on `integration`: `tests/test_loop.py::test_loop_instance_dict_is_not_larger_than_before_loop_09`. It is unrelated to RND-01. The lead did not fix it, because it is outside batch 10's scope. Proposed to the owner: either add a 3.14 test run to the gate (plus a feature to fix that test), or document 3.13 as the only tested version.
 
+
+## D028 — Batch 10b contracts fixed before dispatch (lead)
+Specified up front, following the batch 9 lesson about contracts that cross features:
+- **MON-01, how it plugs in:** `TimeSeries` has no knowledge of primitives. The user connects it with the D023 v2 hook, e.g. `Resource(1, monitor=lambda r: busy.record(r.count))`. Because a monitor fires only on a change, the user records the initial value explicitly (`busy.record(0)` at t=0). No adapter class.
+- **MON-01, `mean(until=None)`:** time-weighted over `[first record, until]`, where the last value holds until `until`. `until=None` means `sim.now`, so it works only inside a run; after the run, pass `until=` explicitly. `until` earlier than the last record is a `ValueError`. An empty series raises `ValueError`. If the span has zero length, `mean()` returns the last value. `min`, `max` and `last` are over the recorded values.
+- **RES-02 and STO-02:** the monitor is `monitor(primitive)` per D023 v2, with the same helper pattern as `Resource._changed` and `Store._notify`. Both live beside the existing classes, in the same modules, and do not change RES-01 or STO-01 behaviour.
+The owner may revise these. They are the minimal reading of the spec.
