@@ -22,9 +22,10 @@ integration branch and opens a PR to `main` from it.
 Start a Claude Code session (cloud or local, on Opus) and send:
 
 ```
-Read AGENTS.md, CLAUDE.md and docs/features.md. Run the next batch.
+Read AGENTS.md, CLAUDE.md and docs/handoff.md. Continue from the handoff: finish the in-flight batch if any, then report and wait for "go".
 ```
 
-The lead stops after each batch with a report and waits for "go".
+The lead stops after each batch with a report and waits for "go". It rewrites `docs/handoff.md`
+after each batch, and each module starts in a fresh session (CLAUDE.md, "Sessions and handoff").
 For every merged feature it adds an entry to `docs/implementation-log.md`: how it was built,
 the asyncio internals involved, trade-offs and review findings.

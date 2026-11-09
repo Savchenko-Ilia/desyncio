@@ -149,3 +149,10 @@ In STO-01's review, a monitor that raised during `Store.get` lost the item: it w
 - A user who wants monitor errors to be fatal sets `loop.set_exception_handler(...)`.
 - This differs from trace sinks (D016), which abort the run. A sink is the whole trace; a monitor is a per-primitive callback, so it follows asyncio's callback semantics.
 Applied as fix rounds: RES-01 (round 1, redirected), CON-01 (round 1: `monitor(level)` → `monitor(container)` plus this contract) and STO-01 (round 1: no lost item, plus this contract).
+
+## D025 — One module per lead session; `docs/handoff.md` carries the state (owner request)
+The owner asked for new modules to start in new context windows. The repo now carries the lead's working state:
+- `docs/handoff.md` is rewritten after every batch and before any mid-batch handoff;
+- unmerged `feat/*` and `fix/*` branches are pushed;
+- CLAUDE.md has a "Sessions and handoff" section;
+- the start prompt in `docs/agent-workflow.md` points at the handoff.
