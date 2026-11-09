@@ -1,12 +1,16 @@
 """Tests for the virtual clock (LOOP-01)."""
 
 import math
+from collections.abc import Callable
 
 import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from desyncio.clock import VirtualClock
+from desyncio.realtime import _check_speed
+from desyncio.runners import _check_until
+from desyncio.sim import _check_delay
 
 
 def test_default_start_is_zero() -> None:
@@ -159,72 +163,68 @@ def test_helper_options() -> None:
     assert math.copysign(1.0, kept) == 1.0
 
 
-def test_clock_messages_unchanged() -> None:
-    with pytest.raises(TypeError) as t:
-        VirtualClock(start="a")  # type: ignore[arg-type]
-    assert str(t.value) == "start must be a real number (int or float), got str"
-    with pytest.raises(TypeError) as b:
-        VirtualClock(start=True)
-    assert str(b.value) == "start must be a real number (int or float), got bool"
-    with pytest.raises(ValueError) as o:
-        VirtualClock(start=_BIG)
-    assert (
-        str(o.value)
-        == "start must be a finite number, got an int too large for a float"
-    )
-    with pytest.raises(ValueError) as n:
-        VirtualClock().advance_to(math.nan)
-    assert str(n.value) == "advance_to must be a finite number, got nan"
+def _advance_to(value: object) -> None:
+    VirtualClock().advance_to(value)  # type: ignore[arg-type]
 
 
-def test_until_messages_unchanged() -> None:
-    from desyncio.runners import _check_until
+# Exact messages per caller. The older tests use loose ``match=`` patterns, so
+# this table is what proves CLN-05 left every message unchanged.
+# fmt: off
+_MESSAGE_CASES = [
+    # (callable, bad input, exception type, exact message)
+    (VirtualClock, "a", TypeError,
+     "start must be a real number (int or float), got str"),
+    (VirtualClock, True, TypeError,
+     "start must be a real number (int or float), got bool"),
+    (VirtualClock, _BIG, ValueError,
+     "start must be a finite number, got an int too large for a float"),
+    (_advance_to, math.nan, ValueError,
+     "advance_to must be a finite number, got nan"),
+    (_check_until, "a", TypeError,
+     "until must be a real number or None, got str"),
+    (_check_until, _BIG, ValueError,
+     "until must be finite, got an int too large for a float"),
+    (_check_until, math.nan, ValueError,
+     "until must be finite, got nan"),
+    (_check_until, -1, ValueError,
+     "until must be >= the start time 0.0, got -1.0"),
+    (_check_delay, "a", TypeError,
+     "dt must be a real number, got str"),
+    (_check_delay, _BIG, ValueError,
+     "dt must be finite, got an int too large"),
+    (_check_delay, math.nan, ValueError,
+     "dt must be finite, got nan"),
+    (_check_delay, -1, ValueError,
+     "dt must be >= 0, got -1.0"),
+    (_check_speed, "a", TypeError,
+     "speed must be a real number, got str"),
+    (_check_speed, math.nan, ValueError,
+     "speed must be > 0 (or math.inf), got nan"),
+    (_check_speed, 0, ValueError,
+     "speed must be > 0 (or math.inf), got 0"),
+]
+# fmt: on
 
-    with pytest.raises(TypeError) as t:
-        _check_until("a")
-    assert str(t.value) == "until must be a real number or None, got str"
-    with pytest.raises(ValueError) as o:
-        _check_until(_BIG)
-    assert str(o.value) == "until must be finite, got an int too large for a float"
-    with pytest.raises(ValueError) as n:
-        _check_until(math.nan)
-    assert str(n.value) == "until must be finite, got nan"
-    with pytest.raises(ValueError) as neg:
-        _check_until(-1)
-    assert str(neg.value) == "until must be >= the start time 0.0, got -1.0"
-    assert math.copysign(1.0, _check_until(-0.0)) == -1.0
+
+@pytest.mark.parametrize(("func", "bad", "exc", "message"), _MESSAGE_CASES)
+def test_caller_messages_unchanged(
+    func: Callable[[object], object], bad: object, exc: type[Exception], message: str
+) -> None:
+    with pytest.raises(exc) as info:
+        func(bad)
+    assert str(info.value) == message
 
 
-def test_delay_messages_unchanged() -> None:
-    from desyncio.sim import _check_delay
-
-    with pytest.raises(TypeError) as t:
-        _check_delay("a")
-    assert str(t.value) == "dt must be a real number, got str"
-    with pytest.raises(ValueError) as o:
-        _check_delay(_BIG)
-    assert str(o.value) == "dt must be finite, got an int too large"
-    with pytest.raises(ValueError) as n:
-        _check_delay(math.nan)
-    assert str(n.value) == "dt must be finite, got nan"
-    with pytest.raises(ValueError) as neg:
-        _check_delay(-1)
-    assert str(neg.value) == "dt must be >= 0, got -1.0"
+def test_caller_edge_values_accepted() -> None:
+    assert math.copysign(1.0, _check_until(-0.0)) == -1.0  # until keeps -0.0
+    assert _check_speed(math.inf) == math.inf  # inf means fast mode
 
 
-def test_speed_messages_unchanged_and_overflow_is_value_error() -> None:
-    from desyncio.realtime import _check_speed
-
-    with pytest.raises(TypeError) as t:
-        _check_speed("a")
-    assert str(t.value) == "speed must be a real number, got str"
-    with pytest.raises(ValueError) as n:
-        _check_speed(math.nan)
-    assert str(n.value) == "speed must be > 0 (or math.inf), got nan"
-    with pytest.raises(ValueError) as z:
-        _check_speed(0)
-    assert str(z.value) == "speed must be > 0 (or math.inf), got 0"
-    assert _check_speed(math.inf) == math.inf
-    # D040: was OverflowError.
-    with pytest.raises(ValueError, match="speed must be .*int too large for a float"):
+def test_speed_huge_int_raises_value_error_not_overflow_error() -> None:
+    # D040: float(10**400) raises OverflowError; speed used to leak it.
+    with pytest.raises(ValueError) as info:
         _check_speed(_BIG)
+    assert (
+        str(info.value)
+        == "speed must be > 0 (or math.inf), got an int too large for a float"
+    )
