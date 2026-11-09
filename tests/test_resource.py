@@ -856,3 +856,161 @@ def test_priority_determinism() -> None:
     assert desyncio.run(_mm1_two_classes(), seed=5) != desyncio.run(
         _mm1_two_classes(), seed=6
     )
+
+
+# --- RES-02 fix round 1: release is synchronous (D030) ----------------------
+#
+# The round-0 design released through ``async with self._cond:``, which can
+# suspend when the Condition's lock is contended, so a cancel or interrupt
+# arriving at the holder's exit skipped the decrement and leaked the unit.
+# With the public API alone that lock is never contended, so the reviewer's
+# probe held it from a helper task. ``_hold_round0_lock`` reproduces that probe
+# when the resource has such a lock (round 0) and does nothing otherwise
+# (D030: there is no lock, release cannot suspend). The assertions are on the
+# public outcome only, so they hold for any correct design.
+
+
+async def _hold_round0_lock(res: PriorityResource, until: float) -> None:
+    cond = getattr(res, "_cond", None)
+    if cond is None:  # per-request futures (D030): nothing to contend
+        return
+    async with cond:
+        await sim.timeout(until - sim.now)
+
+
+def _spawn_holder_and_waiters(
+    res: PriorityResource, log: list[str]
+) -> list["asyncio.Task[None]"]:
+    """Waiters queued behind a holder that exits at t=5 (see each test)."""
+    return [
+        sim.spawn(_use(res, log, "w0", 0, 1, delay=1)),
+        sim.spawn(_use(res, log, "w1", 1, 1, delay=1)),
+    ]
+
+
+def test_cancel_at_holder_exit_does_not_leak_unit() -> None:
+    async def main() -> None:
+        res = PriorityResource(1)
+        log: list[str] = []
+
+        async def holder() -> None:
+            async with res:
+                log.append("holder")
+                await sim.timeout(5)
+                # A cancel arrives at the very instant the holder exits.
+                asyncio.current_task().cancel()  # type: ignore[union-attr]
+
+        h = sim.spawn(holder())
+        waiters = _spawn_holder_and_waiters(res, log)
+        await sim.timeout(4)
+        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
+        await sim.timeout(16)  # t=20: far past every service
+        assert h.cancelled()
+        assert (res.count, res.queue_length) == (0, 0)
+        assert log == ["holder", "w0", "w1"]
+        assert all(w.done() for w in waiters)
+        await helper
+
+    desyncio.run(main())
+
+
+def test_body_exception_and_cancel_at_exit_release_and_keep_body_error() -> None:
+    async def main() -> None:
+        res = PriorityResource(1)
+        log: list[str] = []
+        seen: list[BaseException] = []
+
+        async def holder() -> None:
+            try:
+                async with res:
+                    log.append("holder")
+                    await sim.timeout(5)
+                    asyncio.current_task().cancel()  # type: ignore[union-attr]
+                    raise ValueError("body")
+            except BaseException as exc:
+                seen.append(exc)
+            # The pending cancel is delivered at the next await, as in asyncio.
+            await sim.timeout(1)
+
+        h = sim.spawn(holder())
+        waiters = _spawn_holder_and_waiters(res, log)
+        await sim.timeout(4)
+        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
+        await sim.timeout(16)
+        assert len(seen) == 1 and isinstance(seen[0], ValueError)  # not replaced
+        assert h.cancelled()
+        assert (res.count, res.queue_length) == (0, 0)
+        assert log == ["holder", "w0", "w1"]
+        assert all(w.done() for w in waiters)
+        await helper
+
+    desyncio.run(main())
+
+
+def test_interrupt_of_holder_at_exit_does_not_leak_unit() -> None:
+    async def main() -> None:
+        res = PriorityResource(1)
+        log: list[str] = []
+        outcome: list[object] = []
+
+        async def holder() -> None:
+            try:
+                async with sim.interruptible():
+                    async with res:
+                        log.append("holder")
+                        await sim.timeout(5)
+                    await sim.timeout(1)  # still inside the interruptible block
+            except Interrupt as i:
+                outcome.append(i.cause)
+
+        h = sim.spawn(holder())
+        waiters = _spawn_holder_and_waiters(res, log)
+        await sim.timeout(4)
+        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
+        await sim.timeout(1)  # t=5, right after the holder's exit step
+        sim.interrupt(h, "boom")
+        await sim.timeout(15)
+        assert outcome == ["boom"]
+        assert h.done() and not h.cancelled()
+        assert (res.count, res.queue_length) == (0, 0)
+        assert log == ["holder", "w0", "w1"]
+        assert all(w.done() for w in waiters)
+        await helper
+
+    desyncio.run(main())
+
+
+def test_waiter_cancelled_when_granted_passes_unit_to_next() -> None:
+    async def main() -> list[tuple[str, float]]:
+        seen: list[tuple[int, int]] = []
+
+        def monitor(r: PriorityResource) -> None:
+            assert 0 <= r.count <= r.capacity
+            seen.append((r.count, r.queue_length))
+
+        res = PriorityResource(1, monitor=monitor)
+        log: list[tuple[str, float]] = []
+
+        async def user(name: str, prio: int, hold: float) -> None:
+            async with res.request(priority=prio):
+                log.append((name, sim.now))
+                await sim.timeout(hold)
+
+        holder = sim.spawn(user("holder", 0, 1))
+        await sim.timeout(0.5)
+        doomed = sim.spawn(user("doomed", 0, 1))
+        nxt = sim.spawn(user("next", 1, 1))
+        last = sim.spawn(user("last", 2, 1))
+        await sim.timeout(0.5)  # t=1: holder released and handed doomed the unit
+        doomed.cancel()  # ...but doomed has not resumed yet
+        with pytest.raises(asyncio.CancelledError):
+            await doomed
+        await sim.timeout(0)
+        assert sim.now == 1.0
+        assert (res.count, res.queue_length) == (1, 1)  # next holds, last waits
+        await asyncio.gather(holder, nxt, last)
+        assert (res.count, res.queue_length) == (0, 0)
+        assert seen[-1] == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [("holder", 0.0), ("next", 1.0), ("last", 2.0)]

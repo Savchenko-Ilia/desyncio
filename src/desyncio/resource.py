@@ -34,26 +34,50 @@ What is ours
   semaphore's private attributes;
 * the optional ``monitor`` hook (D021) and its error contract (D023 v2).
 
-PriorityResource: Condition, not hand-rolled futures
------------------------------------------------------
-asyncio has no priority semaphore. ``asyncio.Condition`` can express priority
-order, although its own wake-up order is FIFO: every waiter sleeps in
-``Condition.wait_for(predicate)`` and the predicate is "I hold the best
-``(priority, request order)`` key among the waiters, and a unit is free".
-Every state change calls ``notify_all()``; all waiters wake, re-check, and
-only the best one proceeds, the rest go back to sleep. So no per-request
-futures are needed.
+PriorityResource: per-request futures, not Condition (D030)
+-----------------------------------------------------------
+asyncio has no priority semaphore, so ``PriorityResource`` follows the shape
+of ``asyncio.Semaphore`` (CPython 3.13 ``asyncio/locks.py``) with one change:
+its waiters are kept in ``(priority, request order)`` order instead of FIFO.
 
-Delegated to asyncio: the sleeping and waking (``Condition``), cancellation
-(``wait`` re-acquires its lock and re-raises ``CancelledError``, which is also
-how ``sim.interruptible()`` arrives, D024), and the lock around the state.
-Ours: the sorted list of waiting keys (asyncio has no priority order to
-borrow), the counters, validation and the monitor. Cost: a state change wakes
-every waiter (O(waiters)); acceptable for a simulation library, and simple.
+Delegated to asyncio: the waiting itself. Each waiter awaits its own
+``loop.create_future()``; waking it is ``fut.set_result(None)``, and
+cancellation (a plain ``task.cancel()``, an enclosing ``asyncio.timeout()``
+or ``TaskGroup``, or ``sim.interrupt``, which is a cancel underneath, D024)
+arrives as the ``CancelledError`` that asyncio raises at ``await fut``.
 
-Because a unit is taken only inside the predicate, in the same step that
-ends the wait, a unit is never "in transit" to a waiter: a waiter cancelled
-at the instant a unit frees up simply leaves, and the next waiter is woken.
+Ours: the ordering (a list kept sorted with ``bisect.insort``), the grant
+rule, the counters, validation and the monitor. A sorted list rather than a
+heap because a pending waiter that is cancelled must leave the order at once
+(``queue_length`` and the monitor see it go); with a sorted list that is one
+``bisect`` and a ``del``, where a heap would need lazy deletion plus a
+separate live counter. Inserts and removals shift the list (O(waiters)), which
+is fine for simulation queue sizes.
+
+How it mirrors ``Semaphore``:
+
+* release is synchronous (``Semaphore.release()``): it frees the unit and, in
+  the same step, hands it to the best live waiter by resolving its future.
+  There is no ``await`` before the decrement, so a cancel or interrupt at the
+  holder's exit can never skip it, and a body exception is never replaced;
+* no barging: because the hand-over happens inside release, a newcomer at the
+  same instant finds no free unit and queues, unless its key is strictly
+  better than every live waiter's (then it legitimately goes first);
+* the fast path takes a free unit without suspending, as ``Semaphore``
+  (and so RES-01's ``Resource``) does;
+* a waiter cancelled after its future was resolved, but before it resumed,
+  gives the unit to the next waiter (``Semaphore._acquire``'s fix-up for
+  "done and not cancelled"); a waiter cancelled while still pending removes
+  itself from the order.
+
+Why not ``asyncio.Condition`` (round 0, rejected in D030): ``notify_all()``
+needs the Condition's lock, so the release in ``__aexit__`` had to ``await``
+that lock. Right after a ``notify_all`` the woken waiters queue on the lock,
+so the acquire really suspends, and a cancel at that point skipped the
+decrement: the unit leaked for good and the ``CancelledError`` replaced the
+body's exception. ``Condition`` cannot express a synchronous release. It also
+woke every waiter on every change (O(waiters)); one future per request wakes
+exactly the one that gets the unit.
 """
 
 import asyncio
@@ -218,7 +242,9 @@ class PriorityRequest:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        await self._resource._release()
+        # Synchronous on purpose (D030): no await, so nothing can interrupt
+        # the release, and an exception from the body propagates unchanged.
+        self._resource._release()
 
 
 class PriorityResource:
@@ -239,8 +265,12 @@ class PriorityResource:
     that very instant. A newcomer with a strictly better key legitimately
     goes first. Introspection (``capacity``, ``count``, ``queue_length``),
     cancellation and the ``monitor`` contract (D023 v2) are as for
-    ``Resource``; see the module docstring for how waiting is built.
-    Create it inside the run.
+    ``Resource``: ``queue_length`` counts a request that has been handed a
+    unit but whose task has not resumed yet, and ``count`` includes it only
+    once it has. Release is synchronous, so a cancel, timeout or interrupt
+    arriving at the holder's exit cannot leak the unit. See the module
+    docstring for how waiting is built (per-request futures, D030).
+    Create it inside the run (its futures belong to the running loop).
     """
 
     def __init__(
@@ -257,10 +287,12 @@ class PriorityResource:
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
         self._capacity = capacity
         self._monitor = monitor
-        self._cond = asyncio.Condition()  # does all waiting and waking
-        self._waiting: list[tuple[float, int]] = []  # sorted keys of waiters
+        # Waiters in key order. The seq number is unique, so tuples compare on
+        # (priority, seq) only and never reach the (uncomparable) future.
+        self._waiters: list[tuple[float, int, asyncio.Future[None]]] = []
         self._seq = itertools.count()
-        self._count = 0
+        self._count = 0  # units held by tasks that have resumed
+        self._granted = 0  # units handed to a waiter that has not resumed yet
 
     @property
     def capacity(self) -> int:
@@ -274,8 +306,12 @@ class PriorityResource:
 
     @property
     def queue_length(self) -> int:
-        """Requests waiting for a unit."""
-        return len(self._waiting)
+        """Requests waiting for a unit.
+
+        As for ``Resource``, a request that has been handed a unit but whose
+        task has not yet resumed still counts as waiting until it does.
+        """
+        return len(self._waiters) + self._granted
 
     def request(self, priority: float = 0) -> PriorityRequest:
         """Return a request to use as ``async with res.request(priority=p):``."""
@@ -302,38 +338,73 @@ class PriorityResource:
                 }
             )
 
-    def _my_turn(self, key: tuple[float, int]) -> bool:
-        return self._waiting[0] == key and self._count < self._capacity
+    def _free(self) -> int:
+        return self._capacity - self._count - self._granted
+
+    def _grant_free_units(self) -> None:
+        """Hand every free unit to the best live waiters, synchronously.
+
+        Like ``Semaphore._wake_up_next``: a waiter whose future is already
+        done was cancelled while pending; it is skipped here and removes
+        itself from the order when its task runs.
+        """
+        i = 0
+        while self._free() > 0 and i < len(self._waiters):
+            fut = self._waiters[i][2]
+            if fut.done():
+                i += 1
+                continue
+            del self._waiters[i]
+            self._granted += 1
+            fut.set_result(None)  # the waiter resumes at its next turn
 
     async def _acquire(self, priority: float) -> None:
         key = (priority, next(self._seq))
-        # The lock is never held across a suspension except inside
-        # Condition.wait (which releases it), so this never actually waits.
-        async with self._cond:
-            insort(self._waiting, key)
-            try:
-                if not self._my_turn(key):
-                    self._changed()  # queued
-                    await self._cond.wait_for(lambda: self._my_turn(key))
-            except BaseException:
-                # Cancelled or interrupted while queued. wait() has re-acquired
-                # the lock. No unit was taken, so none can leak; wake the rest
-                # because we may have been the head they were waiting behind.
-                del self._waiting[bisect_left(self._waiting, key)]
-                self._cond.notify_all()
-                self._changed()
-                raise
-            self._waiting.pop(0)  # we are the head
+        # Fast path, no suspension (as Semaphore.acquire). Release hands
+        # units over at once, so a free unit means no live waiter is left;
+        # the explicit check states the no-barging rule anyway: a live waiter
+        # with a better-or-equal key (any priority <= ours, since our seq is
+        # the newest) keeps the newcomer out.
+        if self._free() > 0 and not any(
+            not fut.done() and p <= priority for p, _, fut in self._waiters
+        ):
             self._count += 1
-            if self._waiting:
-                self._cond.notify_all()  # more units may be free for the next
             self._changed()
+            return
 
-    async def _release(self) -> None:
-        async with self._cond:
-            self._count -= 1
-            self._cond.notify_all()
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        entry = (priority, key[1], fut)
+        insort(self._waiters, entry)
+        self._changed()  # queued
+        try:
+            await fut
+        except BaseException:
+            # CancelledError (a cancel, timeout or sim.interrupt) is the only
+            # exception expected here; anything else thrown in is treated the
+            # same way so that no unit can leak.
+            if fut.done() and not fut.cancelled():
+                # Granted, then cancelled before resuming (Semaphore._acquire's
+                # fix-up): the unit was ours; pass it to the next waiter.
+                self._granted -= 1
+            else:
+                # Still in the order: leave it.
+                del self._waiters[bisect_left(self._waiters, key)]
+            # Wake whoever can now go (Semaphore's ``finally`` does the same).
+            self._grant_free_units()
             self._changed()
+            raise
+        # Granted by _grant_free_units, which already removed our entry.
+        self._granted -= 1
+        self._count += 1
+        self._changed()
+
+    def _release(self) -> None:
+        # Synchronous, like Semaphore.release(): decrement and hand-over in
+        # one step, so neither a cancel nor a same-instant newcomer can get
+        # between them.
+        self._count -= 1
+        self._grant_free_units()
+        self._changed()
 
     async def __aenter__(self) -> Self:
         await self._acquire(0)
@@ -345,4 +416,4 @@ class PriorityResource:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        await self._release()
+        self._release()  # synchronous, see PriorityRequest.__aexit__
