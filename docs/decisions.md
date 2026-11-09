@@ -121,5 +121,22 @@ Resources are used with `async with resource:`, or `async with res.request(prior
 - **Monitors:** an explicit `monitor=` hook on primitives.
 - **Exports:** every new public name is exported only in API-01, so features don't collide on `__init__.py`.
 
+## D022 — Reuse asyncio first (owner)
+The owner chose option B, thin wrappers that delegate, and set the rule "always reuse asyncio functionality if it exists". It is now AGENTS.md principle 6, and also a check in `.claude/agents/reviewer.md`: a hand-written replacement for existing asyncio functionality is a MUST.
+
+The Module 2 backlog was rewritten accordingly:
+- `Resource` wraps `asyncio.Semaphore`; `Store` wraps `asyncio.Queue`; `PriorityStore` wraps `asyncio.PriorityQueue`, adding a sequence number for ties.
+- `Container`, `FilterStore` and `PriorityResource` are built on `asyncio.Condition`, because asyncio has no equivalent.
+- `Interrupt` is delivered through asyncio cancellation underneath, then translated, with `uncancel()` restoring the count. That way every asyncio primitive cleans up the interrupted wait for free, while `TaskGroup` and `timeout()` don't see a cancel (D020).
+
 ## D021 — accepted (owner said "go")
 The three defaults stand: Container uses strict FIFO (head-of-line); an interrupt to a task that isn't waiting is delivered at its next `await`; primitives get an explicit `monitor=` hook. Batch 9 is RES-01, INT-01, CON-01 and STO-01. The owner also asked for an audit of module 1 code for reuse of existing asyncio functionality (principle 6).
+
+## D023 — One monitor contract for all primitives (lead, batch 9)
+The batch 9 implementers each invented a different monitor signature (`monitor(resource)`, `monitor(level)`, `monitor(store)`), because D021 didn't specify one. The contract is now:
+- `monitor(primitive)`: called with the primitive itself, synchronously, after every state change, once the primitive's state is fully settled.
+- The monitor reads public properties (`count`, `queue_length`, `level`, `len()`, ...).
+- An exception from the monitor propagates to the task that caused the change, but it must never leave the primitive inconsistent: no leaked unit, counter, ticket or mirror entry.
+- Monitors must not block, or acquire the primitive.
+
+The lead promoted RES-01's reviewer SHOULD ("a raising monitor leaks a held unit") to a MUST under this contract. CON-01 and STO-01 are reviewed against it too.
