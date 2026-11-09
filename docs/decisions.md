@@ -335,7 +335,7 @@ The owner chose:
 - **Real, timezone-aware dates.**
 - **A shift end interrupts** a holder who is still using a unit.
 - **A calendar that converts sim time to dates**, as well as resources whose capacity follows a schedule.
-The lead proposed these defaults, to be confirmed by the owner before batch 24:
+The lead proposed these defaults, and the owner accepted all six ("go"):
 1. One sim time unit is one second (D004), configurable with `Calendar(unit=...)`.
 2. When capacity drops, the **most recently granted** holders are interrupted first (the ones who started last lose least work).
 3. Overlapping shifts **add** their capacities.
