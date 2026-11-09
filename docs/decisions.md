@@ -120,3 +120,6 @@ Resources are used with `async with resource:`, or `async with res.request(prior
 - **Interrupting a non-waiting task:** delivered at its next `await`.
 - **Monitors:** an explicit `monitor=` hook on primitives.
 - **Exports:** every new public name is exported only in API-01, so features don't collide on `__init__.py`.
+
+## D021 — accepted (owner said "go")
+The three defaults stand: Container uses strict FIFO (head-of-line); an interrupt to a task that isn't waiting is delivered at its next `await`; primitives get an explicit `monitor=` hook. Batch 9 is RES-01, INT-01, CON-01 and STO-01. The owner also asked for an audit of module 1 code for reuse of existing asyncio functionality (principle 6).

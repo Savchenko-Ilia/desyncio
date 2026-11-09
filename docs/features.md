@@ -37,7 +37,7 @@ Status: `todo` · `in_progress` · `done` · `blocked`
 
 ---
 
-# Features — Module 2: DES primitives (DRAFT, awaiting owner review)
+# Features — Module 2: DES primitives
 
 Built on module 1. Concepts follow SimPy (AGENTS.md §1); the API is asyncio-style (D019), and interrupts are a dedicated exception (D020).
 Common rules for every feature in this module:
