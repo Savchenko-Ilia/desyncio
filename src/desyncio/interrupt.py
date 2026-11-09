@@ -74,6 +74,14 @@ another task cannot reliably read it. A weak mapping drops an entry when the
 task is garbage collected, nothing is added to ``VirtualTimeLoop`` (D017), and
 it is never iterated, so its ordering cannot affect determinism.
 
+Provenance
+----------
+This is not original code: ``_State`` and ``Interruptible.__aenter__``,
+``__aexit__`` and ``_deliver`` are adapted from CPython's
+``Lib/asyncio/timeouts.py`` (class ``Timeout``, Python 3.13) and stay under
+the PSF License Agreement v2; see ``LICENSES/PSF.txt``. The comment above
+``_State`` marks the adapted part and lists the changes.
+
 Known limits
 ------------
 * If a ``TaskGroup`` inside the block ends with an ``ExceptionGroup`` (a child
@@ -104,6 +112,15 @@ class Interrupt(Exception):  # noqa: N818  (public name fixed by the spec)
         self.cause = cause
 
 
+# Adapted from CPython Lib/asyncio/timeouts.py, class Timeout (Python 3.13).
+# Copyright (c) 2001 Python Software Foundation. Licensed under the PSF
+# License Agreement v2; see LICENSES/PSF.txt.
+# The adapted parts are _State and Interruptible.__aenter__, __aexit__ and
+# _deliver (from Timeout._State, __aenter__, __aexit__ and _on_timeout).
+# Changes from the original: no timer and no reschedule(); delivery comes
+# from sim.interrupt() through a per-task registry (_open_blocks) instead of
+# a loop callback; __aexit__ raises Interrupt(cause) instead of TimeoutError;
+# no ExceptionGroup splice (an ExceptionGroup propagates untranslated).
 class _State(enum.Enum):
     CREATED = "created"
     ENTERED = "active"

@@ -1013,3 +1013,23 @@ def test_same_seed_gives_identical_trace() -> None:
     assert len(first[0]) > 100
     assert run_once(5) == first
     assert run_once(6) != first
+
+
+# --- licensing ---------------------------------------------------------
+
+
+def test_cpython_adapted_code_carries_psf_notice() -> None:
+    """AGENTS.md §3: the code adapted from ``asyncio.Timeout`` keeps the PSF notice."""
+    import inspect
+    from pathlib import Path
+
+    import desyncio.interrupt as interrupt_module
+
+    notice = Path(__file__).resolve().parent.parent / "LICENSES" / "PSF.txt"
+    assert notice.is_file()
+    text = notice.read_text(encoding="utf-8")
+    assert "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2" in text
+    header = text.split("Copyright (c) 2001 Python Software Foundation", 1)[0]
+    assert "src/desyncio/interrupt.py" in header
+
+    assert "LICENSES/PSF.txt" in inspect.getsource(interrupt_module)
