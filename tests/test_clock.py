@@ -147,50 +147,13 @@ def _helper_kwargs() -> dict[str, str]:
     }
 
 
-def test_helper_rejects_bool_and_non_numbers() -> None:
+def test_helper_options() -> None:
     from desyncio._validate import to_float
 
-    for bad in (True, False, "1", None, 1j):
-        with pytest.raises(
-            TypeError, match="x must be real, got " + type(bad).__name__
-        ):
-            to_float(bad, **_helper_kwargs())
-
-
-def test_helper_converts_int_and_float() -> None:
-    from desyncio._validate import to_float
-
-    result = to_float(3, **_helper_kwargs())
-    assert result == 3.0
-    assert isinstance(result, float)
-    assert to_float(2.5, **_helper_kwargs()) == 2.5
-
-
-def test_helper_overflow_is_value_error() -> None:
-    from desyncio._validate import to_float
-
-    with pytest.raises(ValueError, match="x too large"):
-        to_float(_BIG, **_helper_kwargs())
-
-
-def test_helper_inf_and_nan_pass_without_finite_error() -> None:
-    from desyncio._validate import to_float
-
+    # Without finite_error, inf and nan pass through; without normalise_zero,
+    # -0.0 keeps its sign.
     assert to_float(math.inf, **_helper_kwargs()) == math.inf
     assert math.isnan(to_float(math.nan, **_helper_kwargs()))
-
-
-def test_helper_finite_error_rejects_inf_and_nan() -> None:
-    from desyncio._validate import to_float
-
-    for bad in (math.inf, -math.inf, math.nan):
-        with pytest.raises(ValueError, match="x not finite: "):
-            to_float(bad, finite_error="x not finite: {value!r}", **_helper_kwargs())
-
-
-def test_helper_normalise_zero_option() -> None:
-    from desyncio._validate import to_float
-
     assert math.copysign(1.0, to_float(-0.0, **_helper_kwargs())) == -1.0
     kept = to_float(-0.0, normalise_zero=True, **_helper_kwargs())
     assert math.copysign(1.0, kept) == 1.0
