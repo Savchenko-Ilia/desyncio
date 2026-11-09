@@ -178,3 +178,12 @@ Cost: interruptible code must be marked explicitly. Interrupting a task outside 
 
 ## D024 — outcome
 Implemented as specified, in `feat/INT-01-v2`. The scope code is adapted from CPython `asyncio.Timeout`, so it carries the PSF marking, and `interrupt.py` is listed in `LICENSES/PSF.txt`, as D009 required for LOOP-03. The PR to `main` must flag it. `feat/INT-01` (design 2) stays on origin, unmerged, for reference only.
+
+## D026 — `sim.rng` → `sim.random`, stdlib seeding (owner)
+The owner asked "what is `sim.rng`?" and then "why do we need our own rng?". Two fixes follow:
+- The name should explain itself. `sim.random(name)` returns a `random.Random`.
+- We were already returning a stdlib `random.Random`, but derived its seed with our own SHA-256 encoding (LOOP-08). `random.Random(str)` is already deterministic across processes, so under principle 6 that derivation goes. A stream is now `random.Random(f"{seed}:{name}")`, cached per run. The `:` separator is unambiguous, because the seed is digits only.
+- All random sequences change once. There are no users yet, so the fixed known-value tests are re-pinned.
+- The supporting names follow: `RandomStreams`, `current_random_streams()`, `randomness.py`.
+- This is scheduled as RND-01 in its own batch 10a, because it edits test files owned by RES-02 and STO-02.
+The motivating example was the owner's car wash: 2 bays, washes of 2–4 min for cars under 2 t and 3–6 min otherwise, cars as agents with a weight. It already works on `integration` with `Resource(2)` and `sim.spawn`, and is a candidate example for DOC-02.

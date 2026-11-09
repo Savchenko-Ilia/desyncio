@@ -43,7 +43,9 @@ Every one needed one fix round. `integration` passes the gate with 467 tests.
 - The code is adapted from `asyncio.Timeout` and PSF-marked.
 
 ## Next: batch 10, to be started in a FRESH lead session (D025)
-Specs are in `docs/features.md`. All three own disjoint files:
+**Batch 10a: RND-01 runs alone first** (D026). It renames `sim.rng(name)` → `sim.random(name)` and `rng.py` → `randomness.py`, and replaces our SHA-256 seed derivation with stdlib `random.Random(f"{seed}:{name}")`. It edits call sites in test files that RES-02 and STO-02 own, which is why it goes first. After merging it, the lead updates the docs that mention `sim.rng`, `RngStreams`, `derive_seed` or `rng.py` (docs/how-the-loop-works.md if it does, the implementation-log entries as historical notes, and the module 2 primitives guide later). The car-wash example (D026) should use `sim.random`.
+
+**Batch 10b**, after RND-01 merges. Specs are in `docs/features.md`, and all three own disjoint files:
 - **RES-02 PriorityResource** (`resource.py`, `tests/test_resource.py`): asyncio has no priority semaphore, so build on `asyncio.Condition`, or per-request futures woken in priority order if Condition can't express it (justify the choice). It must keep RES-01's guarantees and use the D023 v2 monitor.
 - **STO-02 PriorityStore + FilterStore** (`store.py`, `tests/test_store.py`): PriorityStore wraps `asyncio.PriorityQueue` with `(key, seq, item)` entries; FilterStore is built on `Condition`. D023 v2 monitor.
 - **MON-01 Monitors** (`monitor.py`, `tests/test_monitor.py`): `TimeSeries` built on the D023 v2 `monitor(primitive)` hook. Check M/M/1 utilisation ≈ ρ and mean queue length ≈ ρ²/(1−ρ).
