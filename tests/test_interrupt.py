@@ -781,3 +781,114 @@ def test_abandoned_task_leaves_no_registry_entry_after_gc() -> None:
     collected, after, before = desyncio.run(main())
     assert collected, "the registry kept the abandoned task alive"
     assert after == before
+
+
+# --- gap tests (TST-06) --------------------------------------------------
+
+
+@pytest.mark.parametrize("eager", [True, False])
+def test_late_interrupt_after_the_last_await_is_not_raised(eager: bool) -> None:
+    # An eager task runs inside the worker's step: its cancel() only sets
+    # _must_cancel, which uncancel() in __aexit__ clears, so no Interrupt. A
+    # normal task runs only after that step, when the block is already closed.
+    async def main() -> tuple[bool, int, float, str]:
+        if eager:
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+
+        async def worker() -> tuple[bool, int, float, str]:
+            task = asyncio.current_task()
+            assert task is not None
+
+            async def interrupter() -> str:
+                try:
+                    sim.interrupt(task, "late")
+                except RuntimeError as exc:
+                    return str(exc)
+                return "delivered"
+
+            async with sim.interruptible() as scope:
+                await sim.timeout(1)
+                job = sim.spawn(interrupter())
+            await sim.timeout(1)  # no stale cancel: this await survives
+            return scope.interrupted, task.cancelling(), sim.now, await job
+
+        return await sim.spawn(worker())
+
+    interrupted, cancelling, now, outcome = desyncio.run(main())
+    assert (interrupted, cancelling, now) == (eager, 0, 2.0)
+    if eager:
+        assert outcome == "delivered"
+    else:
+        assert "not inside" in outcome
+
+
+def test_real_taskgroup_failure_while_interrupted_is_not_translated() -> None:
+    # Known limit: a real TaskGroup failure at the instant of the interrupt
+    # propagates as an untranslated ExceptionGroup; the scope is still interrupted.
+    async def main() -> tuple[ExceptionGroup[Exception], bool, int]:
+        async def failing_child() -> None:
+            await sim.timeout(1)
+            raise ValueError("real failure")
+
+        async def worker() -> tuple[ExceptionGroup[Exception], bool, int]:
+            task = asyncio.current_task()
+            assert task is not None
+            scope = sim.interruptible()
+            try:
+                async with scope:
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(failing_child())
+                        await sim.timeout(100)
+            except ExceptionGroup as group:
+                return group, scope.interrupted, task.cancelling()
+            raise AssertionError("expected an ExceptionGroup")
+
+        w = sim.spawn(worker())
+        await sim.timeout(0)  # let the worker start and the child schedule its timer
+
+        async def interrupter() -> None:
+            await sim.timeout(1)  # fires after the child's timer, same instant
+            sim.interrupt(w, "boom")
+
+        sim.spawn(interrupter())
+        return await w
+
+    group, interrupted, cancelling = desyncio.run(main())
+    assert [type(e) for e in group.exceptions] == [ValueError]
+    assert interrupted
+    assert cancelling == 0
+
+
+@pytest.mark.parametrize("method", ["__aenter__", "__aexit__"])
+def test_interruptible_enter_and_exit_never_await(method: str) -> None:
+    """Pin that ``Interruptible.__aenter__``/``__aexit__`` contain no suspension point.
+
+    Why this test exists (D030, D034): ``PreemptiveRequest`` grants a unit and
+    then enters an ``Interruptible`` scope; on exit it leaves the scope and
+    releases the unit. Both steps are leak-free only because the scope's
+    ``__aenter__`` and ``__aexit__`` run to completion without ever yielding to
+    the event loop. If either one gained an ``await`` (or ``async for`` /
+    ``async with``), a cancel or ``sim.interrupt`` could land at that
+    suspension point, between the grant and the scope (or between the scope
+    and the release), and a unit would be lost for good -- the same leak D030
+    removed from RES-02. The methods are declared ``async`` only to satisfy
+    the async context manager protocol, so this check inspects their source:
+    a future ``await`` in either one fails here loudly instead of leaking
+    silently under rare timing.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from desyncio.interrupt import Interruptible
+
+    source = textwrap.dedent(inspect.getsource(getattr(Interruptible, method)))
+    tree = ast.parse(source)
+    suspending = [
+        f"{type(node).__name__} at line {node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Await, ast.AsyncFor, ast.AsyncWith))
+    ]
+    assert suspending == [], (
+        f"Interruptible.{method} must never suspend (D030/D034), found: {suspending}"
+    )

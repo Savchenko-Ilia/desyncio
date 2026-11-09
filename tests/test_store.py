@@ -113,8 +113,12 @@ def test_cancelled_putter_is_removed(kind: Any) -> None:
         p1 = sim.spawn(s.put("cancelled"))
         sim.spawn(s.put("kept"))
         await sim.timeout(1)
+        assert s.items == ("a",)
         p1.cancel()
         await sim.timeout(1)
+        # The mirror only ever holds stored items: a cancelled putter's item
+        # must not appear in it (nor later come out of a get).
+        assert s.items == ("a",)
         out = [await get(s)]
         await sim.timeout(1)
         out.append(await get(s))
@@ -295,6 +299,28 @@ def test_raising_monitor_loses_nothing_and_reaches_handler(kind: Any) -> None:
         assert ctx["message"] == "Store monitor raised"
 
 
+@pytest.mark.parametrize("kind", [Store, PriorityStore])
+def test_raising_monitor_on_immediate_shutdown_still_completes(kind: Any) -> None:
+    async def main() -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+        seen = _capture_handler(asyncio.get_running_loop())
+
+        def monitor(store: Any) -> None:
+            if len(store) == 0:  # only the call after shutdown has emptied it
+                raise MonitorBoom("monitor failed")
+
+        s = kind(monitor=monitor)
+        await s.put("x")
+        s.shutdown(immediate=True)  # must not raise
+        with pytest.raises(asyncio.QueueShutDown):
+            await s.put("y")
+        return s.items, seen
+
+    items, seen = desyncio.run(main())
+    assert items == ()
+    assert len(seen) == 1
+    assert isinstance(seen[0]["exception"], MonitorBoom)
+
+
 @pytest.mark.parametrize("kind", KIND)
 def test_monitor_base_exceptions_propagate(kind: Any) -> None:
     def put_with_raising_monitor(exc_type: type[BaseException]) -> None:
@@ -413,6 +439,18 @@ def test_priority_items_need_not_be_comparable() -> None:
         return [(await s.get()).name for _ in range(4)]
 
     assert desyncio.run(main()) == ["first", "a", "b", "c"]
+
+
+def test_priority_default_priority_is_zero_and_ties_are_fifo() -> None:
+    async def main() -> list[str]:
+        s: PriorityStore[str] = PriorityStore()
+        await s.put("late", priority=1)
+        await s.put("first")  # no priority: 0
+        await s.put("second", priority=0)
+        await s.put("third")
+        return [await s.get() for _ in range(4)]
+
+    assert desyncio.run(main()) == ["first", "second", "third", "late"]
 
 
 def test_priority_items_snapshot_is_in_priority_order() -> None:
