@@ -31,6 +31,9 @@ async def main() -> None:
 desyncio.run(main())  # ship-0 at 12, ship-1 at 24, ship-2 at 36
 ```
 
+New here? The [quick start](docs/quickstart.md) installs desyncio and builds a first model
+step by step.
+
 ## Goals
 
 - Plain `async def` processes on a real asyncio event loop
@@ -69,6 +72,9 @@ Everything below is importable from the top level: `from desyncio import Resourc
 - `__version__`: the package version
 
 ## Documentation
+
+- [Quick start](docs/quickstart.md): install, a first model with a step-by-step walk-through,
+  and where to go next. The example is run by the test suite.
 
 - [Primitives guide](docs/primitives.md): every primitive with a runnable example, what is
   delegated to asyncio and what desyncio adds, and the ordering and cancellation guarantees.
