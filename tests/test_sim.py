@@ -245,3 +245,16 @@ def test_plain_asyncio_loop_raises() -> None:
             sim.rng("x")
 
     asyncio.run(main())
+
+
+# --- interrupt (INT-01) ------------------------------------------------
+
+
+def test_interrupt_is_on_sim_but_not_a_top_level_export() -> None:
+    assert callable(sim.interrupt)
+    assert "Interrupt" not in desyncio.__all__
+
+
+def test_interrupt_outside_a_run_raises_runtime_error() -> None:
+    with pytest.raises(RuntimeError, match="VirtualTimeLoop"):
+        sim.interrupt(None)  # type: ignore[arg-type]

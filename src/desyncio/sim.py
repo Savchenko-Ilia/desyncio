@@ -26,6 +26,7 @@ import random
 from collections.abc import Coroutine
 from typing import Any
 
+from desyncio.interrupt import interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_rng_streams
 
@@ -130,6 +131,30 @@ class Sim:
                 coro.close()
             raise
         return loop.create_task(coro, name=name)
+
+    def interrupt(self, task: asyncio.Task[Any], cause: object = None) -> None:
+        """Raise :class:`~desyncio.interrupt.Interrupt` inside ``task``.
+
+        The ``await`` the target is blocked on raises ``Interrupt(cause)`` at
+        the current virtual time, and whatever it was waiting on is withdrawn
+        (a ``sim.timeout`` timer is cancelled, a queued ``Semaphore``/``Queue``/
+        ``Event``/``Condition`` waiter is removed), because asyncio's own
+        primitives clean up after any exception. This is *not* a cancel:
+        ``task.cancelling()`` is unchanged and ``TaskGroup``, ``timeout()`` and
+        ``gather`` never see one. A target that is not parked on a pending
+        future yet gets the interrupt at its next ``await``, at the same
+        virtual time; several interrupts arrive one per ``await``, in order.
+        A real ``task.cancel()`` always wins. See
+        :mod:`desyncio.interrupt` for the mechanism and its limits.
+
+        Raises:
+            TypeError: ``task`` is not an ``asyncio.Task``.
+            RuntimeError: outside ``desyncio.run(...)``; ``task`` has
+                finished; ``task`` is the calling task; or ``task`` is
+                awaiting another Task directly.
+        """
+        _loop()
+        interrupt_task(task, cause)
 
     def rng(self, name: str) -> random.Random:
         """Return the named random stream of this run (same object each call).
