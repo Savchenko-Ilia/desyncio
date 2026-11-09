@@ -319,9 +319,13 @@ it like the other primitives: `async with clinic:`.
   recently** lose their unit first (D051 item 2; they have done the least work). Each one's
   `async with` raises `Interrupt(ShiftEnded(at, resource))` and the body does not continue. The
   unit is already released. `at` is the sim time of the capacity drop.
-- If a visit ends at the exact instant a shift ends, the visit finishes: at one instant, ordinary
-  events (such as the end of a `sim.timeout`) run **before** the shift change (D054). A request
-  that arrives at the instant capacity rises is queued first and then granted by the rise.
+- If a visit ends at the exact instant a shift ends, the visit finishes when its own timer is
+  what ends it (for example the end of a `sim.timeout`): at one instant, ordinary timers fire
+  **before** the shift change (D054). A request whose own timer fires at the instant capacity
+  rises is queued first and then granted by the rise. The guarantee covers work one step from a
+  timer at that instant: a visit that ends only after another task woken at that instant has
+  acted (say it waits for an `Event` that task sets) may still lose to the shift change and be
+  interrupted.
 - `capacity`, `count` (units in use) and `queue_length` can be read at any time.
 
 Catch the interrupt **outside** the `async with`, as for `Preempted` in the
