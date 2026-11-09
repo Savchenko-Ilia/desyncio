@@ -16,8 +16,10 @@ run. All examples use top-level imports (`from desyncio import ...`).
 
 **The maths is numpy's and scipy's** (D048). desyncio only collects the numbers and passes them
 on: each section names the numpy or scipy function that does the work, and that function's
-documentation is the place to look for details. numpy and scipy are imported only when you call
-a statistics method, so a simulation that uses none of this pays nothing for them.
+documentation is the place to look for details. The exceptions are `TimeSeries.mean` and
+`TimeSeries.time_fractions`, two plain sums that desyncio computes itself (see that section).
+numpy and scipy are imported only when you call a statistics method that uses them, so a
+simulation that uses none of this pays nothing for them.
 
 Contents:
 
@@ -100,10 +102,14 @@ would be wrong (a value that lasted 100 time units counts the same as one that l
 pass `until=` when you read results after the run has ended. (A primitive's `monitor=` hook
 can feed a `TimeSeries` for you, see the [primitives guide](primitives.md#timeseries).)
 
-- `mean(until=None)`: the time-weighted mean (`numpy.average` with durations as weights).
+- `mean(until=None)`: the time-weighted mean, area under the curve divided by the length of
+  the span. This one is desyncio's own: `record` adds each finished stretch's area to a running
+  total, so `mean` costs the same however many records there are, and it uses no numpy.
 - `time_fractions(until=None)`: the share of time spent at each value, a dict that sums to 1.
+  Also desyncio's own: it adds up the durations per value with `math.fsum`, no numpy.
 - `quantile(p, until=None)`: `numpy.quantile(..., weights=durations, method="inverted_cdf")`.
-- `variance(until=None)`, `min()`, `max()`, `last()`, `samples`.
+- `variance(until=None)`: `numpy.average` of the squared deviations, durations as weights.
+- `min()`, `max()`, `last()`, `samples`.
 
 For M/M/1 the share of time with k customers in the system is (1-0.8) * 0.8**k, which is
 0.200, 0.160, 0.128 for k = 0, 1, 2. The measured shares are near these; a longer run gets closer.
