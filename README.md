@@ -5,7 +5,10 @@ under the event loop with a virtual one, so `asyncio.sleep`, `Queue`, `Semaphore
 `TaskGroup` and `asyncio.timeout()` work in simulated time. Simulations run as fast
 as your CPU allows, or scaled to real time. The same seed always gives the same run.
 
-> **Status:** early development. The example below is the target API.
+> **Status:** early development (version 0.1.0). The virtual-time loop,
+> the DES primitives (resources, containers, stores, interrupts) and the monitoring and
+> random-stream helpers below are implemented and tested; the example below runs as written.
+> The API may still change.
 
 ```python
 import asyncio
@@ -35,7 +38,33 @@ desyncio.run(main())  # ship-0 at 12, ship-1 at 24, ship-2 at 36
 - Fast-as-possible and scaled real-time modes
 - Classic DES primitives: resources, containers, stores, interrupts
 
+## Public API
+
+Everything below is importable from the top level: `from desyncio import Resource, run, sim`.
+
+- `run`: run a coroutine on a fresh virtual-time loop (`seed=`, `until=`, `speed=`, `trace=`)
+- `sim`: the facade used inside a run (`sim.now`, `sim.timeout`, `sim.spawn`, `sim.random`,
+  `sim.interruptible`, `sim.interrupt`)
+- `Resource`: counted resource, first come first served
+- `PriorityResource`: served by `(priority, request order)`
+- `PreemptiveResource`: a priority resource whose holders can be preempted
+- `Preempted`: the `Interrupt.cause` a preempted holder receives
+- `Container`: a level of homogeneous stuff with blocking `put`/`get`
+- `Store`: FIFO buffer of items
+- `FilterStore`: store whose `get` takes the first item matching a filter
+- `PriorityStore`: store that hands out the lowest priority value first
+- `Interrupt`: raised by `async with sim.interruptible():` when another process interrupts it
+- `TimeSeries`: time-weighted statistics, fed from a primitive's `monitor=` hook
+- `RealTimePacer`: pacing for scaled real-time runs
+- `RealIOError`: raised when a simulation tries real I/O
+- `SimulationDeadlock`: raised when nothing can ever run again
+- `__version__`: the package version
+
 ## Documentation
+
+- [Primitives guide](docs/primitives.md): every primitive with a runnable example, what is
+  delegated to asyncio and what desyncio adds, and the ordering and cancellation guarantees.
+  The examples are run by the test suite.
 
 - [How the loop works](docs/how-the-loop-works.md): how asyncio's `_run_once`, timer
   heap and selector are turned into a virtual-time loop, with a traced worked example.
