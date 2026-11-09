@@ -62,6 +62,12 @@ class Container:
     while the Condition's lock is still held, so ``level`` cannot change under
     it. It reads public properties (``level``, ``capacity``) and must not block
     or call ``put``/``get`` (D023).
+
+    A monitor that raises an ``Exception`` does not affect the model (D023 v2):
+    the ``put``/``get`` still completes normally and the error goes to
+    ``loop.call_exception_handler`` (logged by default), just as asyncio does
+    for a raising callback. Set ``loop.set_exception_handler(...)`` to make such
+    errors fatal. ``KeyboardInterrupt`` and ``SystemExit`` still propagate.
     """
 
     def __init__(
@@ -138,5 +144,25 @@ class Container:
                 self._cond.notify_all()
             # Only reached on success (a cancellation re-raises out of the
             # finally above). The state is settled and the lock is still held.
-            if self._monitor is not None:
-                self._monitor(self)
+            self._notify_monitor()
+
+    def _notify_monitor(self) -> None:
+        """Call the monitor, routing its errors to the loop's exception handler.
+
+        This mirrors what asyncio's ``Handle._run`` does for callbacks: catch
+        ``Exception`` (not ``BaseException``, so ``KeyboardInterrupt`` and
+        ``SystemExit`` propagate) and report it via ``call_exception_handler``.
+        The calling task's operation has already completed, so it is unaffected.
+        """
+        if self._monitor is None:
+            return
+        try:
+            self._monitor(self)
+        except Exception as exc:
+            asyncio.get_running_loop().call_exception_handler(
+                {
+                    "message": "Container monitor raised",
+                    "exception": exc,
+                    "container": self,
+                }
+            )

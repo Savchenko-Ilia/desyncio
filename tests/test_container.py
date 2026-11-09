@@ -241,6 +241,75 @@ def test_monitor_hook() -> None:
     assert levels == [4, 3, 9, 0]
 
 
+def _raising_monitor(c: Container) -> None:
+    raise RuntimeError("monitor boom")
+
+
+def _capture_handler(errors: list[dict[str, object]]) -> None:
+    def handler(loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        errors.append(context)
+
+    asyncio.get_running_loop().set_exception_handler(handler)
+
+
+def test_raising_monitor_goes_to_exception_handler() -> None:
+    # D023 v2: a monitor error never alters the model. The operation completes
+    # normally, and the error goes to loop.call_exception_handler.
+    async def main() -> tuple[Container, list[dict[str, object]], float]:
+        errors: list[dict[str, object]] = []
+        _capture_handler(errors)
+        c = Container(10, monitor=_raising_monitor)
+        await c.put(4)
+        assert c.level == 4
+        await c.get(1)
+        assert c.level == 3
+        later = sim.spawn(c.get(5))
+        await sim.timeout(1)
+        await c.put(2)
+        await later  # the later waiter is still served
+        assert c.level == 0
+        return c, errors, sim.now
+
+    c, errors, now = desyncio.run(main())
+    assert now == 1.0
+    assert len(errors) == 4
+    for ctx in errors:
+        assert ctx["message"] == "Container monitor raised"
+        assert isinstance(ctx["exception"], RuntimeError)
+        assert ctx["container"] is c
+
+
+def test_raising_monitor_does_not_mask_cancellation() -> None:
+    async def main() -> tuple[float, int]:
+        errors: list[dict[str, object]] = []
+        _capture_handler(errors)
+        c = Container(monitor=_raising_monitor)
+        waiter = sim.spawn(c.get(5))
+        await sim.timeout(1)
+        # put wakes the waiter (and its monitor call raises); cancel the
+        # waiter before it gets to run.
+        await c.put(5)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert waiter.cancelled()
+        return c.level, len(errors)
+
+    assert desyncio.run(main()) == (5, 1)
+
+
+def test_monitor_base_exceptions_propagate() -> None:
+    def monitor(c: Container) -> None:
+        raise KeyboardInterrupt
+
+    async def main() -> None:
+        c = Container(monitor=monitor)
+        await c.put(1)
+
+    with pytest.raises(KeyboardInterrupt):
+        desyncio.run(main())
+
+
 def test_fuel_tank() -> None:
     async def main() -> list[tuple[str, float, float]]:
         tank = Container(100, init=30)
