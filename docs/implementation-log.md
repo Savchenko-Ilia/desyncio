@@ -1030,3 +1030,30 @@ Branch: feat/TST-04 (+ fix/TST-04-1)  ·  Merged: ff97718
 - FAIL in round 1. MUST: the PriorityResource pin claimed "default priority 0 in a plain request", but the example never makes a plain request. The fix dropped that claim. The same round reworded the `test_overload_types` comment so it does not depend on the gate (TST-05 changes the gate).
 - The lead reviewed the 2-line comment-only fix diff directly, instead of running another reviewer.
 - The implementer's commits lack the attribution trailers. They are accepted, because history rewrites are blocked.
+
+## TST-06 — Gap tests (2026-11-09, batch 17)
+Branch: feat/TST-06 (+ fix/TST-06-1)  ·  Merged: afaf4eb
+
+**Approach.** Five gaps from the audit and the TST-02 review are now pinned, and the suite goes from 550 to 556 tests.
+- `test_late_interrupt_after_the_last_await_is_not_raised[eager]`.
+- `test_real_taskgroup_failure_while_interrupted_is_not_translated`: an `ExceptionGroup[ValueError]` propagates, `interrupted` is True and `cancelling()` is 0.
+- `test_raising_monitor_on_immediate_shutdown_still_completes[Store|PriorityStore]`.
+- `test_priority_default_priority_is_zero_and_ties_are_fifo`.
+- `items` assertions in `test_cancelled_putter_is_removed`.
+- `test_interruptible_enter_and_exit_never_await` moved unchanged to test_interrupt.py.
+
+**asyncio internals.**
+- **A late interrupt arises only from an eagerly started task.** With `eager_task_factory` installed, or `eager_start=True`, the task runs its first step inside the target's own step. So `task.cancel()` on the target only sets `_must_cancel` and throws nothing. In 3.13+, `uncancel()` in `__aexit__` then clears that pending cancel, so the block exits normally with `interrupted` True.
+- **Everywhere else the interrupt is delivered normally.** Timers, `call_later`, callbacks and ordinary tasks run only between steps, while the block is suspended at an await, so they raise a normal `Interrupt`.
+- **An ordinary task spawned after the last await is too late.** It first runs after the block has closed, so interrupting then raises RuntimeError "not inside".
+- **Self-interrupt is refused** with "a task cannot interrupt itself".
+
+**Review findings.**
+- FAIL in round 1, D011. The new docstring bullet was true but did not say when the case can arise, so it read as if an ordinary interrupt could be dropped.
+- The fix made the bullet precise and parametrized the test over eager. The fixer rightly disputed the lead's request that the non-eager case should raise `Interrupt`: the block has closed by then, and the reviewer agreed.
+- PASS on re-review.
+
+**Gotcha.** Restoring a mutated src file within the same second leaves a stale `.pyc` (same size, 1 s mtime resolution). Delete `src/desyncio/__pycache__` between mutation runs.
+
+**Follow-ups (SHOULD).** The docstring could also say, in one clause, that the non-eager late case gets RuntimeError "not inside".
+
