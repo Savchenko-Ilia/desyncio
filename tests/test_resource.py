@@ -277,27 +277,43 @@ def test_determinism() -> None:
     assert desyncio.run(main(), seed=3) == desyncio.run(main(), seed=3)
 
 
-# --- A raising monitor must not corrupt the Resource (D023) -----------------
+# --- A raising monitor never changes the model (D023 v2) --------------------
+#
+# Monitor errors go to the loop's exception handler, as asyncio does for a
+# failing call_soon callback; the operation completes normally for the task.
 
 
 class MonitorBoom(Exception):
     """Raised by the test monitor."""
 
 
-class OneShotMonitor:
-    """Raises ``MonitorBoom`` once, on the first call after ``armed`` is set
-    for which ``when(resource)`` is true. Otherwise it does nothing."""
+class RaisingMonitor:
+    """Raises ``MonitorBoom`` whenever ``armed`` is set and ``when(r)`` holds."""
 
     def __init__(self, when: Callable[[Resource], bool] = lambda r: True) -> None:
         self.when = when
-        self.armed = False
-        self.fired = False
+        self.armed = True
 
     def __call__(self, r: Resource) -> None:
         if self.armed and self.when(r):
-            self.armed = False
-            self.fired = True
             raise MonitorBoom
+
+
+def _capture_loop_errors() -> list[dict[str, object]]:
+    """Install an exception handler on the running loop that records contexts."""
+    errors: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, context: errors.append(context)
+    )
+    return errors
+
+
+def _assert_reported(errors: list[dict[str, object]], res: Resource, n: int) -> None:
+    assert len(errors) == n
+    for ctx in errors:
+        assert isinstance(ctx["exception"], MonitorBoom)
+        assert ctx["resource"] is res
+        assert ctx["message"] == "Resource monitor raised"
 
 
 async def _assert_clean_and_acquirable(res: Resource) -> None:
@@ -315,81 +331,61 @@ async def _assert_clean_and_acquirable(res: Resource) -> None:
     assert (res.count, res.queue_length) == (0, 0)
 
 
-def test_raising_monitor_on_queue_enter_leaves_nothing_queued() -> None:
+def test_raising_monitor_on_queue_enter_is_reported_and_waiter_served() -> None:
     async def main() -> None:
-        mon = OneShotMonitor(lambda r: r.queue_length == 1)
+        errors = _capture_loop_errors()
+        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 1))
         res = Resource(1, monitor=mon)
+        got: list[tuple[str, float]] = []
 
-        async def hold() -> None:
+        async def user(name: str) -> None:
             async with res:
+                got.append((name, sim.now))
                 await sim.timeout(2)
 
-        holder = sim.spawn(hold())
+        holder = sim.spawn(user("holder"))
         await sim.timeout(1)
-        mon.armed = True
-
-        async def waiter() -> None:
-            async with res:
-                pytest.fail("must not be granted")
-
-        w = sim.spawn(waiter())
-        with pytest.raises(MonitorBoom):
-            await w
-        assert mon.fired
-        assert (res.count, res.queue_length) == (1, 0)
-        await holder
-        await _assert_clean_and_acquirable(res)
-
-    desyncio.run(main())
-
-
-def test_raising_monitor_on_immediate_grant_releases_unit() -> None:
-    async def main() -> None:
-        mon = OneShotMonitor()
-        mon.armed = True
-        res = Resource(1, monitor=mon)
-        with pytest.raises(MonitorBoom):
-            async with res:
-                pytest.fail("body must not run")
-        assert mon.fired
-        await _assert_clean_and_acquirable(res)
-
-    desyncio.run(main())
-
-
-def test_raising_monitor_on_grant_after_wait_passes_unit_on() -> None:
-    async def main() -> None:
-        mon = OneShotMonitor(lambda r: r.count == 1)
-        res = Resource(1, monitor=mon)
-        got: list[str] = []
-
-        async def user(name: str, hold: float) -> None:
-            async with res:
-                got.append(name)
-                await sim.timeout(hold)
-
-        holder = sim.spawn(user("holder", 1))
-        await sim.timeout(0.5)
-        doomed = sim.spawn(user("doomed", 1))
-        later = sim.spawn(user("later", 1))
+        waiter = sim.spawn(user("waiter"))
         await sim.timeout(0)
-        mon.armed = True  # fires when doomed is granted at t=1
-        with pytest.raises(MonitorBoom):
-            await doomed
-        assert mon.fired
-        await asyncio.gather(holder, later)
-        assert got == ["holder", "later"]
-        assert sim.now == 2.0
+        assert (res.count, res.queue_length) == (1, 1)  # the request did queue
+        await asyncio.gather(holder, waiter)
+        assert got == [("holder", 0.0), ("waiter", 2.0)]
+        _assert_reported(errors, res, 1)
+        mon.armed = False
         await _assert_clean_and_acquirable(res)
 
     desyncio.run(main())
 
 
-def test_raising_monitor_on_queue_leave_does_not_mask_cancel() -> None:
+def test_raising_monitor_on_grant_is_reported_and_grant_stands() -> None:
     async def main() -> None:
-        mon = OneShotMonitor(lambda r: r.queue_length == 0)
+        errors = _capture_loop_errors()
+        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 0))
         res = Resource(1, monitor=mon)
-        notes: list[str] = []
+        got: list[tuple[str, float, int]] = []
+
+        async def user(name: str) -> None:
+            async with res:
+                got.append((name, sim.now, res.count))
+                await sim.timeout(1)
+
+        # Immediate grant (the probe from the review) and grant after waiting.
+        await asyncio.gather(sim.spawn(user("a")), sim.spawn(user("b")))
+        assert got == [("a", 0.0, 1), ("b", 1.0, 1)]
+        _assert_reported(errors, res, 2)
+        mon.armed = False
+        await _assert_clean_and_acquirable(res)
+
+    desyncio.run(main())
+
+
+def test_raising_monitor_on_queue_leave_keeps_cancel() -> None:
+    async def main() -> None:
+        errors = _capture_loop_errors()
+        mon = RaisingMonitor(lambda r: (r.count, r.queue_length) == (1, 0))
+        mon.armed = False
+        res = Resource(1, monitor=mon)
+        seen: list[BaseException] = []
 
         async def hold() -> None:
             async with res:
@@ -399,8 +395,8 @@ def test_raising_monitor_on_queue_leave_does_not_mask_cancel() -> None:
             try:
                 async with res:
                     pytest.fail("must not be granted")
-            except asyncio.CancelledError as exc:
-                notes.extend(getattr(exc, "__notes__", []))
+            except BaseException as exc:
+                seen.append(exc)
                 raise
 
         holder = sim.spawn(hold())
@@ -408,39 +404,40 @@ def test_raising_monitor_on_queue_leave_does_not_mask_cancel() -> None:
         w = sim.spawn(waiter())
         await sim.timeout(0)
         assert res.queue_length == 1
-        mon.armed = True
+        mon.armed = True  # fires when the cancelled waiter leaves the queue
         w.cancel()
         with pytest.raises(asyncio.CancelledError):
             await w
         assert w.cancelled()
-        assert mon.fired
-        assert any("MonitorBoom" in n for n in notes)
+        assert len(seen) == 1 and isinstance(seen[0], asyncio.CancelledError)
         assert (res.count, res.queue_length) == (1, 0)
+        _assert_reported(errors, res, 1)
+        mon.armed = False
         await holder
         await _assert_clean_and_acquirable(res)
 
     desyncio.run(main())
 
 
-def test_raising_monitor_on_release() -> None:
+def test_raising_monitor_on_release_is_reported_and_unit_released() -> None:
     async def main() -> None:
-        mon = OneShotMonitor(lambda r: r.count == 0)
+        errors = _capture_loop_errors()
+        mon = RaisingMonitor(lambda r: r.count == 0)
         res = Resource(1, monitor=mon)
 
-        # Normal exit: the monitor error propagates, the unit is released.
-        with pytest.raises(MonitorBoom):
-            async with res:
-                mon.armed = True
-        await _assert_clean_and_acquirable(res)
+        # Normal exit: no exception for the task.
+        async with res:
+            pass
+        assert res.count == 0
+        _assert_reported(errors, res, 1)
 
-        # Exit by exception: the body's exception wins, the monitor error
-        # is attached as a note.
+        # Exit by exception: the body's exception propagates unchanged.
         with pytest.raises(ValueError, match="body") as info:
             async with res:
-                mon.armed = True
                 raise ValueError("body")
-        assert any("MonitorBoom" in n for n in info.value.__notes__)
-        await _assert_clean_and_acquirable(res)
+        assert info.value.__context__ is None
+        assert res.count == 0
+        _assert_reported(errors, res, 2)
 
         # Exit by cancellation: the cancel is not masked.
         async def hold() -> None:
@@ -449,12 +446,12 @@ def test_raising_monitor_on_release() -> None:
 
         t = sim.spawn(hold())
         await sim.timeout(1)
-        mon.armed = True
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
         assert t.cancelled()
-        assert mon.fired
+        _assert_reported(errors, res, 3)
+        mon.armed = False
         await _assert_clean_and_acquirable(res)
 
     desyncio.run(main())

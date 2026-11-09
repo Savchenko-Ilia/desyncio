@@ -29,7 +29,7 @@ What is ours
 * the read-only ``capacity``, ``count`` and ``queue_length`` numbers. They are
   our own counters, updated around ``acquire``/``release``; we never read the
   semaphore's private attributes;
-* the optional ``monitor`` hook (D021) and its error contract (D023).
+* the optional ``monitor`` hook (D021) and its error contract (D023 v2).
 """
 
 import asyncio
@@ -49,19 +49,15 @@ class Resource:
     A Resource is bound to the run in which it is first used (its
     ``asyncio.Semaphore`` binds to one event loop), so create it inside the run.
 
-    A monitor that raises (D023): the exception propagates to the task that
-    caused the change, and the resource is never left inconsistent.
-
-    * Queueing: the request is withdrawn before the error propagates.
-    * Grant: the acquire is undone (the unit goes back to the semaphore, which
-      hands it to the next waiter), so a failing ``__aenter__`` holds nothing.
-    * A queued request leaving because of an exception (e.g. cancellation) and
-      a release during ``__aexit__`` with an exception: the *original*
-      exception wins, and the monitor error is attached to it as a note
-      (``add_note``). Cancellation is therefore never masked.
-    * A release on normal exit: the unit is released, then the error propagates.
-
-    The rollbacks above are not reported to the monitor.
+    Monitor errors (D023 v2) follow asyncio's rule for callbacks: an
+    ``Exception`` raised by the monitor is passed to
+    ``loop.call_exception_handler()`` (which logs it by default) and the
+    operation carries on, exactly as ``Handle._run`` does for a ``call_soon``
+    callback. Observation never changes the model: the request still queues,
+    the grant stands, the release happens, and a cancelled waiter still sees
+    its ``CancelledError``. ``KeyboardInterrupt`` and ``SystemExit`` propagate
+    unchanged. To make monitor errors fatal, install your own handler with
+    ``loop.set_exception_handler()``.
     """
 
     def __init__(
@@ -102,19 +98,25 @@ class Resource:
         return self._queue_length
 
     def _changed(self) -> None:
-        if self._monitor is not None:
-            self._monitor(self)
+        """Call the monitor; called only once the state is fully settled.
 
-    def _changed_during(self, exc: BaseException) -> None:
-        """Notify the monitor while ``exc`` is propagating.
-
-        ``exc`` must not be masked by a monitor error, so the monitor error is
-        recorded as a note on ``exc`` instead of being raised.
+        Reuses asyncio's callback error handling (``Handle._run``): an
+        ``Exception`` goes to the loop's exception handler instead of the
+        calling task, so it can neither leave the resource half-updated nor
+        mask an exception (e.g. ``CancelledError``) already in flight.
         """
+        if self._monitor is None:
+            return
         try:
-            self._changed()
-        except BaseException as monitor_exc:
-            exc.add_note(f"Resource monitor raised {monitor_exc!r} (suppressed)")
+            self._monitor(self)
+        except Exception as exc:  # KeyboardInterrupt/SystemExit propagate
+            asyncio.get_running_loop().call_exception_handler(
+                {
+                    "message": "Resource monitor raised",
+                    "exception": exc,
+                    "resource": self,
+                }
+            )
 
     async def _acquire(self) -> None:
         # Semaphore.acquire has no await before its fast path, so this check
@@ -122,41 +124,26 @@ class Resource:
         must_wait = self._sem.locked()
         if must_wait:
             self._queue_length += 1
-            try:
-                self._changed()
-            except BaseException:
-                # Withdraw the request; we have not touched the semaphore yet.
-                self._queue_length -= 1
-                raise
+            self._changed()
         try:
             await self._sem.acquire()
-        except BaseException as exc:
+        except BaseException:
             # Cancelled while queued, or granted and cancelled before resuming.
             # In the second case the semaphore itself returns the unit, and
             # because we have not incremented ``count`` there is nothing to undo.
             if must_wait:
                 self._queue_length -= 1
-                self._changed_during(exc)
+                self._changed()
             raise
         if must_wait:
             self._queue_length -= 1
         self._count += 1
-        try:
-            self._changed()
-        except BaseException:
-            # Undo the grant so the failing __aenter__ holds nothing (its
-            # __aexit__ will never run). release() wakes the next waiter.
-            self._count -= 1
-            self._sem.release()
-            raise
+        self._changed()
 
-    def _release(self, exc: BaseException | None = None) -> None:
+    def _release(self) -> None:
         self._count -= 1
         self._sem.release()
-        if exc is None:
-            self._changed()
-        else:
-            self._changed_during(exc)
+        self._changed()
 
     async def __aenter__(self) -> Self:
         await self._acquire()
@@ -168,6 +155,5 @@ class Resource:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        # Runs on normal exit, exception and cancellation alike. Returning
-        # None lets ``exc`` (if any) continue to propagate.
-        self._release(exc)
+        # Runs on normal exit, exception and cancellation alike.
+        self._release()
