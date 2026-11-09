@@ -1234,3 +1234,18 @@ Branch: feat/CAL-01 (+ fix/CAL-01-1)  ·  Merged: cfcc09c
 **Gotchas.** Aware subtraction of two datetimes that share one `tzinfo` compares wall clocks and ignores a DST offset change; `to_sim` converts both sides to UTC explicitly, and a test (July vs a January start) pins it. Python's `==` between different zones is False inside a DST fold, so the hypothesis test compares in UTC.
 
 **Follow-ups.** None.
+
+## CAL-02 — Shift schedule (2026-11-09, batch 25)
+Branch: feat/CAL-02  ·  Merged: 00ed281
+
+**Approach.** New `src/desyncio/schedule.py`. `Shift(days, start, end, capacity)` is an immutable class (frozenset of weekdays, naive `time`s, `end <= start` = overnight). `Schedule(calendar, shifts, *, closed=())` resolves each shift instance by its start date (closed dates skip the start). Local boundaries become instants with D051's rules: an ambiguous time takes `fold=0`; a non-existent one is detected by a UTC round trip and moved to the transition instant, found by bisecting to the microsecond between the fold=1 and fold=0 readings, which works for any zone. `capacity_at(t)` sums the shifts running at `t` (start dates today−2..today+1). `changes(after)` walks day by day with a heap of `(time, ±capacity)` events, releasing them up to the next local midnight, merging equal times and skipping non-changes.
+
+**asyncio internals.** None: pure code.
+
+**Trade-offs.** D053: `changes` ends after 400 days without a change past the last closed date (constant capacity would otherwise loop forever); a shift entirely inside a DST gap is empty.
+
+**Review findings.** No MUST. The reviewer's independent brute-force reference (own gap resolution, every shift instance) agreed on about 1000 random configurations in 8 zones, including midnight gaps (Havana, Beirut) and a 30-minute DST zone (Lord Howe).
+
+**Gotchas.** A shift belongs to the weekday it starts on: with a calendar starting Monday 00:00, Sunday's night shift is already running at t=0.
+
+**Follow-ups (SHOULD).** The hypothesis property never reaches the October fall-back (a fixed test does); fixed tests for a midnight gap and a 30-minute zone; a far-future closed date makes `changes` walk day by day to it (slow for `date.max`; document or bound); `OverflowError` near `date.min`/`date.max` should become `ValueError`.
