@@ -29,6 +29,9 @@ the only extra state: no hand-rolled futures, no wakeup logic.
 When a waiter leaves (served or cancelled) its ticket is removed and
 ``notify_all`` lets the new head re-check, so a cancelled head cannot block the
 line.
+Cost: ``notify_all`` wakes every parked waiter in that Condition, so each put or
+get costs O(N) wakeups and predicate checks for N waiters, even though at most
+the heads can proceed.
 """
 
 import asyncio
