@@ -250,3 +250,9 @@ Rules from now on:
 
 ## D036 — API-01 export list (lead, the owner may revise)
 `desyncio` exports the API-01 row's names plus `Preempted`. Users need `Preempted` for `isinstance(exc.cause, Preempted)` in the preemption pattern (RES-03), and the owner did not answer when asked. `run`, `sim` and `__version__` stay. Other public-looking names, such as `SimulationCleanupError`, `ListSink`/`TraceSink`, `TraceRecord`, `VirtualTimeLoop` and `PriorityRequest`/`PreemptiveRequest`, are NOT added without the owner. They are listed in the batch report as a question.
+
+## D037 — API-01 ownership extended (lead)
+The API-01 implementer found two blockers in files it did not own:
+- **The INT-01 test is permitted to change.** `tests/test_interrupt.py::test_not_exported_at_top_level` asserted that `Interrupt` is *not* exported. That matched INT-01's spec at the time, but API-01 (and D036) now export it. The spec changed, so the change is permitted: the test is inverted to assert that `desyncio.Interrupt is desyncio.interrupt.Interrupt`.
+- **The monitor.py import is fixed.** `src/desyncio/monitor.py` did `from desyncio import sim`. Once `__init__` imports monitor, that can bind the `desyncio.sim` *submodule* instead of the `sim` facade object. mypy reports it, and it breaks at runtime depending on import order. The fix is `from desyncio.sim import sim`. The order-dependent workaround in `__init__.py` (`# isort: skip`) is then removed.
+API-01 therefore also owns those lines.
