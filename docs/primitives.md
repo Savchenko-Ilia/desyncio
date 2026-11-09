@@ -212,7 +212,7 @@ caught boom; in use=0
 in the order they began waiting. Use `async with res.request(priority=p):`; a plain
 `async with res:` is priority 0. `priority` is an `int` or `float` (not `bool`, not NaN).
 
-<!-- pins: PriorityResource order: lowest priority number first, equal priorities FIFO (default priority 0 in a plain request) (D042) -->
+<!-- pins: PriorityResource order: lowest priority number first, equal priorities FIFO (D042) -->
 ```python
 import asyncio
 
