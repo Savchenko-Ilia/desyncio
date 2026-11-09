@@ -401,6 +401,18 @@ def test_monitor_not_called_for_cancelled_or_failed_operations() -> None:
     assert desyncio.run(main()) == 0
 
 
+def test_monitor_called_after_immediate_shutdown_clears_items() -> None:
+    async def main() -> list[tuple[int, tuple[int, ...]]]:
+        seen: list[tuple[int, tuple[int, ...]]] = []
+        s: Store[int] = Store(monitor=lambda st: seen.append((len(st), st.items)))
+        await s.put(1)
+        await s.put(2)
+        s.shutdown(immediate=True)
+        return seen
+
+    assert desyncio.run(main()) == [(1, (1,)), (2, (1, 2)), (0, ())]
+
+
 # --- raising monitor (D023 v2) -----------------------------------------
 
 

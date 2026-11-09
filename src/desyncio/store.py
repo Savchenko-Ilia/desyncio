@@ -53,8 +53,11 @@ class Store[T]:
             time, once the store's state is settled (D023). An ``Exception``
             it raises does not reach that task: it is passed to
             ``loop.call_exception_handler`` and the operation completes
-            normally (D023 v2). It is not called for operations that were
-            cancelled or refused by ``shutdown``.
+            normally (D023 v2). It is also called after
+            ``shutdown(immediate=True)`` discards the queued items. It is not
+            called for operations that were cancelled or refused by
+            ``shutdown``. Monitors must not block, and must not acquire the
+            store (no ``put``/``get`` from inside the monitor).
 
     Raises:
         TypeError: ``capacity`` is not an int or ``math.inf`` (``bool`` is
@@ -153,8 +156,11 @@ class Store[T]:
 
         Later ``put`` calls raise ``asyncio.QueueShutDown``; blocked waiters
         are woken with it. With ``immediate=False`` queued items can still be
-        drained by ``get``; with ``immediate=True`` they are discarded.
+        drained by ``get``; with ``immediate=True`` they are discarded and
+        the monitor is called, since discarding items is a state change
+        (D023).
         """
         self._queue.shutdown(immediate)
         if immediate:
             self._items.clear()  # keep the mirror in step with the queue
+            self._notify()
