@@ -105,8 +105,12 @@ All the randomness in this model comes from the named streams, and the streams c
 seed. Events at the same virtual instant are processed in a fixed order. So running the file
 again with `seed=1` prints the same four lines, and another seed gives a different run.
 
-One run is only one sample, and a short one: the mean wait here is noisy. To average over many
-seeds and get a confidence interval, see `replicate` in the [statistics guide](statistics.md).
+One run is only one sample, and a short one. The mean wait here is noisy, and because the shop
+starts empty it is also biased a little low: with these rates the long-run mean wait is 16, so
+12.61 underestimates it. To average over many seeds and get a confidence interval, see
+`replicate` in the
+[statistics guide](statistics.md#replications-and-confidence-intervals); it also shows how a
+warm-up reduces the empty-start bias.
 
 ## 3. Where next
 
