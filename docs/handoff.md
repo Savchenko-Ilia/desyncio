@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 27. **Module 4 (calendar and shifts) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`) is open and now covers batches 19–27. Next: the owner reviews module 4 and decides what comes next._
+_Last updated: 2026-11-09. Module 5 (quick start and examples, D055) is in progress: batch 28 (DOC-03, EX-01). PR #5 (`integration` → `main`) is open and covers batches 19–27 and whatever lands after. Per D049 the lead reports at the end of the module._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -89,7 +89,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - `integration` passes the gate: 683 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. AGENTS.md has no open question left.
 
 ## Next batches
-1. **Module 5 is undefined.** Candidates: LOOP-12 benchmark (deferred, D018); a 0.1 release (version, changelog, wheel check); an optional `tzdata` dependency for Windows (D051 item 6).
+1. **Module 5 (D055):** batch 28, DOC-03 and EX-01, in flight on `feat/DOC-03` and `feat/EX-01`. After that, candidates: LOOP-12 benchmark (D018); a 0.1 release; optional `tzdata` for Windows (D051 item 6).
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.

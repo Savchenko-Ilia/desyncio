@@ -354,3 +354,8 @@ The lead proposed these defaults, and the owner accepted all six ("go"):
 ## D054 — CAL-03: a shift change runs after everything else scheduled for the same instant (lead, the owner may revise)
 The CAL-03 review found that when a release and a capacity drop fall on the same virtual time, the winner depended on which timer was armed first. That is deterministic, but it is not the explicit tie-break principle 2 asks for. The driver now arms its timers with `loop.call_at_priority(t, +1, ...)`, so at time `t` every ordinary timer (priority 0) fires first. A visit that ends exactly at a shift boundary therefore finishes and releases its unit, and only then does capacity drop. Arrivals at `t` are queued before a capacity rise at `t` is applied, so they are granted in FIFO order by it.
 The same review promoted two other findings to MUST: a test for a waiter cancelled after it was granted but before it resumed (two leak mutants survived), and immediate reporting of a driver that dies with an exception (it would freeze capacity silently).
+
+## D055 — Module 5 is a quick start and an examples folder (owner: "go with all")
+The owner asked whether there is a quick start and examples. There were neither. The README has only one plain-asyncio snippet, and the guides illustrate one feature per snippet. The owner approved all of the lead's proposal:
+- **DOC-03:** `docs/quickstart.md` with install from git, a first model with a walk-through, and "where next".
+- **EX-01:** four complete example models in `examples/` (bank, machine shop, inventory, clinic), smoke-tested by `tests/test_examples.py` and type-checked by the gate (`mypy src tests examples`).
