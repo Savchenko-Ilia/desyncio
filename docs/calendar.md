@@ -445,8 +445,11 @@ Reading the output:
 - **Time zone data.** `zoneinfo` needs the time-zone database of the system. Linux and macOS have
   it. On Windows install the `tzdata` package yourself: desyncio does not depend on it (D051
   item 6).
-- **A schedule that keeps changing keeps the clock moving.** While the driver has a change
-  ahead, the loop is not "deadlocked": a `main` that waits forever on a `ScheduledResource`
-  advances the clock from change to change instead of raising `SimulationDeadlock`.
+- **A schedule that keeps changing keeps the run alive.** While the driver has a change ahead,
+  the loop is never "deadlocked": a `main` that waits forever on something that never happens
+  (an `Event` nobody sets) does not raise `SimulationDeadlock`; the clock advances from shift
+  change to shift change and the run never ends, using CPU as it goes. `SimulationDeadlock` is
+  raised only once `schedule.changes` has ended (D053), for example for a schedule with no
+  shifts. Give such a run an end: `asyncio.timeout(...)`, or `main` returning.
 - **Precision.** `datetime` has microsecond resolution, so `to_datetime` rounds to a microsecond,
   and a float sim time has limited resolution when it is large.
