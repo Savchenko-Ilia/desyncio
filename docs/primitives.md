@@ -1004,7 +1004,11 @@ t=16 finished
   its wait already completed this instant).
 - **A real cancel always wins.** If a `task.cancel()`, an enclosing `asyncio.timeout()` or a
   `TaskGroup` also asked for cancellation, the `CancelledError` propagates and is not turned into
-  `Interrupt`. After the block, `task.cancelling()` is back to its value before it.
+  `Interrupt`. The block's `__aexit__` calls `uncancel()` once, which undoes only the
+  interrupt's own cancel. So after the block, `task.cancelling()` is back to its value before
+  it only if the interrupt was the only cancel. If a real cancel also fired, `cancelling()` stays
+  one higher, which is how asyncio (and an enclosing `asyncio.timeout()` or `TaskGroup`) knows
+  that the cancel is still pending. The example below shows both cases.
 - **First cause wins.** A second `sim.interrupt` into an already interrupted block is ignored.
   After the block has exited you need a new `interruptible()` block.
 - **Only the innermost open block is hit** (see the nested caveat under
@@ -1068,6 +1072,54 @@ run(main())
 cause: first | is a CancelledError: False
 RuntimeError: cannot interrupt 'proc-2': it is not inside an 'async with sim.interruptible()' block
 real cancel won
+```
+
+The `cancelling()` count after the block, with and without a real cancel:
+
+```python
+import asyncio
+
+from desyncio import Interrupt, run, sim
+
+
+async def watched(label: str) -> None:
+    task = asyncio.current_task()
+    assert task is not None
+    before = task.cancelling()
+    try:
+        async with sim.interruptible():
+            await sim.timeout(10)
+    except Interrupt:
+        print(f"{label}: Interrupt, cancelling() +{task.cancelling() - before}")
+    except asyncio.CancelledError:
+        print(f"{label}: CancelledError, cancelling() +{task.cancelling() - before}")
+        raise
+
+
+async def main() -> None:
+    # Only the interrupt asked: uncancel() restores the count.
+    task = sim.spawn(watched("interrupt only"))
+    await sim.timeout(1)
+    sim.interrupt(task, "breakdown")
+    await task
+
+    # A real cancel in the same instant: the count stays one higher.
+    task = sim.spawn(watched("interrupt + cancel"))
+    await sim.timeout(1)
+    sim.interrupt(task, "breakdown")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+run(main())
+```
+
+```text
+interrupt only: Interrupt, cancelling() +0
+interrupt + cancel: CancelledError, cancelling() +1
 ```
 
 ## Monitoring: the monitor hook and TimeSeries
