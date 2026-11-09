@@ -1,9 +1,15 @@
 """Tests for seeded random streams (LOOP-08, RND-01)."""
 
+import asyncio
+import contextvars
 import random
+import subprocess
+import sys
 
 import pytest
 
+import desyncio
+from desyncio import sim
 from desyncio.randomness import RandomStreams
 
 GOLDEN_SEED = 0
@@ -72,3 +78,63 @@ def test_bad_seed_rejected(seed: object) -> None:
 def test_bad_name_rejected(name: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         RandomStreams(0).stream(name)  # type: ignore[arg-type]
+
+
+def _np_draw(streams: RandomStreams, name: str) -> list[float]:
+    draws: list[float] = streams.np_stream(name).random(3).tolist()
+    return draws
+
+
+def test_np_stream_cached_independent_and_seeded() -> None:
+    reg = RandomStreams(3)
+    assert reg.np_stream("x") is reg.np_stream("x")
+    assert reg.np_stream("x") is not reg.np_stream("y")
+    assert _np_draw(RandomStreams(3), "x") == _np_draw(RandomStreams(3), "x")
+    assert _np_draw(RandomStreams(3), "x") != _np_draw(RandomStreams(4), "x")
+    assert _np_draw(RandomStreams(3), "x") != _np_draw(RandomStreams(3), "y")
+    assert _np_draw(RandomStreams(3), "x") != _draw(RandomStreams(3), "x", 3)
+
+
+@pytest.mark.parametrize("name", ["", 1, None, b"a"])
+def test_np_bad_name_rejected(name: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        RandomStreams(0).np_stream(name)  # type: ignore[arg-type]
+
+
+def test_np_random_in_run_is_cached_and_errors_outside_or_fresh_context() -> None:
+    with pytest.raises(RuntimeError):
+        sim.np_random("x")
+
+    async def child() -> None:
+        sim.np_random("x")
+
+    async def main() -> bool:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(child(), context=contextvars.Context())
+        with pytest.raises(RuntimeError, match="fresh contextvars.Context"):
+            await task
+        return sim.np_random("x") is sim.np_random("x")
+
+    assert desyncio.run(main(), seed=1) is True
+
+
+def test_np_stream_same_draws_in_another_process() -> None:
+    code = (
+        "import desyncio, sys\n"
+        "from desyncio import sim\n"
+        "async def main():\n"
+        "    return sim.np_random('x').random(3).tolist()\n"
+        "print(desyncio.run(main(), seed=9))\n"
+    )
+    outs = [
+        subprocess.run(
+            [sys.executable, "-c", code],
+            env={"PYTHONHASHSEED": h, "PATH": ""},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for h in ("0", "777")
+    ]
+    assert outs[0] == outs[1]
+    assert outs[0].strip() == str(RandomStreams(9).np_stream("x").random(3).tolist())
