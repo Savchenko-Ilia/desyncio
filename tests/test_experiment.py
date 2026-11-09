@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from desyncio import sim
+from desyncio import run, sim
 from desyncio.experiment import confidence_interval, replicate
 
 
@@ -23,6 +23,7 @@ def test_replicate_is_deterministic_and_seeds_are_distinct() -> None:
     assert a != replicate(_model, 5, seed=4)
     assert len(set(a)) == 5
     assert a[1:] == replicate(_model, 4, seed=4)  # run i uses seed + i
+    assert a == [run(_model(), seed=3 + i) for i in range(5)]
 
 
 def test_replicate_passes_until_through() -> None:
