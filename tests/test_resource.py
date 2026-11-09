@@ -6,6 +6,7 @@ are parametrized over both classes (``RESOURCES``).
 """
 
 import asyncio
+import contextlib
 import math
 
 import pytest
@@ -98,28 +99,55 @@ def test_preempted_is_frozen() -> None:
     desyncio.run(main())
 
 
-@pytest.mark.parametrize("cls", RESOURCES)
-def test_release_on_body_exception_and_holder_cancel(cls: type[AnyResource]) -> None:
+def _holder(
+    res: AnyResource, hold: str
+) -> contextlib.AbstractAsyncContextManager[object]:
+    """``res`` itself ("plain") or a fresh ``res.request(priority=1)`` ("request").
+
+    A ``PriorityRequest`` is single-use, so each ``async with`` needs a new one.
+    """
+    if hold == "request":
+        assert isinstance(res, PriorityResource)
+        return res.request(priority=1)
+    return res
+
+
+# "request" exists only on PriorityResource, so the pairs are listed explicitly.
+# The (PriorityResource, "request") case is the guard for
+# ``PriorityRequest.__aexit__``, which is a separate release path from
+# ``PriorityResource.__aexit__``.
+@pytest.mark.parametrize(
+    ("cls", "hold"),
+    [
+        (Resource, "plain"),
+        (PriorityResource, "plain"),
+        (PriorityResource, "request"),
+    ],
+)
+def test_release_on_body_exception_and_holder_cancel(
+    cls: type[AnyResource], hold: str
+) -> None:
     async def main() -> None:
         res = cls(1)
         with pytest.raises(ZeroDivisionError):
-            async with res:
+            async with _holder(res, hold):
                 assert res.count == 1
                 1 / 0  # noqa: B018
         assert res.count == 0
 
-        async def hold() -> None:
-            async with res:
+        async def holder() -> None:
+            async with _holder(res, hold):
                 await sim.timeout(100)
 
-        t = sim.spawn(hold())
+        t = sim.spawn(holder())
         await sim.timeout(1)
         assert res.count == 1
+        # The cancel lands inside the body, so __aexit__ sees CancelledError.
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
         assert res.count == 0
-        async with res:  # the unit is available again
+        async with _holder(res, hold):  # the unit is available again
             assert res.count == 1
 
     desyncio.run(main())
