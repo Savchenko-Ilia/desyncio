@@ -236,3 +236,7 @@ The owner chose: "Test python 3.14. Add ruff format." Scheduled as CI-03 in batc
 - `scripts/gate.sh` runs the full test suite on 3.13 and on 3.14. Both must pass.
 - The lint step adds `ruff format --check .`. The 6 files that fail it now are formatted once.
 - From the merge of CI-03 onward, every branch must be `ruff format`-clean and pass on 3.14. Branches cut before it must pass the new gate when they merge.
+
+## D034 — RES-03 review: a granted reservation can be preempted; a no-await guard is promoted (lead, for the owner to confirm)
+- **Extension accepted (owner to confirm).** On a `PreemptiveResource`, a unit already granted to a waiter that has not resumed yet counts as held, as in SimPy, where a granted request is already in `users`. So it can be preempted. That waiter's `async with` raises `Interrupt(Preempted(...))` from `__aenter__`, its body never starts, and nothing is cancelled underneath (`task.cancelling()` stays 0). Without this, a better request arriving in the same instant as a release would wait behind a worse one. The reviewer found that no guarantee breaks. It is the only `Interrupt` not delivered through an `interruptible()` scope, and it is documented in the class docstring.
+- **Promoted to MUST.** RES-03 being free of leaks depends on `Interruptible.__aenter__` and `__aexit__` never awaiting (D030). A test must pin that, so a future `await` there fails loudly.
