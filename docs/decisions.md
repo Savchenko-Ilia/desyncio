@@ -207,3 +207,11 @@ The owner may revise these. They are the minimal reading of the spec.
 ## D029 — MON-01 review: two items promoted to MUST (lead)
 - **D016 test:** the reviewer listed "wiring a `TimeSeries` in does not change the model" as a SHOULD. It is promoted, because D016 is a project invariant and the feature exists to be wired into models.
 - **Time going backwards:** reusing one `TimeSeries` in a second `desyncio.run` restarts the clock at 0, so `record` sees `t < last t` and silently adds negative area. This extends D028: `record` at a virtual time earlier than the last record raises `ValueError`, and the series is left unchanged. A series belongs to one run.
+
+## D030 — RES-02 uses per-request futures, not `Condition` (lead)
+RES-02 round 0 was built on `asyncio.Condition`. The review proved a leak. `Condition.notify_all()` needs the lock, so the holder's `__aexit__` must `await` the lock. After a `notify_all`, the woken waiters are queued on that lock, so the acquire really suspends. A cancel or `sim.interrupt` at that point skips the decrement, and the unit is lost for good. The probe left `count 1`, a queued waiter, and no grant. Releasing a unit must therefore be synchronous, as it is in `asyncio.Semaphore.release()`. `Condition` cannot express that, which is the case the RES-02 spec allows for: "a per-request future woken in priority order".
+- Each waiter awaits its own `loop.create_future()`. The waiters are kept in key order `(priority, seq)`.
+- `release()` is synchronous. It decrements the count and grants the unit to the best waiter by `fut.set_result(...)`, handing over in the same step (no barging), following `Semaphore`'s grant fix-up.
+- A waiter cancelled after its future was resolved hands the unit to the next waiter instead of leaking it, as `Semaphore._acquire` does on `CancelledError`.
+- The waiting itself stays on asyncio futures. Only the ordering is ours (principle 6).
+This also removes the O(waiters) thundering herd.
