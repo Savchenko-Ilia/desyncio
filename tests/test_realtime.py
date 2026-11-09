@@ -555,3 +555,43 @@ def test_guards_docstring_does_not_claim_the_loop_never_waits() -> None:
     assert "VirtualTimeLoop` never waits:" not in doc
     assert "never waits for the real world in fast mode" in doc
     assert "real-time mode" in doc
+
+
+def test_reused_pacer_that_ended_paused_starts_the_next_run_paused() -> None:
+    wall = FakeWall()
+    pacer = RealTimePacer(1, wall_clock=wall)
+
+    async def first() -> None:
+        pacer.pause()  # the run ends while paused
+
+    desyncio.run(first(), pacer=pacer)
+    assert pacer.paused
+    assert wall.waits == []
+
+    # Run 2 must not progress until something resumes the pacer. The fake
+    # "human" does that on the first untimed wait; without one the fake
+    # asserts instead of blocking, so this cannot hang.
+    loop_times: list[float] = []
+
+    def human(w: FakeWall) -> None:
+        assert loop_times == [0.0]  # no virtual progress yet
+        w.t += 3
+        pacer.resume()
+
+    wall.on_paused_wait = human
+
+    async def second() -> None:
+        loop = asyncio.get_running_loop()
+        loop_times.append(loop.time())
+        await asyncio.sleep(2)
+        loop_times.append(loop.time())
+
+    desyncio.run(second(), pacer=pacer)
+    assert wall.waits == [None, 2.0]  # paused wait first, then the timed one
+    assert loop_times == [0.0, 2.0]
+    assert wall.t == 5.0  # 3 s paused + 2 s of pacing
+    assert not pacer.paused
+
+
+def test_max_real_wait_is_within_asyncios_select_cap() -> None:
+    assert MAX_REAL_WAIT <= asyncio.base_events.MAXIMUM_SELECT_TIMEOUT  # type: ignore[attr-defined]

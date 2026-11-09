@@ -71,7 +71,9 @@ Events = list[tuple[selectors.SelectorKey, int]]
 #: ``OverflowError`` for timeouts above ~9.2e9 s, which a slow speed easily
 #: reaches (``1 / 1e-12``). asyncio caps its own waits the same way
 #: (``MAXIMUM_SELECT_TIMEOUT`` in ``base_events.py``). A longer wait is done
-#: in chunks; see ``_JumpingSelector._select_paced``.
+#: in chunks; see ``_JumpingSelector._select_paced``. Keep this at or below
+#: asyncio's cap (a test checks it): stock asyncio limits select timeouts to
+#: 24 h for the same overflow reason.
 MAX_REAL_WAIT = 86400.0
 
 
@@ -154,7 +156,15 @@ class RealTimePacer:
             return self._paused
 
     def pause(self) -> None:
-        """Freeze virtual time. The loop keeps waiting (interruptibly)."""
+        """Freeze virtual time. The loop keeps waiting (interruptibly).
+
+        Warning: called from inside the simulation (a coroutine or timer
+        callback) with no other thread to call :meth:`resume`, this blocks
+        forever, because the frozen loop never runs the code that would
+        resume it. Also, the paused state belongs to the pacer and is kept
+        across runs: a pacer reused after a run that ended paused starts the
+        next run paused.
+        """
         with self._lock:
             self._paused = True
         self._wake()

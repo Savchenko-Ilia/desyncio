@@ -171,7 +171,11 @@ def run[T](
             ``None`` (default) is fast mode; ``math.inf`` is the same.
         pacer: a :class:`~desyncio.realtime.RealTimePacer`, for changing
             speed or pausing mid-run, or for an injected wall clock. Give
-            ``speed`` or ``pacer``, not both.
+            ``speed`` or ``pacer``, not both. Warning: calling
+            ``pacer.pause()`` from inside the simulation, with no other
+            thread to call ``resume()``, blocks forever. A pacer keeps its
+            paused state across runs, so one reused after a run that ended
+            paused starts the next run paused.
         trace: a callable taking one :class:`~desyncio.trace.TraceRecord`, called
             for every task start, resume, finish and cancel (see
             :mod:`desyncio.trace`). Off by default (``None``); when off no
