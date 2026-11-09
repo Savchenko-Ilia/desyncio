@@ -48,9 +48,10 @@ loudly.
 
 import asyncio
 import heapq
+import itertools
 import math
 import selectors
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextvars import Context
 from typing import Any
 
@@ -62,6 +63,7 @@ from desyncio.scheduling import (
     PriorityTimerHandle,
     SequenceCounter,
 )
+from desyncio.trace import Tracer, TraceSink, _TracedCoroutine
 
 
 class SimulationDeadlock(RuntimeError):
@@ -223,6 +225,52 @@ class _JumpingSelector(selectors.BaseSelector):
         )
 
 
+class _LoopState:
+    """desyncio's own per-loop state, kept off the loop's instance dict.
+
+    Why a separate object: CPython 3.13 stores an instance's attributes
+    inline (keys shared by all instances, values in the object) only up to a
+    small fixed count. ``BaseEventLoop`` and its subclasses already use 28;
+    adding more made the loop fall back to a real per-instance dict, and the
+    attribute loads in the stock ``_run_once`` (``self._ready``,
+    ``self._scheduled``, ...) lost their specialised fast path, which cost
+    ~10% per ``asyncio.sleep`` even with tracing off. So the loop has exactly
+    one attribute of ours, ``_state``, and everything else lives here.
+    ``tests/test_loop.py`` guards the count.
+
+    Attributes:
+        sequence: the timer tie-break counter (see :mod:`desyncio.scheduling`).
+        task_names: the ``proc-N`` counter for default task names (D015).
+        next_task_name: one-shot name for the next unnamed task, or ``None``.
+        tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
+            are wrapped with, or ``None`` (tracing off, or switched off for
+            new tasks by ``stop_tracing_new_tasks``).
+        closing: set by ``stop_tracing_new_tasks``; a sink error from then
+            on no longer stops the loop.
+        trace_error: the first exception the trace sink raised, or ``None``.
+        trace_error_pending: ``trace_error`` has not been raised yet.
+    """
+
+    __slots__ = (
+        "closing",
+        "next_task_name",
+        "sequence",
+        "task_names",
+        "trace_error",
+        "trace_error_pending",
+        "tracer",
+    )
+
+    def __init__(self) -> None:
+        self.sequence = SequenceCounter()
+        self.task_names = itertools.count(1)
+        self.next_task_name: str | None = None
+        self.tracer: Tracer | None = None
+        self.closing = False
+        self.trace_error: BaseException | None = None
+        self.trace_error_pending = False
+
+
 class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
     """A ``SelectorEventLoop`` whose ``time()`` is a virtual clock.
 
@@ -243,6 +291,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         start: float = 0.0,
         clock: VirtualClock | None = None,
         pacer: RealTimePacer | None = None,
+        trace: TraceSink | None = None,
     ) -> None:
         """Create the loop.
 
@@ -251,14 +300,29 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             clock: an existing clock to drive instead of a fresh one.
             pacer: if given, run in scaled real time under this pacer
                 (see :mod:`desyncio.realtime`); ``None`` is fast mode.
+            trace: a callable taking one :class:`~desyncio.trace.TraceRecord`;
+                it receives every task start, resume, finish and cancel (see
+                :mod:`desyncio.trace`). ``None`` (default) means no tracing
+                and no tracing code on any path.
         """
         # Set before super().__init__: the base constructor may call time().
         self.clock = clock if clock is not None else VirtualClock(start)
         super().__init__()
+        if trace is not None and not callable(trace):
+            self.close()  # the base constructor opened a selector and sockets
+            raise TypeError(
+                f"trace must be callable or None, got {type(trace).__name__}"
+            )
         # The base constructor created the real selector and registered the
         # self-pipe on it. Wrap it so the registrations carry over.
         self._selector = _JumpingSelector(self._selector, self)  # type: ignore[has-type]
-        self._sequence = SequenceCounter()
+        # All of desyncio's per-loop state is in one attribute; see
+        # _LoopState for why (instance-dict size and _run_once speed). Task
+        # naming (D015) uses one counter per loop, so names do not depend on
+        # how many tasks other loops (or plain asyncio) created before.
+        self._state = _LoopState()
+        if trace is not None:
+            self._state.tracer = Tracer(trace, self.time, self._on_trace_error)
         self.pacer = pacer
         if pacer is not None:
             try:
@@ -374,12 +438,123 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
             self._check_thread()  # type: ignore[attr-defined]
             self._check_callback(callback, api_name)  # type: ignore[attr-defined]
         timer = PriorityTimerHandle(
-            when, priority, self._sequence.next(), callback, args, self, context
+            when, priority, self._state.sequence.next(), callback, args, self, context
         )
         timer.drop_creation_frame()
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]
         timer.mark_scheduled()
         return timer
+
+    def name_next_task(self, name: str) -> None:
+        """Give the next task created without an explicit name this ``name``.
+
+        One-shot. ``desyncio.run`` uses it to call the main task ``main``,
+        because ``asyncio.Runner`` creates that task itself and cannot pass a
+        name.
+        """
+        self._state.next_task_name = name
+
+    def stop_tracing_new_tasks(self) -> None:
+        """Stop wrapping tasks created from now on (existing ones keep tracing).
+
+        ``desyncio.run`` calls this before ``Runner.close()``: closing makes
+        the runner create its own housekeeping tasks (async-generator and
+        executor shutdown), which are not part of the model and would only
+        add noise to the trace. Tasks that are still pending keep their
+        wrapper, so their cleanup ``cancel`` records are still emitted.
+
+        It also marks the start of shutdown: a sink error after this call no
+        longer stops the loop (stopping would abandon the cleanup and leave
+        tasks pending); it is only recorded, for :meth:`pop_trace_error`.
+        """
+        self._state.tracer = None
+        self._state.closing = True
+
+    @property
+    def trace_error(self) -> BaseException | None:
+        """The first exception the trace sink raised, or ``None``."""
+        return self._state.trace_error
+
+    def pop_trace_error(self) -> BaseException | None:
+        """Return the sink's exception if it has not been raised yet, once.
+
+        ``desyncio.run`` calls this after closing the loop, to raise a sink
+        error that happened during cleanup.
+        """
+        state = self._state
+        if not state.trace_error_pending:
+            return None
+        state.trace_error_pending = False
+        return state.trace_error
+
+    def _on_trace_error(self, exc: BaseException) -> None:
+        """The tracer's ``on_error``: record the sink's exception, stop the loop.
+
+        Called from inside a task's step, so it must not raise. ``stop()``
+        only sets a flag: the current ``_run_once`` iteration finishes (every
+        callback already in ``_ready`` runs, as it would have anyway) and
+        then ``run_forever`` returns, and our override raises ``exc``. This
+        is the same "unwind at an iteration boundary" idea as ``until``
+        (``runners._LimitReached``), which unwinds from the clock jump.
+        """
+        state = self._state
+        state.trace_error = exc
+        state.trace_error_pending = True
+        if not state.closing:
+            self.stop()
+
+    def run_forever(self) -> None:
+        """Run the loop; raise the trace sink's exception if it stopped it.
+
+        ``run_until_complete`` (and so ``asyncio.Runner.run``) call this, so
+        the sink's exception also comes out of those, instead of "Event loop
+        stopped before Future completed".
+        """
+        super().run_forever()
+        state = self._state
+        if state.trace_error_pending and not state.closing:
+            error = self.pop_trace_error()
+            assert error is not None
+            raise error
+
+    def create_task[T](
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        name: object = None,
+        context: Context | None = None,
+        eager_start: bool | None = None,
+    ) -> asyncio.Task[T]:
+        """Create a task with a deterministic default name; trace it if enabled.
+
+        Every route that makes a task ends here: ``asyncio.create_task``,
+        ``TaskGroup.create_task``, ``gather``/``ensure_future`` on a coroutine,
+        ``sim.spawn`` and ``asyncio.Runner.run`` all call
+        ``loop.create_task``. (A ``Task(...)`` built by hand bypasses it.)
+
+        *Naming.* Without an explicit ``name`` the task is called ``proc-N``,
+        N counting from 1 on this loop (stock asyncio uses a process-global
+        ``Task-N``, which differs between runs in one process).
+
+        *Tracing.* If the loop has a trace sink, the coroutine is wrapped in a
+        :class:`~desyncio.trace._TracedCoroutine` (see :mod:`desyncio.trace`).
+        Otherwise the user's coroutine goes to the Task untouched.
+        """
+        self._check_closed()  # type: ignore[attr-defined]
+        state = self._state
+        if name is None:
+            if state.next_task_name is not None:
+                name, state.next_task_name = state.next_task_name, None
+            else:
+                name = f"proc-{next(state.task_names)}"
+        tracer = state.tracer
+        if tracer is not None and asyncio.iscoroutine(coro):
+            coro = _TracedCoroutine(coro, str(name), tracer)
+        if eager_start is None:  # 3.13's create_task has no such keyword
+            return super().create_task(coro, name=name, context=context)
+        return super().create_task(
+            coro, name=name, context=context, eager_start=eager_start
+        )
 
     def time(self) -> float:
         """Return the current simulation time instead of ``time.monotonic()``."""

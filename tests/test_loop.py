@@ -219,3 +219,29 @@ def test_cpython_adapted_code_carries_psf_notice() -> None:
     doc = loop_module.__doc__ or ""
     assert "No CPython code is copied" not in doc
     assert "not a substantive copy" not in doc
+
+
+# On the integration branch before LOOP-09, ``len(vars(VirtualTimeLoop()))``
+# was 28 (measured with CPython 3.13). Do not add instance attributes to the
+# loop: put new per-loop state on ``loop._state`` instead.
+_INTEGRATION_LOOP_ATTRS = 28
+
+
+def test_loop_instance_dict_is_not_larger_than_before_loop_09() -> None:
+    """Guard the loop's per-step speed through its instance-dict size.
+
+    CPython 3.13 keeps an object's attributes "inline" (no separate dict,
+    keys shared by every instance of the class) only up to a fixed number of
+    attributes. Past that limit the instance gets a real dict, and attribute
+    loads such as ``self._ready`` or ``self._scheduled`` in the stock
+    ``BaseEventLoop._run_once`` lose their specialised fast path. LOOP-09
+    first added three attributes (28 -> 31) and every ``asyncio.sleep``
+    became ~10% slower with tracing off. This count is deterministic, unlike
+    a timing test, so it is the regression guard; the benchmark numbers are
+    in docs/how-the-loop-works.md section 10.
+    """
+    loop = VirtualTimeLoop()
+    try:
+        assert len(vars(loop)) <= _INTEGRATION_LOOP_ATTRS, sorted(vars(loop))
+    finally:
+        loop.close()
