@@ -266,3 +266,6 @@ The same false sentence is in the `src/desyncio/interrupt.py` module docstring, 
 - **`sim.random` in a task with a fresh `contextvars.Context`** still raises `RuntimeError`, with a message that names the real cause (CLN-01). A fallback would need the streams on the loop (D017: `self._state`), and it would change how streams are reached. That is a design change for the owner, not a clean-up.
 - The float-validator unification is a separate batch (CLN-05), because it touches the files of CLN-01 and CLN-03.
 
+
+## D040 — CLN-05: `speed` with an int too large for a float raises `ValueError` (lead)
+`realtime._check_speed` calls `float(value)` without catching `OverflowError`. So `run(..., speed=10**400)` raises `OverflowError`, which breaks the common rule that bad arguments raise `TypeError`/`ValueError` (module 2 rules; module 1 validators do the same). CLN-05 unifies the validators, and with that `speed` gets the same `ValueError` as the others. This is the one behaviour change that CLN-05 allows. Every other error type, message and returned value stays exactly as it is (for example, `clock` normalises `-0.0` and the others don't).
