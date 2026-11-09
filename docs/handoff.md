@@ -8,8 +8,9 @@ _Last updated: 2026-11-09, end of batch 13. Module 2 is complete. The next sessi
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
   `claude/setup-batch-1-5bb5vp` mirrors it; fast-forward it after each push.
-- **PR #2** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/2) is open for the owner.
-  It contains everything merged so far. Only the owner merges into `main`.
+- **PR #3** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/3) is open for the owner.
+  It covers everything after `6a3920c`. PR #2 was merged at that commit (LOOP-05), so `main` lacked LOOP-06/09/10/11 and all of module 2.
+  Only the owner merges into `main`. **Lesson:** after the owner merges a PR, check which commit was merged; don't assume it was the branch tip.
 - **CI is manual-only (D013)**: there are no GitHub Actions credits, so `scripts/gate.sh <branch>` is the check for every merge.
 - **Unmerged feature/fix branches must be pushed** so that a new session (a fresh container) can see them.
   Merged branches don't need to be: their content is in `integration`.
