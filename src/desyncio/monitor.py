@@ -29,6 +29,14 @@ Rules (D028):
   returns the last value.
 * Several records at the same virtual time: the last one wins for the mean
   (earlier ones have zero weight), but all of them count for ``min``/``max``.
+* ``time_fractions``, ``quantile`` and ``variance`` (STA-02) take the same
+  ``until`` and raise the same errors as ``mean``. A value held for zero time
+  (overwritten at the same instant) gets no entry in ``time_fractions`` and no
+  weight elsewhere. A zero-length span counts as the last value held for all
+  of the time: ``{last: 1.0}``, ``quantile`` = last, ``variance`` = 0.0.
+  ``quantile(p)`` is ``numpy.quantile(..., method="inverted_cdf")`` with the
+  durations as weights; ``variance`` is the population (time-weighted) one.
+  numpy is imported lazily inside these methods.
 * ``min``, ``max``, ``last`` are over the recorded values; empty is a
   ``ValueError``.
 
@@ -118,6 +126,65 @@ class TimeSeries:
         if span == 0:
             return v_last
         return (self._area + v_last * (end - t_last)) / span
+
+    def _weighted(
+        self, until: float | None, what: str
+    ) -> tuple[list[float], list[float]]:
+        """``(values, durations)`` over ``[first record, until]``, durations > 0."""
+        end = sim.now if until is None else _real(until, "until")
+        if not self._samples:
+            raise ValueError(f"{what} of an empty TimeSeries")
+        t_last, v_last = self._samples[-1]
+        if end < t_last:
+            raise ValueError(
+                f"until={end!r} is earlier than the last record at {t_last!r}"
+            )
+        if end == self._samples[0][0]:
+            return [v_last], [1.0]
+        times = [t for t, _ in self._samples] + [end]
+        pairs = [
+            (v, t1 - t0)
+            for (t0, v), t1 in zip(self._samples, times[1:], strict=True)
+            if t1 > t0
+        ]
+        return [v for v, _ in pairs], [d for _, d in pairs]
+
+    def time_fractions(self, until: float | None = None) -> dict[float, float]:
+        """Share of time spent at each value over ``[first record, until]``.
+
+        Values held for zero time have no entry. The fractions sum to 1.
+        Errors as for ``mean``.
+        """
+        values, durations = self._weighted(until, "time_fractions")
+        per_value: dict[float, list[float]] = {}
+        for v, d in zip(values, durations, strict=True):
+            per_value.setdefault(v, []).append(d)
+        total = math.fsum(durations)
+        return {v: math.fsum(ds) / total for v, ds in per_value.items()}
+
+    def quantile(self, p: float, until: float | None = None) -> float:
+        """Time-weighted ``p``-quantile (``numpy.quantile``, ``inverted_cdf``).
+
+        ``p`` must be in ``[0, 1]`` (``ValueError``). Other errors as for ``mean``.
+        """
+        import numpy as np
+
+        p = _real(p, "p")
+        if not 0.0 <= p <= 1.0:
+            raise ValueError(f"p must be in [0, 1], got {p!r}")
+        values, durations = self._weighted(until, "quantile")
+        return float(np.quantile(values, p, weights=durations, method="inverted_cdf"))
+
+    def variance(self, until: float | None = None) -> float:
+        """Time-weighted population variance over ``[first record, until]``.
+
+        Errors as for ``mean``; a zero-length span gives 0.0.
+        """
+        import numpy as np
+
+        values, durations = self._weighted(until, "variance")
+        mean = np.average(values, weights=durations)
+        return float(np.average((np.asarray(values) - mean) ** 2, weights=durations))
 
     def min(self) -> float:
         """Smallest recorded value (``ValueError`` if empty)."""
