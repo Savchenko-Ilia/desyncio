@@ -1455,38 +1455,3 @@ def test_preemption_determinism() -> None:
     c = desyncio.run(_preemption_stress(), seed=12)
     assert a == b
     assert a != c
-
-
-@pytest.mark.parametrize("method", ["__aenter__", "__aexit__"])
-def test_interruptible_enter_and_exit_never_await(method: str) -> None:
-    """Pin that ``Interruptible.__aenter__``/``__aexit__`` contain no suspension point.
-
-    Why this test exists (D030, D034): ``PreemptiveRequest`` grants a unit and
-    then enters an ``Interruptible`` scope; on exit it leaves the scope and
-    releases the unit. Both steps are leak-free only because the scope's
-    ``__aenter__`` and ``__aexit__`` run to completion without ever yielding to
-    the event loop. If either one gained an ``await`` (or ``async for`` /
-    ``async with``), a cancel or ``sim.interrupt`` could land at that
-    suspension point, between the grant and the scope (or between the scope
-    and the release), and a unit would be lost for good -- the same leak D030
-    removed from RES-02. The methods are declared ``async`` only to satisfy
-    the async context manager protocol, so this check inspects their source:
-    a future ``await`` in either one fails here loudly instead of leaking
-    silently under rare timing.
-    """
-    import ast
-    import inspect
-    import textwrap
-
-    from desyncio.interrupt import Interruptible
-
-    source = textwrap.dedent(inspect.getsource(getattr(Interruptible, method)))
-    tree = ast.parse(source)
-    suspending = [
-        f"{type(node).__name__} at line {node.lineno}"
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Await, ast.AsyncFor, ast.AsyncWith))
-    ]
-    assert suspending == [], (
-        f"Interruptible.{method} must never suspend (D030/D034), found: {suspending}"
-    )

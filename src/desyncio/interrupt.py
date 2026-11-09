@@ -94,6 +94,10 @@ Known limits
   failed for real), the group propagates untranslated, because an
   ``ExceptionGroup`` is a real error, not our cancellation.
   ``Interruptible.interrupted`` is still ``True``.
+* An interrupt that arrives after the block's last await, before ``__aexit__``
+  runs, is dropped: ``interrupted`` is ``True`` but no ``Interrupt`` is raised,
+  because in 3.13+ ``uncancel()`` clears the pending cancel (``_must_cancel``)
+  when the count reaches 0.
 * Code that catches ``CancelledError`` inside the block and swallows it also
   swallows the interrupt, exactly as it would swallow a timeout.
 """
