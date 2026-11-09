@@ -1,6 +1,7 @@
-"""Run every example in docs/primitives.md and check the README (DOC-02, D011).
+"""Run every example in docs/primitives.md and docs/statistics.md, and check the README
+(DOC-02, STA-06, D011).
 
-Convention in docs/primitives.md:
+Convention in both guides:
 
 * a fenced ``python`` block is a complete, runnable example;
 * the fenced ``text`` block right after it is its exact expected stdout;
@@ -22,6 +23,7 @@ import desyncio
 
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "primitives.md"
+STATS = ROOT / "docs" / "statistics.md"
 README = ROOT / "README.md"
 
 FENCE = re.compile(r"^```(\w*)[ \t]*\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
@@ -56,11 +58,6 @@ def _run(code: str) -> str:
     return out.getvalue()
 
 
-def _guide_examples() -> list[tuple[str, str | None]]:
-    assert GUIDE.exists(), "docs/primitives.md is missing"
-    return _examples(GUIDE)
-
-
 def _example_ids(path: Path) -> list[str]:
     """One id per ``python`` block: its index and the nearest heading above it."""
     text = path.read_text()
@@ -78,11 +75,18 @@ def _example_ids(path: Path) -> list[str]:
     return ids
 
 
-GUIDE_EXAMPLES = _guide_examples()
-GUIDE_IDS = _example_ids(GUIDE)
+# Every guide whose examples are run: (path, minimum number of examples).
+GUIDES = {"primitives": (GUIDE, 8), "statistics": (STATS, 5)}
+ALL_EXAMPLES = [
+    (f"{name}-{eid}", code, expected)
+    for name, (path, _) in GUIDES.items()
+    for (code, expected), eid in zip(_examples(path), _example_ids(path), strict=True)
+]
+DOCS = [GUIDE, STATS, README]
+DOC_IDS = ["guide", "statistics", "readme"]
 
 
-@pytest.mark.parametrize("path", [GUIDE, README], ids=["guide", "readme"])
+@pytest.mark.parametrize("path", DOCS, ids=DOC_IDS)
 def test_no_indented_or_tilde_fences(path: Path) -> None:
     """An indented fence is not matched by FENCE, so its example would never run."""
     text = path.read_text()
@@ -92,7 +96,7 @@ def test_no_indented_or_tilde_fences(path: Path) -> None:
     assert not tildes, f"tilde fences in {path.name} are never run; use ```"
 
 
-@pytest.mark.parametrize("path", [GUIDE, README], ids=["guide", "readme"])
+@pytest.mark.parametrize("path", DOCS, ids=DOC_IDS)
 def test_every_fence_line_is_parsed(path: Path) -> None:
     """Each fence-looking line is the opener or closer of one parsed block."""
     text = path.read_text()
@@ -106,7 +110,7 @@ def test_every_fence_line_is_parsed(path: Path) -> None:
 ALLOWED_LANGUAGES = {"python", "text"}
 
 
-@pytest.mark.parametrize("path", [GUIDE, README], ids=["guide", "readme"])
+@pytest.mark.parametrize("path", DOCS, ids=DOC_IDS)
 def test_every_fence_language_is_allowed(path: Path) -> None:
     """A ``Python`` or ``python3`` fence would be skipped by the exact match on
     ``python``, so any language outside the allowlist fails by name."""
@@ -114,12 +118,19 @@ def test_every_fence_language_is_allowed(path: Path) -> None:
     assert not bad, f"{path.name}: fence languages {bad} not in {ALLOWED_LANGUAGES}"
 
 
-def test_guide_exists_and_has_examples() -> None:
-    assert len(GUIDE_EXAMPLES) >= 8
-    assert len(GUIDE_IDS) == len(GUIDE_EXAMPLES)
+@pytest.mark.parametrize("name", GUIDES)
+def test_guide_exists_and_has_examples(name: str) -> None:
+    path, minimum = GUIDES[name]
+    assert path.exists(), f"{path} is missing"
+    assert len(_examples(path)) >= minimum
+    assert len(_example_ids(path)) == len(_examples(path))
 
 
-@pytest.mark.parametrize(("code", "expected"), GUIDE_EXAMPLES, ids=GUIDE_IDS)
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [e[1:] for e in ALL_EXAMPLES],
+    ids=[e[0] for e in ALL_EXAMPLES],
+)
 def test_guide_example_declares_and_prints_its_output_deterministically(
     code: str, expected: str | None
 ) -> None:
@@ -130,7 +141,7 @@ def test_guide_example_declares_and_prints_its_output_deterministically(
 
 
 def test_examples_use_top_level_imports_only() -> None:
-    for code, _ in GUIDE_EXAMPLES + _examples(README):
+    for code, _ in [*(e[1:] for e in ALL_EXAMPLES), *_examples(README)]:
         for node in ast.walk(ast.parse(code)):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
                 "desyncio"
@@ -166,8 +177,10 @@ def test_guide_documents_the_known_limits() -> None:
         assert needle in text, needle
 
 
-def test_readme_links_the_guide() -> None:
-    assert "docs/primitives.md" in README.read_text()
+def test_readme_links_the_guides() -> None:
+    text = README.read_text()
+    assert "docs/primitives.md" in text
+    assert "docs/statistics.md" in text
 
 
 def test_readme_example_runs() -> None:
