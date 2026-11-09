@@ -40,6 +40,8 @@ import numbers
 from collections import deque
 from collections.abc import Callable
 
+from desyncio._monitor import report_monitor_error
+
 __all__ = ["Container"]
 
 
@@ -156,16 +158,11 @@ class Container:
         ``Exception`` (not ``BaseException``, so ``KeyboardInterrupt`` and
         ``SystemExit`` propagate) and report it via ``call_exception_handler``.
         The calling task's operation has already completed, so it is unaffected.
+        Outside a running loop the error is logged on the ``desyncio`` logger.
         """
         if self._monitor is None:
             return
         try:
             self._monitor(self)
         except Exception as exc:
-            asyncio.get_running_loop().call_exception_handler(
-                {
-                    "message": "Container monitor raised",
-                    "exception": exc,
-                    "container": self,
-                }
-            )
+            report_monitor_error("Container monitor raised", exc, "container", self)

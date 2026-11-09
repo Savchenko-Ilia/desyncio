@@ -321,6 +321,28 @@ def test_raising_monitor_on_immediate_shutdown_still_completes(kind: Any) -> Non
     assert isinstance(seen[0]["exception"], MonitorBoom)
 
 
+@pytest.mark.parametrize("kind", [Store, PriorityStore])
+def test_raising_monitor_on_immediate_shutdown_outside_a_loop_is_logged(
+    kind: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    def monitor(store: Any) -> None:
+        if len(store) == 0:  # only the call after shutdown has emptied it
+            raise MonitorBoom("monitor failed")
+
+    s = kind(monitor=monitor)
+    desyncio.run(s.put("x"))  # the loop is closed again when this returns
+
+    with caplog.at_level("ERROR", logger="desyncio"):
+        s.shutdown(immediate=True)  # no running loop; must not raise
+
+    assert s.items == ()
+    (record,) = [r for r in caplog.records if r.name == "desyncio"]
+    assert record.levelname == "ERROR"
+    assert record.getMessage() == "Store monitor raised"
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], MonitorBoom)
+
+
 @pytest.mark.parametrize("kind", KIND)
 def test_monitor_base_exceptions_propagate(kind: Any) -> None:
     def put_with_raising_monitor(exc_type: type[BaseException]) -> None:
