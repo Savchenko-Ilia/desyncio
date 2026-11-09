@@ -80,7 +80,7 @@ def _example_ids(path: Path) -> list[str]:
 GUIDES = {
     "primitives": (GUIDE, 8),
     "statistics": (STATS, 5),
-    "calendar": (CALENDAR, 5),
+    "calendar": (CALENDAR, 6),
 }
 ALL_EXAMPLES = [
     (f"{name}-{eid}", code, expected)

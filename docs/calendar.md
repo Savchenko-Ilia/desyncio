@@ -338,8 +338,8 @@ calendar counts in minutes and starts on Monday at 08:00. A patient arrives on a
 start), and a treatment takes 20 minutes on average (stream `treatment`). Two doctors can treat
 at most 6 patients an hour and one doctor 3, while 7.5 patients arrive per hour, so the clinic is
 overloaded all day and a queue builds up. The wait of a patient (arrival to start of
-treatment) goes into a `Tally`. At the end of a shift the patients in treatment who hold the
-most recently granted units are sent away. The model stops at 17:00 and prints what happened.
+treatment) goes into a `Tally`. When capacity drops, the holders of the most
+recently granted units are sent away, as many as the drop requires. The model stops at 17:00 and prints what happened.
 
 ```python
 from datetime import datetime, time, timedelta
@@ -372,16 +372,18 @@ async def main() -> None:
     clinic = ScheduledResource(schedule)
     waits = Tally()
     arrivals, treatment = sim.random("arrivals"), sim.random("treatment")
-    treated: list[int] = []
+    treated: dict[int, float] = {}  # patient number -> end of treatment
+    granted: dict[int, float] = {}  # patient number -> start of treatment
     sent_away: list[tuple[int, datetime]] = []
 
     async def patient(number: int) -> None:
         arrived = sim.now
         try:
             async with clinic:
+                granted[number] = sim.now
                 waits.record(sim.now - arrived)
                 await sim.timeout(treatment.expovariate(1 / 20))
-                treated.append(number)
+                treated[number] = sim.now
         except Interrupt as exc:  # outside the ``async with``
             assert isinstance(exc.cause, ShiftEnded)
             sent_away.append((number, cal.to_datetime(exc.cause.at)))
@@ -399,8 +401,17 @@ async def main() -> None:
     print(
         "mean wait (minutes):", round(waits.mean(), 1), "over", len(waits), "patients"
     )
+
+    def label(n: int) -> str:
+        return f"patient {n} (granted {cal.to_datetime(granted[n]):%H:%M})"
+
     for number, at in sent_away:
-        print(f"patient {number} was interrupted at {at:%H:%M}")
+        t = cal.to_sim(at)
+        kept = [n for n, end in treated.items() if granted[n] < t < end]
+        line = f"{label(number)} interrupted at {at:%H:%M}"
+        if kept:
+            line += " while " + ", ".join(map(label, kept)) + " kept the unit"
+        print(line)
 
 
 run(main(), seed=3)
@@ -412,8 +423,8 @@ treated: 25
 sent away: 2
 still waiting at 17:00: 30
 mean wait (minutes): 37.8 over 27 patients
-patient 19 was interrupted at 12:00
-patient 27 was interrupted at 16:00
+patient 19 (granted 11:53) interrupted at 12:00 while patient 18 (granted 11:43) kept the unit
+patient 27 (granted 15:53) interrupted at 16:00
 ```
 
 Reading the output:
@@ -426,6 +437,9 @@ Reading the output:
   `isinstance(exc.cause, ShiftEnded)`. `exc.cause.at` is the sim time of the capacity drop;
   `cal.to_datetime` turns it into the local time: 12:00, when the second doctor goes home, and
   16:00, when the clinic closes.
+- At 12:00 two patients are in treatment and one unit goes: patient 19, granted last (11:53),
+  is sent away, and patient 18, granted earlier (11:43), keeps the unit. The most recently
+  granted holder is interrupted first.
 - A patient whose treatment ends before the drop is not interrupted: their `async with` has
   already released the unit. The interrupted patients are the ones still in treatment when the
   shift ends.
