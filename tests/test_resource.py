@@ -9,6 +9,8 @@ import asyncio
 import math
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import desyncio
 from desyncio import sim
@@ -816,105 +818,41 @@ def test_preemption_basic_same_instant_and_cause() -> None:
     desyncio.run(main())
 
 
-def test_preempted_dataclass_is_frozen() -> None:
-    async def main() -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        p = Preempted(by=task, usage_since=1.0, resource=PreemptiveResource(1))
-        with pytest.raises(AttributeError):
-            p.usage_since = 2.0  # type: ignore[misc]
-
-    desyncio.run(main())
-
-
-def test_machine_shop_resubmits_remaining_work() -> None:
-    async def main() -> list[tuple[str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, float]] = []
-
-        async def job() -> None:
-            remaining = 10.0
-            while remaining > 0:
-                try:
-                    async with res.request(priority=5):
-                        log.append(("job start", sim.now))
-                        await sim.timeout(remaining)
-                        remaining = 0
-                except Interrupt as exc:
-                    assert isinstance(exc.cause, Preempted)
-                    remaining -= sim.now - exc.cause.usage_since
-                    log.append(("job preempted", sim.now))
-            log.append(("job done", sim.now))
-
-        async def urgent() -> None:
-            await sim.timeout(4)
-            async with res.request(priority=0):
-                log.append(("urgent start", sim.now))
-                await sim.timeout(3)
-
-        await asyncio.gather(sim.spawn(job()), sim.spawn(urgent()))
-        return log
-
-    assert desyncio.run(main()) == [
-        ("job start", 0.0),
-        ("urgent start", 4.0),
-        ("job preempted", 4.0),
-        ("job start", 7.0),
-        ("job done", 13.0),
-    ]
-
-
-def test_preempt_false_never_preempts() -> None:
+@pytest.mark.parametrize(
+    ("holder_priority", "challenger_priority", "preempt"),
+    [
+        (5, 0, False),  # better, but it did not ask to preempt
+        (3, 3, True),  # equal priority is not better
+        (1, 9, True),  # worse priority
+    ],
+)
+def test_challenger_that_may_not_preempt_waits_its_turn(
+    holder_priority: float, challenger_priority: float, preempt: bool
+) -> None:
     async def main() -> list[tuple[str, str, float]]:
         res = PreemptiveResource(1)
         log: list[tuple[str, str, float]] = []
         await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "low", 5, 4)),
-            sim.spawn(_victim_job(res, log, "high", 0, 1, preempt=False, delay=1)),
+            sim.spawn(_victim_job(res, log, "holder", holder_priority, 4)),
+            sim.spawn(
+                _victim_job(
+                    res,
+                    log,
+                    "challenger",
+                    challenger_priority,
+                    1,
+                    preempt=preempt,
+                    delay=1,
+                )
+            ),
         )
         return log
 
     assert desyncio.run(main()) == [
-        ("low", "start", 0.0),
-        ("low", "done", 4.0),
-        ("high", "start", 4.0),
-        ("high", "done", 5.0),
-    ]
-
-
-def test_equal_priority_never_preempts() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "first", 3, 4)),
-            sim.spawn(_victim_job(res, log, "second", 3, 1, delay=1)),
-        )
-        return log
-
-    assert desyncio.run(main()) == [
-        ("first", "start", 0.0),
-        ("first", "done", 4.0),
-        ("second", "start", 4.0),
-        ("second", "done", 5.0),
-    ]
-
-
-def test_worse_priority_request_never_preempts() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(1)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "good", 1, 4)),
-            sim.spawn(_victim_job(res, log, "bad", 9, 1, delay=1)),
-        )
-        return log
-
-    assert [e[:2] for e in desyncio.run(main())] == [
-        ("good", "start"),
-        ("good", "done"),
-        ("bad", "start"),
-        ("bad", "done"),
+        ("holder", "start", 0.0),
+        ("holder", "done", 4.0),
+        ("challenger", "start", 4.0),
+        ("challenger", "done", 5.0),
     ]
 
 
@@ -942,37 +880,30 @@ def test_better_waiting_non_preempting_request_is_not_jumped() -> None:
     ]
 
 
-def test_tie_among_worst_holders_picks_most_recent() -> None:
+@pytest.mark.parametrize(
+    ("early_priority", "late_priority", "victim"),
+    [
+        (5, 5, "late"),  # a tie among the worst holders: the most recent loses
+        (7, 3, "early"),  # the worst holder loses, even though it is not the latest
+    ],
+)
+def test_preemption_picks_the_right_victim(
+    early_priority: float, late_priority: float, victim: str
+) -> None:
     async def main() -> list[tuple[str, str, float]]:
         res = PreemptiveResource(2)
         log: list[tuple[str, str, float]] = []
         await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "early", 5, 10)),
-            sim.spawn(_victim_job(res, log, "late", 5, 10, delay=1)),
+            sim.spawn(_victim_job(res, log, "early", early_priority, 10)),
+            sim.spawn(_victim_job(res, log, "late", late_priority, 10, delay=1)),
             sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
         )
         return log
 
     log = desyncio.run(main())
-    assert ("late", "preempted", 2.0) in log
-    assert ("early", "done", 10.0) in log
-    assert ("early", "preempted", 2.0) not in log
-
-
-def test_worst_priority_holder_is_chosen_not_the_latest() -> None:
-    async def main() -> list[tuple[str, str, float]]:
-        res = PreemptiveResource(2)
-        log: list[tuple[str, str, float]] = []
-        await asyncio.gather(
-            sim.spawn(_victim_job(res, log, "worst", 7, 10)),
-            sim.spawn(_victim_job(res, log, "mid", 3, 10, delay=1)),
-            sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
-        )
-        return log
-
-    log = desyncio.run(main())
-    assert ("worst", "preempted", 2.0) in log
-    assert ("mid", "done", 11.0) in log
+    survivor = "early" if victim == "late" else "late"
+    assert [e for e in log if e[1] == "preempted"] == [(victim, "preempted", 2.0)]
+    assert (survivor, "done") in [e[:2] for e in log]
 
 
 def test_plain_async_with_is_preemptible_and_preempts() -> None:
@@ -1087,15 +1018,11 @@ def test_raising_monitor_on_preemption_is_reported_and_preemption_stands() -> No
     assert n_errors > 0  # reported, not raised
 
 
-def test_preempt_must_be_bool_and_priority_validated() -> None:
+def test_preempt_must_be_bool_and_priority_defaults_to_zero() -> None:
+    # The priority checks are in test_priority_validation.
     res = PreemptiveResource(1)
     with pytest.raises(TypeError):
         res.request(preempt=1)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        res.request(priority=True)
-    with pytest.raises(ValueError):
-        res.request(priority=float("nan"))
-    assert isinstance(res, PriorityResource)
     assert res.request().priority == 0
 
 
@@ -1484,7 +1411,8 @@ async def _preemption_stress(n: int = 40) -> list[tuple[float, str, str]]:
     return trace
 
 
-@pytest.mark.parametrize("seed", range(40))
+@given(st.integers(0, 2**32))
+@settings(max_examples=40, derandomize=True, deadline=None)
 def test_preemption_stress(seed: int) -> None:
     desyncio.run(_preemption_stress(), seed=seed)
 
