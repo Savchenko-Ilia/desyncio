@@ -403,7 +403,6 @@ def test_determinism_same_trace_as_fast_mode_and_same_wall_series() -> None:
     assert end1 == 3.0  # 6 virtual seconds at speed 2
 
 
-
 def _switch_to_fast_after(wall: FakeWall, pacer: RealTimePacer, n: int) -> None:
     """After ``n`` full timed waits, the "user" sets speed to inf mid-wait.
 

@@ -445,13 +445,15 @@ To reproduce it, subclass `VirtualTimeLoop` and wrap `_run_once`:
 import asyncio
 from desyncio.loop import VirtualTimeLoop
 
+
 class Traced(VirtualTimeLoop):
     def _run_once(self):
         ready = list(self._ready)
-        heap = sorted(self._scheduled)       # PriorityTimerHandle sorts by its key
+        heap = sorted(self._scheduled)  # PriorityTimerHandle sorts by its key
         before = self.time()
         super()._run_once()
         print(before, len(ready), [(h._when, h.sequence) for h in heap], self.time())
+
 
 with asyncio.Runner(loop_factory=Traced) as runner:
     runner.run(main())

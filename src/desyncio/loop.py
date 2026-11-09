@@ -398,9 +398,7 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         ``call_at`` uses 0.
         """
         if not isinstance(priority, int) or isinstance(priority, bool):
-            raise TypeError(
-                f"priority must be an int, got {type(priority).__name__}"
-            )
+            raise TypeError(f"priority must be an int, got {type(priority).__name__}")
         timer = self._schedule(
             when, priority, callback, args, context, "call_at_priority"
         )

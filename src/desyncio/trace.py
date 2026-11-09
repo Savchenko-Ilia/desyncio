@@ -197,4 +197,3 @@ class _TracedCoroutine(collections.abc.Coroutine[Any, Any, Any]):
         # __name__, __qualname__, cr_frame, cr_code, ...: used by Task.__repr__
         # and Task.get_stack. Delegate to the real coroutine.
         return getattr(self._coro, attr)
-
