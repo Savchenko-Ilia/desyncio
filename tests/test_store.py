@@ -401,6 +401,37 @@ def test_monitor_not_called_for_cancelled_or_failed_operations() -> None:
     assert desyncio.run(main()) == 0
 
 
+# --- raising monitor (D023 v2) -----------------------------------------
+
+
+class MonitorBoom(Exception):
+    pass
+
+
+def _capture_handler(loop: asyncio.AbstractEventLoop) -> list[dict[str, Any]]:
+    seen: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, ctx: seen.append(ctx))
+    return seen
+
+
+def test_raising_monitor_on_get_still_returns_the_item() -> None:
+    async def main() -> tuple[str, int, int, list[dict[str, Any]]]:
+        seen = _capture_handler(asyncio.get_running_loop())
+
+        def monitor(store: Store[str]) -> None:
+            if len(store) == 0:  # only after the get empties the store
+                raise MonitorBoom("monitor failed")
+
+        s: Store[str] = Store(monitor=monitor)
+        await s.put("x")
+        item = await s.get()
+        return item, len(s), len(s.items), seen
+
+    item, n, n_items, seen = desyncio.run(main())
+    assert (item, n, n_items) == ("x", 0, 0)
+    assert len(seen) == 1
+
+
 # --- validation ---------------------------------------------------------
 
 

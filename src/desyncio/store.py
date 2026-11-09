@@ -50,9 +50,11 @@ class Store[T]:
         monitor: optional callable, called as ``monitor(store)`` right after
             each completed ``put`` or ``get`` (D021). It runs synchronously
             in the task that completed the operation, at the current virtual
-            time, and must not block. A raised exception propagates to that
-            task. It is not called for operations that were cancelled or
-            refused by ``shutdown``.
+            time, once the store's state is settled (D023). An ``Exception``
+            it raises does not reach that task: it is passed to
+            ``loop.call_exception_handler`` and the operation completes
+            normally (D023 v2). It is not called for operations that were
+            cancelled or refused by ``shutdown``.
 
     Raises:
         TypeError: ``capacity`` is not an int or ``math.inf`` (``bool`` is
@@ -109,8 +111,7 @@ class Store[T]:
         """
         await self._queue.put(item)
         self._items.append(item)
-        if self._monitor is not None:
-            self._monitor(self)
+        self._notify()
 
     async def get(self) -> T:
         """Remove and return the oldest item, waiting while the store is empty.
@@ -123,9 +124,29 @@ class Store[T]:
         """
         item = await self._queue.get()
         self._items.popleft()
-        if self._monitor is not None:
-            self._monitor(self)
+        self._notify()
         return item
+
+    def _notify(self) -> None:
+        """Call the monitor, routing its errors to the loop (D023 v2).
+
+        This mirrors how asyncio runs a callback (``Handle._run``): an
+        ``Exception`` from the monitor is handed to
+        ``loop.call_exception_handler`` (which logs it by default) instead of
+        propagating, so the ``put``/``get`` that triggered it still completes
+        and the item is never lost. ``KeyboardInterrupt``/``SystemExit`` are
+        ``BaseException`` and propagate, as in asyncio. ``CancelledError`` is
+        also a ``BaseException``; this helper runs only after the queue
+        operation has finished, so there is no pending cancellation to mask.
+        """
+        if self._monitor is None:
+            return
+        try:
+            self._monitor(self)
+        except Exception as exc:
+            asyncio.get_running_loop().call_exception_handler(
+                {"message": "Store monitor raised", "exception": exc, "store": self}
+            )
 
     def shutdown(self, immediate: bool = False) -> None:
         """Shut the store down; a pure passthrough to ``Queue.shutdown``.
