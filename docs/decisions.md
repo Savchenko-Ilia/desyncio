@@ -203,3 +203,7 @@ Specified up front, following the batch 9 lesson about contracts that cross feat
 - **MON-01, `mean(until=None)`:** time-weighted over `[first record, until]`, where the last value holds until `until`. `until=None` means `sim.now`, so it works only inside a run; after the run, pass `until=` explicitly. `until` earlier than the last record is a `ValueError`. An empty series raises `ValueError`. If the span has zero length, `mean()` returns the last value. `min`, `max` and `last` are over the recorded values.
 - **RES-02 and STO-02:** the monitor is `monitor(primitive)` per D023 v2, with the same helper pattern as `Resource._changed` and `Store._notify`. Both live beside the existing classes, in the same modules, and do not change RES-01 or STO-01 behaviour.
 The owner may revise these. They are the minimal reading of the spec.
+
+## D029 — MON-01 review: two items promoted to MUST (lead)
+- **D016 test:** the reviewer listed "wiring a `TimeSeries` in does not change the model" as a SHOULD. It is promoted, because D016 is a project invariant and the feature exists to be wired into models.
+- **Time going backwards:** reusing one `TimeSeries` in a second `desyncio.run` restarts the clock at 0, so `record` sees `t < last t` and silently adds negative area. This extends D028: `record` at a virtual time earlier than the last record raises `ValueError`, and the series is left unchanged. A series belongs to one run.
