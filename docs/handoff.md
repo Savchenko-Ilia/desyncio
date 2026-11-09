@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 12. Next session starts batch 13 (DOC-02) after the owner's "go"._
+_Last updated: 2026-11-09, end of batch 13. Module 2 is complete. The next session starts a clean-up batch or module 3, after the owner decides which and says "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -18,7 +18,7 @@ _Last updated: 2026-11-09, end of batch 12. Next session starts batch 13 (DOC-02
 17 of 18 features are done. LOOP-12 (benchmark) is deferred by the owner (D018).
 `docs/implementation-log.md` has an entry per feature; `docs/how-the-loop-works.md` is the explainer.
 
-## Module 2: DES primitives — IN PROGRESS (batch 12 done; DOC-02 left)
+## Module 2: DES primitives — DONE (batch 13)
 The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D019: primitives use `async with`.
 - D020 (refined) and D024: interrupts are timeout-style `async with sim.interruptible():` scopes.
@@ -28,8 +28,12 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D026: random streams are `sim.random(name)`, which is `random.Random(f"{seed}:{name}")`.
 - D028–D031: batch 10 contracts and outcomes.
 - D032: RES-03 preemption is SimPy-style (owner). D034: a reservation can be preempted (owner to confirm). D033: the gate runs 3.13 + 3.14 + `ruff format --check`.
+- D038: the docs-examples test must never skip an example silently.
 
-**Done:** RES-01, CON-01, STO-01, INT-01 (batch 9); RND-01, MON-01, STO-02, RES-02 (batch 10); CI-03, RES-03 (batch 11); API-01 (batch 12). `integration` passes the gate with 688 tests on 3.13 and on 3.14. Nothing is in flight.
+**Done:** RES-01, CON-01, STO-01, INT-01 (batch 9); RND-01, MON-01, STO-02, RES-02 (batch 10); CI-03, RES-03 (batch 11); API-01 (batch 12); DOC-02 (batch 13). `integration` passes the gate with 788 tests on 3.13 and on 3.14. Nothing is in flight. No agents are running.
+
+**Merged in batch 13:**
+- DOC-02: `docs/primitives.md`, the primitives guide with 24 executed examples, and a README with a "Public API" list checked against `__all__`. Merged as b3746f4, after 1 fix round. Round 1 corrected the guide's claim about `cancelling()` after interrupt + real cancel. D038 promoted the silent skip of indented fences to a MUST, and it was fixed.
 
 **Merged in batch 12:**
 - API-01: public exports (D036, which adds `Preempted`); aaa8bba; 0 fix rounds. Its ownership was extended under D037 (the INT-01 export test was inverted, and monitor.py now uses `from desyncio.sim import sim`).
@@ -52,12 +56,13 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 **Release must be synchronous (D030).** Any `await` in an `__aexit__` is a cancellation point. RES-03 must keep `PriorityResource`'s release free of awaits.
 
 ## Next batches
-- **Batch 13: DOC-02** (primitives guide), in a fresh lead session. It owns `docs/primitives.md`, `README.md` and `tests/test_docs_examples.py`. It covers:
-  - examples: bank tellers (Resource), fuel tank (Container), producer/consumer (Store), machine breakdown (interrupts), preemption (the RES-03 machine shop), and the car wash (D026, `sim.random`);
-  - a "what is asyncio, what is ours" table per primitive;
-  - ordering and cancellation guarantees, including FilterStore's lack of `shutdown` (D031), the reservation preemption (D034) and the nested-`interruptible()` caveat from RES-03.
-  The examples use top-level imports (`from desyncio import ...`) and are run in a test. The README should list the exports. The docs claims must be true on `integration` (D011).
-- After DOC-02, module 2 is complete. Propose the clean-up SHOULD backlog and module 3 to the owner.
+Module 2 is done, and `docs/features.md` has nothing `todo`. AGENTS.md section 1 names only two scope items (the loop and the primitives). **Module 3 is not defined yet: ask the owner.** Candidates from the open questions are calendar/shift handling, LOOP-12 (the deferred benchmark) and statistics consumers.
+
+A proposed clean-up batch (the owner must accept it and the lead must write it into `docs/features.md` first) groups the SHOULDs below by owned files so the features don't overlap:
+- **CLN-01 (interrupt/sim):** fix the false `cancelling()` sentence in the `interrupt.py` docstring (D038); `sim.random` from a fresh `contextvars.Context`.
+- **CLN-02 (loop internals):** use `itertools.count` instead of `SequenceCounter`; unify the four float validators; check `MAX_REAL_WAIT`.
+- **CLN-03 (real time):** the `pause()` warnings in docstrings; a reused pacer that ended paused.
+- **CLN-04 (tests/docs):** the fence-language allowlist in `tests/test_docs_examples.py`; a named `import desyncio` cycle test; the generalised AST import guard; the FilterStore re-park seniority test.
 
 ## Open questions for the owner
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
@@ -76,6 +81,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **sim:** `sim.random` from a task created with a fresh `contextvars.Context` gives a misleading error.
 - **Tests:** `from models.mm1 import` depends on pytest's default `prepend` import mode.
 - Per-feature SHOULDs are listed in `docs/implementation-log.md`.
+- **Batch 13 SHOULDs:** DOC-02. A ```` ```Python ```` / ```` ```python3 ```` fence is parsed but never run, so the test needs an allowlist of fence languages. Split the preemption edge cases into separate examples. Pin the prose-only claims with examples (see the log entry).
 - **Batch 12 SHOULDs:** API-01 (a named `import desyncio` cycle test; generalise the AST guard to any `from desyncio import X`).
 - **Batch 10–11 SHOULDs:** CI-03 (add `.venv-3.14` to ruff's exclude or `.gitignore`, and an explicit `uv python install 3.14` in ci.yml); RES-03 (the AST guard can't see a helper that awaits).
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
@@ -92,6 +98,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Ask reviewers to probe concurrency with scripts, and to try mutations of the tests.** Batch 10's two real bugs (a release leak, and a statistics test that could not fail) were found that way, not by reading.
 - **Never pipe `scripts/gate.sh` inside a `&&` chain** (D035): the chain sees the status of the last pipe stage. When the gate changes, gate older branches on the merged tree.
 - **No history rewrites:** the environment blocks force-pushes and amends of pushed commits. Ask agents for new commits on top.
+- **Promote a reviewer's SHOULD when it voids an acceptance criterion** (D038: a test that can skip an example silently voids "examples are run"). Let the re-review hunt for the same class of hole: in batch 13 it found another one, the fence-language case.
+- **Run the gate while the re-review runs.** They are independent, and doing both at once saves a round trip.
 - **Statistical tests:** pick parameters where the quantities you compare differ, and give the band against a spread over several seeds.
 
 ## Starting a new lead session

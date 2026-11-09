@@ -857,3 +857,42 @@ Branch: feat/API-01  ·  Merged: aaa8bba
 
 **Follow-ups.** The SHOULDs above. DOC-02 uses top-level imports, and the README lists the exports.
 
+
+## DOC-02 — Primitives guide (2026-11-09, batch 13)
+Branch: feat/DOC-02 (+ fix/DOC-02-1)  ·  Merged: b3746f4
+
+**Approach.**
+- `docs/primitives.md` gives each primitive (Resource, PriorityResource, PreemptiveResource/Preempted, Container, Store, FilterStore, PriorityStore, interrupts, the monitor hook and TimeSeries, and `sim.random`) three things: an example, a "what is asyncio, what is ours" table, and a guarantees section.
+- The six scenarios are bank tellers, fuel tank, producer/consumer, machine breakdown, machine-shop preemption and car wash (`sim.random`, D026). The guide has 24 executed examples, and most guarantees are pinned by one.
+- Convention: a ```` ```python ```` block is a complete example, and the ```` ```text ```` block right after it is its exact stdout. `tests/test_docs_examples.py` runs every python block with `exec` in fresh globals, compares the stdout, and runs it twice for determinism. It also checks:
+  - imports are top-level only (`from desyncio import ...`);
+  - the guide mentions every primitive and the D030, D031, D034 and D023 limits;
+  - the README links the guide, its example runs, and its "Public API" bullet list equals `desyncio.__all__`.
+- `ruff format` also formats python blocks inside Markdown, so the gate's `ruff format --check .` covers the guide's examples.
+- The README status note ("target API") was false and was rewritten.
+
+**asyncio internals.** The guide explains, from the source:
+- `Store` and `PriorityStore` delegate to `asyncio.Queue` and `asyncio.PriorityQueue`.
+- `Container` and `FilterStore` are built on `asyncio.Condition` with tickets.
+- `PriorityResource` waiting is hand-written per-request futures (D030).
+- Interrupts are `task.cancel()` plus `uncancel()` (D024).
+- A detail found in review: `uncancel()` at `__aexit__` undoes only the interrupt's own cancel. If a real cancel also fired, `task.cancelling()` stays one higher after the block. That is how an enclosing `timeout()` or `TaskGroup` knows the cancel is still pending.
+
+**Trade-offs.**
+- The examples are checked by exact stdout, not by doctest. Whole programs read better than `>>>` sessions, and a changed number fails loudly.
+- The car-wash output depends on CPython's `Random(str)` seeding and its `expovariate`/`uniform` algorithms. It passes on 3.13 and 3.14. If CPython changes those algorithms, the example fails on purpose.
+
+**Review findings.**
+- FAIL in round 1:
+  - MUST: the guide claimed `cancelling()` is restored after an interrupted block even when a real cancel also fired. That is false (it stays +1). The wording was corrected and an executed example pins both cases.
+  - Lead promotion (D038): the extractor silently skipped indented fences, so an example could go unrun with the suite still green. Guards were added against indented and tilde fences, and fence lines must equal twice the parsed blocks. The tests are also parametrized per example (ids such as `19-guarantees`), so one failure no longer hides the rest.
+- PASS on re-review. 788 tests on 3.13 and 3.14; `GATE PASS`.
+
+**Gotchas.** Read the README export list and the guide's claims as tests: changing the public API or a guarantee breaks `tests/test_docs_examples.py`, by design (D011).
+
+**Follow-ups (SHOULD).**
+- A ```` ```Python ```` or ```` ```python3 ```` fence is parsed but never run, and the suite stays green (only the test count drops). Fix it with an allowlist of fence languages.
+- The substring tests (`test_guide_covers_every_primitive`, `test_guide_documents_the_known_limits`) pin little.
+- Split the three preemption edge cases into separate headed examples, for readability.
+- The `src/desyncio/interrupt.py` module docstring repeats the false `cancelling()` sentence (D038).
+- Turn some prose-only claims into examples. The reviewer probed them and they are true: the Resource monitor event sequence, a raising filter leaving the store unchanged, `Container` amount > capacity raising ValueError, no monitor call for a cancelled `Container.get`, and the monitor call on an immediate shutdown.
