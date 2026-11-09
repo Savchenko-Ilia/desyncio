@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09. Module 5 (quick start and examples, D055) is in progress: batch 28 (DOC-03, EX-01). PR #5 (`integration` → `main`) is open and covers batches 19–27 and whatever lands after. Per D049 the lead reports at the end of the module._
+_Last updated: 2026-11-09, end of batch 28. **Module 5 (quick start and examples) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`) is open and covers batches 19–28. Next: the owner decides what comes next._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -88,8 +88,12 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 24:** CAL-01 `Calendar` (1 fix round). **Batch 25:** CAL-02 `Shift`/`Schedule` (0 rounds). **Batch 26:** CAL-03 `ScheduledResource`/`ShiftEnded` (1 round). **Batch 27:** CAL-04 exports and `docs/calendar.md` (60da3ad, 1 round).
 - `integration` passes the gate: 683 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. AGENTS.md has no open question left.
 
+## Module 5: quick start and examples — DONE (batch 28)
+- D055. DOC-03 `docs/quickstart.md` (d1ec9af, 1 fix round). EX-01 `examples/` with bank, machine shop, inventory and clinic models, smoke-tested and type-checked by the gate (98614ba, 1 fix round).
+- `integration` passes the gate: 692 tests on 3.13 and 3.14 (about 15 s each), ruff, `mypy src tests examples`.
+
 ## Next batches
-1. **Module 5 (D055):** batch 28, DOC-03 and EX-01, in flight on `feat/DOC-03` and `feat/EX-01`. After that, candidates: LOOP-12 benchmark (D018); a 0.1 release; optional `tzdata` for Windows (D051 item 6).
+1. **Module 6 is undefined.** Candidates: LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.

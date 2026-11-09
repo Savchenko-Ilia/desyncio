@@ -1279,3 +1279,33 @@ Branch: feat/CAL-04 (+ fix/CAL-04-1)  ·  Merged: 60da3ad
 **Gotchas.** `%a`/`%b` in the examples print C-locale names; Python does not call `setlocale` at startup.
 
 **Follow-ups (SHOULD).** Wrap one long line in the clinic intro.
+
+## DOC-03 — Quick start (2026-11-09, batch 28)
+Branch: feat/DOC-03 (+ fix/DOC-03-1)  ·  Merged: d1ec9af
+
+**Approach.** New `docs/quickstart.md`, linked near the top of the README and first in its Documentation list. It covers install from git (`uv add git+...`, `pip install git+...`; shell commands in `text` fences, because the D038 allowlist is `python`/`text`), a first model (200 customers, one `Resource`, a `Tally`, seed 1), a walk-through (`sim`, named streams, TaskGroup, FIFO, why `sim.timeout` returns instantly, why the seed fixes the output) and "where next". The example runs in the docs tests (`GUIDES` minimum 1). 683 → 688 tests.
+
+**asyncio internals.** The walk-through explains the clock jump: when every task waits on a timer, the loop moves the virtual clock to the earliest one instead of sleeping.
+
+**Trade-offs.** One short model, not several; the examples folder carries the complete models.
+
+**Review findings.** Round 1, one MUST: the prose called the mean wait only "noisy"; the run is M/M/1 with Wq = 16 and starts empty, so 12.61 is also biased low. The text now says so and links the statistics guide's warm-up and replications section.
+
+**Gotchas.** A shell block right after a python block would be read as its expected output by `_examples`; keep install blocks before the first python block.
+
+**Follow-ups (SHOULD).** Optionally say "steady state" next to the long-run 16.
+
+## EX-01 — Examples folder (2026-11-09, batch 28)
+Branch: feat/EX-01 (+ fix/EX-01-1)  ·  Merged: 98614ba
+
+**Approach.** Four commented models in `examples/`, each with a docstring (what it models, features shown, how to run): `bank.py` (M/M/1, `Tally` + `TimeSeries` vs theory, then `replicate` + `confidence_interval` with an honest bias caveat), `machine_shop.py` (breakdowns, repairmen as a `PreemptiveResource`, urgent repairs preempting maintenance, `Interrupt`/`Preempted` caught outside the `async with` and the remaining work re-queued), `inventory.py` (stock `Container`, (s, S) policy with lead time, lost sales, `time_fractions` of stock), `clinic.py` (`Calendar` in Europe/Berlin, a week with a Saturday shift and closed Thursday/Sunday, `ScheduledResource`, interrupted patients re-queue with their remaining time). `examples/README.md` lists them. `tests/test_examples.py` runs each in a subprocess and checks exact key lines. The gate's `LINT_CMD` now type-checks `examples`. 688 → 692 tests.
+
+**asyncio internals.** Comments explain the TaskGroup wait, main suspended in `sim.timeout` while customers run, `Interrupt` not being a `CancelledError`, and leftover tasks being cancelled when `main` returns.
+
+**Trade-offs.** The clinic is overloaded on purpose (its docstring says so) to show what closed days do to a queue.
+
+**Review findings.** Round 1, one MUST: the bank test didn't pin the single-run seed (seed 1 → 2 still passed); its single-run lines are now pinned. The reviewer verified with instrumented copies the machine-shop work accounting (every finished job's work equals its amount), the inventory invariant `level + on_order ≤ S` on all 365 days, and `Container.get` waiting in FIFO order. SHOULDs done: clinic backlog explained, per-preemption count explained, `unmet` an int, `assert` replaced by a re-raise.
+
+**Gotchas.** `bank.py` takes about 1.5 s, most of it importing scipy for `confidence_interval`.
+
+**Follow-ups.** None.
