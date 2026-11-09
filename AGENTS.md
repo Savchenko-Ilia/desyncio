@@ -39,6 +39,11 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
    visualisation are consumers built on top, not part of the core.
 5. **No real I/O inside a simulation.** Sockets, subprocesses and executors are refused with a
    clear error.
+6. **Reuse asyncio first.** If asyncio already provides the behaviour (a queue, a lock, a semaphore,
+   a condition, cancellation, task groups, timeouts), use it: delegate to it or wrap it thinly, and
+   never re-implement it. Write our own waiting/queueing logic only where asyncio has no equivalent,
+   and then build it on asyncio's building blocks (`Condition`, futures). Say in the docstring what is
+   delegated. A hand-written replacement for existing asyncio functionality is a MUST review finding (D022).
 
 ---
 

@@ -16,6 +16,8 @@ Check:
 3. Edge cases: empty input, errors, concurrency, large data.
 4. Security: injection, path traversal, secrets, unsafe shell calls.
 5. Scope: changes outside the feature's owned files, new dependencies.
+6. Reuse (AGENTS.md principle 6): any hand-written logic that duplicates existing asyncio
+   functionality (queues, locks, semaphores, conditions, cancellation) is a MUST.
 
 Output (exactly this shape):
 VERDICT: PASS | FAIL
