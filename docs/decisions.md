@@ -342,3 +342,7 @@ The lead proposed these defaults, and the owner accepted all six ("go"):
 4. `closed` dates: no shift *starts* on them (an overnight shift from the day before still finishes).
 5. DST: a boundary at a non-existent local time moves to the first valid instant after the gap; an ambiguous one uses the first occurrence.
 6. No new dependency. `zoneinfo` needs the system time-zone database. Linux and macOS have it; Windows needs the `tzdata` package, which is not added (this needs the owner's OK).
+
+## D052 — CAL-01 review: two SHOULDs promoted to MUST (lead)
+- The round-trip test's tolerance was `1e-6 * unit` seconds-in-sim-units, which for an hour unit allows 3.6 ms, not the row's 1 µs. A test that does not check the spec is a test defect.
+- `to_sim` leaked a bare `OverflowError` for an out-of-range datetime, while `to_datetime` raises `ValueError`. Both must raise `ValueError`.
