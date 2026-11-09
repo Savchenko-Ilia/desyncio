@@ -1071,3 +1071,42 @@ def test_abandoned_task_leaves_no_registry_entry_after_gc() -> None:
     collected, after, before = desyncio.run(main())
     assert collected, "the registry kept the abandoned task alive"
     assert after == before
+
+
+def test_cancelling_delta_interrupt_only_vs_interrupt_plus_real_cancel() -> None:
+    """Pins the module docstring: uncancel() undoes only the interrupt's cancel."""
+
+    async def main() -> tuple[list[int], list[int]]:
+        only: list[int] = []
+        both: list[int] = []
+
+        async def worker(out: list[int], kind: str) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            before = task.cancelling()
+            try:
+                try:
+                    async with sim.interruptible():
+                        await sim.timeout(100)
+                except Interrupt:
+                    assert kind == "only"
+                    out.append(task.cancelling() - before)
+                    return
+                raise AssertionError("block exited normally")
+            except asyncio.CancelledError:
+                assert kind == "both"
+                out.append(task.cancelling() - before)
+                raise
+
+        a = sim.spawn(worker(only, "only"))
+        b = sim.spawn(worker(both, "both"))
+        await sim.timeout(1)
+        sim.interrupt(a, "x")
+        sim.interrupt(b, "x")
+        b.cancel()
+        await a
+        with pytest.raises(asyncio.CancelledError):
+            await b
+        return only, both
+
+    assert desyncio.run(main()) == ([0], [1])

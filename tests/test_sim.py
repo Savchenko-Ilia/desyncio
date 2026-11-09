@@ -257,3 +257,28 @@ def test_random_return_annotation_resolves_to_random_class() -> None:
 
     assert typing.get_type_hints(Sim.random)["return"] is random.Random
     assert Sim.random.__annotations__["return"] is random.Random
+
+
+def test_random_outside_run_message_unchanged() -> None:
+    with pytest.raises(RuntimeError, match=r"desyncio\.run"):
+        sim.random("x")
+
+
+def test_random_in_fresh_context_task_names_the_cause() -> None:
+    import contextvars
+
+    async def child() -> None:
+        sim.random("x")
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(child(), context=contextvars.Context())
+        with pytest.raises(RuntimeError) as info:
+            await task
+        msg = str(info.value)
+        assert "simulation is running" in msg
+        assert "random streams" in msg
+        assert "fresh contextvars.Context" in msg
+        assert "no simulation is running" not in msg
+
+    desyncio.run(main())
