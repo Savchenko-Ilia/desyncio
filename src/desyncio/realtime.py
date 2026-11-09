@@ -65,6 +65,8 @@ import threading
 import time
 from typing import Protocol
 
+from desyncio._validate import to_float
+
 Events = list[tuple[selectors.SelectorKey, int]]
 
 #: Longest single real wait, in seconds (one day). ``select`` raises
@@ -106,9 +108,13 @@ class SystemWallClock:
 
 
 def _check_speed(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"speed must be a real number, got {type(value).__name__}")
-    speed = float(value)
+    speed = to_float(
+        value,
+        type_error="speed must be a real number, got {type}",
+        overflow_error=(
+            "speed must be > 0 (or math.inf), got an int too large for a float"
+        ),
+    )
     if math.isnan(speed) or speed <= 0.0:
         raise ValueError(f"speed must be > 0 (or math.inf), got {value!r}")
     return speed

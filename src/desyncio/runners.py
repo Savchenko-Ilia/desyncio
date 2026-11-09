@@ -61,6 +61,7 @@ import math
 from collections.abc import Coroutine
 from typing import Any, overload
 
+from desyncio._validate import to_float
 from desyncio.clock import VirtualClock
 from desyncio.loop import VirtualTimeLoop
 from desyncio.randomness import RandomStreams
@@ -113,18 +114,12 @@ def current_random_streams() -> RandomStreams:
 
 def _check_until(until: object) -> float:
     """Validate ``until`` (a finite real number >= the start time 0.0)."""
-    if isinstance(until, bool) or not isinstance(until, (int, float)):
-        raise TypeError(
-            f"until must be a real number or None, got {type(until).__name__}"
-        )
-    try:
-        value = float(until)
-    except OverflowError:
-        raise ValueError(
-            "until must be finite, got an int too large for a float"
-        ) from None
-    if not math.isfinite(value):
-        raise ValueError(f"until must be finite, got {value!r}")
+    value = to_float(
+        until,
+        type_error="until must be a real number or None, got {type}",
+        overflow_error="until must be finite, got an int too large for a float",
+        finite_error="until must be finite, got {value!r}",
+    )
     if value < 0.0:
         raise ValueError(f"until must be >= the start time 0.0, got {value!r}")
     return value

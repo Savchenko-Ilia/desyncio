@@ -21,11 +21,11 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 """
 
 import asyncio
-import math
 from collections.abc import Coroutine
 from random import Random
 from typing import Any
 
+from desyncio._validate import to_float
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_random_streams
@@ -49,14 +49,12 @@ def _loop() -> VirtualTimeLoop:
 
 def _check_delay(dt: object) -> float:
     """Validate ``dt``: a finite real number >= 0 (bool is rejected)."""
-    if isinstance(dt, bool) or not isinstance(dt, (int, float)):
-        raise TypeError(f"dt must be a real number, got {type(dt).__name__}")
-    try:
-        value = float(dt)
-    except OverflowError:
-        raise ValueError("dt must be finite, got an int too large") from None
-    if not math.isfinite(value):
-        raise ValueError(f"dt must be finite, got {value!r}")
+    value = to_float(
+        dt,
+        type_error="dt must be a real number, got {type}",
+        overflow_error="dt must be finite, got an int too large",
+        finite_error="dt must be finite, got {value!r}",
+    )
     if value < 0.0:
         raise ValueError(f"dt must be >= 0, got {value!r}")
     return value
