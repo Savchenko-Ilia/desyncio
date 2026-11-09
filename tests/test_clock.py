@@ -163,6 +163,9 @@ def test_clock_messages_unchanged() -> None:
     with pytest.raises(TypeError) as t:
         VirtualClock(start="a")  # type: ignore[arg-type]
     assert str(t.value) == "start must be a real number (int or float), got str"
+    with pytest.raises(TypeError) as b:
+        VirtualClock(start=True)
+    assert str(b.value) == "start must be a real number (int or float), got bool"
     with pytest.raises(ValueError) as o:
         VirtualClock(start=_BIG)
     assert (
