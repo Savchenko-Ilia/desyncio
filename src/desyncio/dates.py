@@ -17,7 +17,10 @@ in ``start``'s zone. DST changes the displayed wall clock, never the sim clock.
 
 Precision: ``datetime`` has microsecond resolution. ``to_datetime`` rounds to
 the nearest microsecond (as ``timedelta * float`` does). ``to_sim`` is exact
-to that resolution.
+to that resolution. Sim time ``t`` itself is a float and has limited
+resolution too, relative to its size: about 1e-7 s near ``t = 1e9`` s (some
+30 years in seconds; ``math.ulp(1e9)`` is 1.2e-7). That is a property of
+floats, not of the conversion.
 
 Only the stdlib (``datetime``, and ``zoneinfo`` for the caller's zones) is used.
 """
