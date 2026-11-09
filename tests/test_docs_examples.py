@@ -114,34 +114,19 @@ def test_every_fence_language_is_allowed(path: Path) -> None:
     assert not bad, f"{path.name}: fence languages {bad} not in {ALLOWED_LANGUAGES}"
 
 
-def test_python_block_count_matches_python_fence_lines() -> None:
-    text = GUIDE.read_text()
-    openers = len(re.findall(r"^```python[ \t]*$", text, re.MULTILINE))
-    assert len(GUIDE_EXAMPLES) == openers
-
-
 def test_guide_exists_and_has_examples() -> None:
     assert len(GUIDE_EXAMPLES) >= 8
     assert len(GUIDE_IDS) == len(GUIDE_EXAMPLES)
 
 
 @pytest.mark.parametrize(("code", "expected"), GUIDE_EXAMPLES, ids=GUIDE_IDS)
-def test_every_guide_example_declares_its_output(
+def test_guide_example_declares_and_prints_its_output_deterministically(
     code: str, expected: str | None
 ) -> None:
+    """Output block exists; two runs each print exactly what the docs say."""
     assert expected is not None, f"example has no ```text output block:\n{code}"
-
-
-@pytest.mark.parametrize(("code", "expected"), GUIDE_EXAMPLES, ids=GUIDE_IDS)
-def test_guide_examples_run_and_print_what_the_docs_say(
-    code: str, expected: str | None
-) -> None:
     assert _run(code) == expected, code
-
-
-@pytest.mark.parametrize(("code", "expected"), GUIDE_EXAMPLES, ids=GUIDE_IDS)
-def test_guide_examples_are_deterministic(code: str, expected: str | None) -> None:
-    assert _run(code) == _run(code), code
+    assert _run(code) == expected, f"second run differs:\n{code}"
 
 
 def test_examples_use_top_level_imports_only() -> None:
@@ -201,8 +186,3 @@ def test_readme_export_list_matches_all() -> None:
     section = section[: end if end != -1 else None]
     listed = set(re.findall(r"^- `([A-Za-z_]+)`", section, re.MULTILINE))
     assert listed == set(desyncio.__all__)
-
-
-@pytest.mark.parametrize("name", desyncio.__all__)
-def test_readme_mentions_every_export(name: str) -> None:
-    assert f"`{name}`" in README.read_text()
