@@ -124,10 +124,10 @@ def test_reservation_taken_back_at_same_instant() -> None:
                 log.append((name, "interrupted", sim.now, exc.cause))
 
         # a and c hold from the start; the drop at 02:00 interrupts c, the later
-        # grant. b waits from 03:00. a's release at 05:00 was timed before the
-        # driver armed its 05:00 timer, so it runs first and hands b a
-        # reservation; the drop to 0 then takes it back before b resumes, so b's
-        # body never runs.
+        # grant. b waits from 03:00. a's release at 05:00 runs before the drop
+        # (D054: the driver's timer has priority 1) and hands b a reservation;
+        # the drop to 0 then takes it back before b resumes, so b's body never
+        # runs.
         users = [user("a", 0, 5 * H), user("c", 1, 99 * H), user("b", 3 * H, H)]
         await asyncio.gather(*(sim.spawn(u) for u in users))
         assert res.count == 0 and res.queue_length == 0
@@ -279,3 +279,38 @@ def test_same_seed_same_trace() -> None:
 
     a = run(7)
     assert len(a) > 100 and a == run(7) and a != run(8)
+
+
+@pytest.mark.parametrize("driver_first", [False, True])
+def test_visit_ending_at_a_shift_end_completes(driver_first: bool) -> None:
+    async def main() -> None:
+        res = ScheduledResource(clinic(Shift(ALL_DAYS, time(0), time(2), 1)))
+        if driver_first:
+            await sim.timeout(0)  # the driver arms its 02:00 timer first
+        async with res:  # else: our 02:00 timer is armed before the driver's
+            await sim.timeout(2 * H)
+        assert sim.now == 2 * H and res.count == 0  # released, not interrupted
+        await sim.timeout(0)
+        assert res.capacity == 0
+
+    desyncio.run(main())
+
+
+def test_arrival_at_a_capacity_rise_queues_then_is_granted() -> None:
+    seen: list[tuple[float, int, int, int]] = []
+
+    def watch(r: ScheduledResource) -> None:
+        seen.append((sim.now, r.capacity, r.count, r.queue_length))
+
+    async def main() -> None:
+        res = ScheduledResource(
+            clinic(Shift(ALL_DAYS, time(9), time(17), 1)), monitor=watch
+        )
+        await sim.timeout(0)  # the driver arms its 09:00 timer first
+        await sim.timeout(9 * H)
+        async with res:
+            assert sim.now == 9 * H
+
+    desyncio.run(main(), until=10 * H)
+    # queued at 09:00 before the rise, then granted by it
+    assert seen[:3] == [(9 * H, 0, 0, 1), (9 * H, 1, 0, 1), (9 * H, 1, 1, 0)]

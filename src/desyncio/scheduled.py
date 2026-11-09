@@ -42,15 +42,30 @@ victim's ``async with`` then turns the cancellation into ``Interrupt`` (D024).
 The unit is already gone, so ``__aexit__`` does not release a second time.
 Release stays free of awaits (D030): a cancel can never skip it.
 
-Same instant as a release
--------------------------
-If a holder releases and a shift boundary falls at the same virtual time, the
-outcome depends on which timer the loop runs first. The loop breaks ties
-between timers by the order they were scheduled in (determinism, principle 2),
-so it is repeatable, but not "the shift end always wins". If the release comes
-first, the freed unit goes to the head waiter (a reservation) and the drop may
-then take it straight back (that waiter gets the ``Interrupt`` without its body
-running). If the drop comes first, the holder is interrupted.
+Same instant: ordinary events first, then the shift change (D054)
+-----------------------------------------------------------------
+The driver arms its timers with ``loop.call_at_priority(t, 1, ...)``. Timers
+fire in ``(time, priority, sequence)`` order, so at time ``t`` every ordinary
+timer (priority 0: ``sim.timeout``, ``asyncio.sleep``, ``call_at``...) fires
+before the driver's, whichever was armed first. How that carries over to the
+task steps: in one ``_run_once`` iteration all timers due at ``t`` move to the
+ready queue in that order and run. Each callback only resolves a future, and
+the future schedules its task's next step with ``call_soon`` (FIFO). So in the
+next iteration the woken tasks step in the same order: a holder whose visit
+ends at ``t`` runs its ``async with`` exit (a synchronous release) and an
+arrival at ``t`` queues its request, both before the driver's step applies the
+change. Hence:
+
+* a visit ending exactly at a shift end completes and releases its unit; the
+  drop then has one unit fewer to take back, and the holder is not interrupted;
+* arrivals at ``t`` are queued first, then a capacity rise at ``t`` grants them
+  in FIFO order.
+
+The guarantee covers work one step away from an ordinary timer at ``t``. Work
+that needs more steps (say a task that waits for *another* task woken at ``t``)
+may still come after the driver's step. If a release at ``t`` hands the unit
+to a waiter (a reservation) and the drop at ``t`` takes it straight back, that
+waiter gets the ``Interrupt`` without its body running.
 
 Cancelling a waiter
 -------------------
@@ -66,7 +81,9 @@ built on asyncio's building blocks like ``PriorityResource`` (D030):
 * delegated: the waiting itself (each waiter awaits its own
   ``loop.create_future()``, and a cancel, timeout or ``TaskGroup`` arrives as
   the ``CancelledError`` raised at ``await fut``); the driver is an ordinary
-  task on the loop with a loop timer (``loop.call_at``); interrupts reuse
+  task on the loop with a loop timer (``loop.call_at_priority``, the
+  ``call_at`` of ``VirtualTimeLoop`` with a tie-break priority); interrupts
+  reuse
   ``interrupt_task`` (cancel plus translation in ``__aexit__``, INT-01);
 * ours: the FIFO deque of waiters, the grant rule, the grant-order list used
   to pick victims, the counters, and the monitor hook.
@@ -92,8 +109,9 @@ from typing import Any, Self
 
 from desyncio._monitor import report_monitor_error
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
+from desyncio.loop import VirtualTimeLoop
 from desyncio.schedule import Schedule
-from desyncio.sim import sim
+from desyncio.sim import _loop, sim
 
 
 @dataclass(frozen=True)
@@ -150,7 +168,7 @@ class ScheduledResource:
         self._units: list[_Hold] = []  # every hold with a unit, in grant order
         self._count = 0  # holds whose task has resumed
         self._plain: dict[asyncio.Task[Any], list[tuple[_Hold, Interruptible]]] = {}
-        loop = asyncio.get_running_loop()
+        loop = _loop()
         self._driver = loop.create_task(
             self._drive(loop, now), name="ScheduledResource driver"
         )
@@ -182,13 +200,14 @@ class ScheduledResource:
 
     # --- the driver ----------------------------------------------------------
 
-    async def _drive(self, loop: asyncio.AbstractEventLoop, now: float) -> None:
+    async def _drive(self, loop: VirtualTimeLoop, now: float) -> None:
         for t, capacity in self._schedule.changes(now):
             # Sleep until exactly t. ``asyncio.sleep(t - now)`` would compute
             # ``now + (t - now)``, which may differ from t by a rounding error;
-            # call_at takes the absolute time.
+            # call_at takes the absolute time. Priority 1 (D054): at time t
+            # every ordinary timer (priority 0) fires first; see "Same instant".
             wake: asyncio.Future[None] = loop.create_future()
-            handle = loop.call_at(t, wake.set_result, None)
+            handle = loop.call_at_priority(t, 1, wake.set_result, None)
             try:
                 await wake
             finally:
