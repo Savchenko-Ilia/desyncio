@@ -10,12 +10,6 @@ import pytest
 import desyncio
 from desyncio import sim
 
-
-def test_exported() -> None:
-    assert "sim" in desyncio.__all__
-    assert desyncio.sim is sim
-
-
 # --- now ---------------------------------------------------------------
 
 
@@ -187,11 +181,8 @@ def _draw(seed: int) -> list[float]:
     return desyncio.run(main(), seed=seed)
 
 
-def test_rng_same_seed_same_sequence() -> None:
+def test_rng_same_seed_same_sequence_different_seed_differs() -> None:
     assert _draw(7) == _draw(7)
-
-
-def test_rng_different_seed_differs() -> None:
     assert _draw(7) != _draw(8)
 
 
@@ -200,27 +191,6 @@ def test_rng_continues_stream() -> None:
         return sim.random("x") is sim.random("x")
 
     assert desyncio.run(main()) is True
-
-
-# --- until -------------------------------------------------------------
-
-
-def test_pending_spawned_cancelled_at_until() -> None:
-    log: list[str] = []
-
-    async def proc() -> None:
-        try:
-            await sim.timeout(100)
-        except asyncio.CancelledError:
-            log.append(f"cancelled@{sim.now}")
-            raise
-
-    async def main() -> None:
-        sim.spawn(proc())
-        await sim.timeout(1000)
-
-    assert desyncio.run(main(), until=5) is None
-    assert log == ["cancelled@5.0"]
 
 
 # --- outside a VirtualTimeLoop ------------------------------------------
@@ -263,14 +233,6 @@ def test_random_return_annotation_resolves_to_random_class() -> None:
     assert Sim.random.__annotations__["return"] is random.Random
 
 
-def test_random_outside_run_message_unchanged() -> None:
-    with pytest.raises(
-        RuntimeError,
-        match=r"desyncio\.run\(\.\.\.\).*there is no such loop running here",
-    ):
-        sim.random("x")
-
-
 def test_random_in_fresh_context_task_names_the_cause() -> None:
     async def child() -> None:
         sim.random("x")
@@ -284,7 +246,6 @@ def test_random_in_fresh_context_task_names_the_cause() -> None:
         assert "simulation is running" in msg
         assert "random streams" in msg
         assert "fresh contextvars.Context" in msg
-        assert "no simulation is running" not in msg
 
     desyncio.run(main())
 

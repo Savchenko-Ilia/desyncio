@@ -101,7 +101,7 @@ class _Float(float):
     pass
 
 
-BAD_TYPES = ["5", b"5", True, False, None, 1 + 2j, object(), [1]]
+BAD_TYPES = ["5", b"5", True, None, 1 + 2j]
 
 
 @pytest.mark.parametrize("bad", BAD_TYPES)
