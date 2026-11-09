@@ -10,7 +10,7 @@ from its ``time()`` method; when nothing is ready to run it will jump the
 clock to the next timer with :meth:`VirtualClock.advance_to`.
 """
 
-import math
+from desyncio._validate import to_float
 
 
 class VirtualClock:
@@ -65,17 +65,13 @@ class VirtualClock:
             ValueError: if ``value`` is NaN, infinite, or an int too large
                 to represent as a float.
         """
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError(
-                f"{what} must be a real number (int or float), "
-                f"got {type(value).__name__}"
-            )
-        try:
-            result = float(value)
-        except OverflowError:
-            raise ValueError(
+        # `what` must be an internal constant with no braces: str.format sees it.
+        return to_float(
+            value,
+            type_error=f"{what} must be a real number (int or float), got {{type}}",
+            overflow_error=(
                 f"{what} must be a finite number, got an int too large for a float"
-            ) from None
-        if not math.isfinite(result):
-            raise ValueError(f"{what} must be a finite number, got {result!r}")
-        return result + 0.0  # -0.0 + 0.0 == 0.0
+            ),
+            finite_error=f"{what} must be a finite number, got {{value!r}}",
+            normalise_zero=True,
+        )
