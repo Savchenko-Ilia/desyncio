@@ -91,3 +91,22 @@ Review SHOULDs from modules 1 and 2, accepted by the owner's "go" after batch 13
 ## Suggested batches (clean-up)
 14. CLN-01, CLN-02, CLN-03, CLN-04
 15. CLN-05 (it overlaps the files of CLN-01 and CLN-03)
+
+# Test-suite trim (D042)
+
+Source: `docs/test-audit.md`. Common rules:
+- Keep every logged regression guard and every determinism test.
+- For every merge or parametrize, show by temporary mutation that the new test still fails where the old tests failed.
+- Delete a test only if the audit lists it or the reviewer agrees.
+- No src changes.
+
+| ID | Feature | Acceptance criteria | Owns files | Depends on | Status |
+|----|---------|---------------------|------------|------------|--------|
+| TST-01 | Trim resource and container tests | The `test_resource.py` / `test_container.py` section of the audit: stress seeds become one hypothesis test; raising-monitor ×5 become one test parametrized by class; Resource/PriorityResource twins are parametrized; validation tables; drops as listed, except `test_no_barging_same_instant_newcomer`, which stays (D042). About 153 → ~80 items. | `tests/test_resource.py`, `tests/test_container.py` | — | todo |
+| TST-02 | Trim store and monitor tests | The `test_store.py` and `test_monitor.py` sections: one contract per behaviour, parametrized over the three stores; Queue re-proofs and docs duplicates dropped; `test_mm1_same_seed_gives_identical_samples` dropped; record validation merged. About 116 → ~72 items. | `tests/test_store.py`, `tests/test_monitor.py` | — | todo |
+| TST-03 | Trim interrupt and asyncio-compat tests | The `test_interrupt.py` section and the test_asyncio_compat part of the module 1 section: timeout nesting 2×2, cancel-wins and delivered-at-await parametrized, raw-asyncio and docs duplicates dropped; compat 47 → ~29. Keep the D024 design-2 regressions. | `tests/test_interrupt.py`, `tests/test_asyncio_compat.py` | — | todo |
+| TST-04 | Trim module 1, import and docs tests; mark load-bearing examples | The rest of the module 1 section: docs examples go from 3 tests to 1 per example; test_import (drop `submodule_imports_first`, `star_import`; the AST guard becomes one test); test_guards duplicates; cross-file duplicates; validation lists. Add `<!-- pins: ... -->` comments in `docs/primitives.md` above every example that TST-01..03 rely on (D042). Comments only; no example code or output changes. | `tests/test_docs_examples.py`, `tests/test_import.py`, `tests/test_guards.py`, `tests/test_loop.py`, `tests/test_ordering.py`, `tests/test_realtime.py`, `tests/test_run.py`, `tests/test_sim.py`, `tests/test_trace.py`, `tests/test_clock.py`, `tests/test_randomness.py`, `docs/primitives.md` (comments only) | — | todo |
+
+## Suggested batches (test trim)
+16. TST-01, TST-02, TST-03, TST-04
+

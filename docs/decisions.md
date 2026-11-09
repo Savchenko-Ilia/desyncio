@@ -278,3 +278,10 @@ The owner said the test suite may be larger than needed, and a suite-wide audit 
 - use one top-level import;
 - add a comment that `what` in `clock._check_finite` must be a brace-free internal constant.
 The exact-message tests per caller stay. They are the only proof that messages are unchanged, because the older tests use loose `match=` patterns.
+
+## D042 — Trim the test suite (owner: "cut tests")
+The owner approved the cut proposed in `docs/test-audit.md`, with the lead's recommendations on its two cut questions:
+- **Docs examples may be the only guard for a guarantee.** Each such example in `docs/primitives.md` gets a short HTML comment above it saying what it pins (`<!-- pins: ... -->`), so that an edit to it is a visible test change.
+- **Tests that only re-prove asyncio are dropped** (principle 6). One exception: `test_no_barging_same_instant_newcomer` stays, as a guard in case `Resource` is ever moved off `Semaphore`.
+- **Not in scope** (still open for the owner): adding `mypy tests` to the gate, and new tests for the gaps the audit found.
+This is a spec change for the test files involved, so editing, merging and deleting tests is allowed in TST-01..04. Nothing else changes: every logged regression guard and every determinism test stays, and each merged test must fail under the mutations the old tests caught.
