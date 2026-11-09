@@ -60,8 +60,12 @@ the cancel *we* requested. If the result is still above the recorded value,
 someone else (a real ``task.cancel()``, an enclosing ``TaskGroup`` or
 ``asyncio.timeout()``) has also asked for cancellation, so the
 ``CancelledError`` is left alone and propagates: a real cancel always wins.
-Otherwise the cancellation was ours and becomes ``Interrupt``. Either way
-``cancelling()`` ends with its value before the block (rule 4).
+Otherwise the cancellation was ours and becomes ``Interrupt``. ``uncancel()``
+undoes only the interrupt's own cancel, so ``cancelling()`` is back to its
+value before the block only if the interrupt was the only cancel. If a real
+cancel also fired it stays one higher: that is how an enclosing
+``asyncio.timeout()`` or ``TaskGroup`` sees that a cancel is still pending
+(rule 4).
 
 Where the bookkeeping lives
 ---------------------------

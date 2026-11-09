@@ -140,10 +140,22 @@ class Sim:
         seed gives the same sequence, a different seed a different one.
 
         Raises:
-            RuntimeError: outside ``desyncio.run(...)``.
+            RuntimeError: outside ``desyncio.run(...)``, or in a task created
+                with a fresh ``contextvars.Context`` (it lacks the run's streams).
         """
         _loop()
-        return current_random_streams().stream(name)
+        try:
+            streams = current_random_streams()
+        except RuntimeError:
+            # _loop() passed, so a run is active: the variable is missing from
+            # this task's context only if it was created with a fresh Context.
+            raise RuntimeError(
+                "the simulation is running, but this task's context lacks the "
+                "run's random streams: the task was created with a fresh "
+                "contextvars.Context (loop.create_task(..., context=...)); "
+                "create it without context= to use sim.random()"
+            ) from None
+        return streams.stream(name)
 
     def interruptible(self) -> Interruptible:
         """Return an async context manager marking code that may be interrupted.

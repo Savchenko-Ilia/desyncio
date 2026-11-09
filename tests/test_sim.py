@@ -1,6 +1,7 @@
 """Tests for the ``desyncio.sim`` facade (LOOP-05)."""
 
 import asyncio
+import contextvars
 import warnings
 from typing import Any
 
@@ -228,7 +229,10 @@ def test_pending_spawned_cancelled_at_until() -> None:
 def test_outside_run_raises() -> None:
     with pytest.raises(RuntimeError, match=r"desyncio\.run"):
         _ = sim.now
-    with pytest.raises(RuntimeError, match=r"desyncio\.run"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"desyncio\.run\(\.\.\.\).*there is no such loop running here",
+    ):
         sim.random("x")
 
 
@@ -257,3 +261,57 @@ def test_random_return_annotation_resolves_to_random_class() -> None:
 
     assert typing.get_type_hints(Sim.random)["return"] is random.Random
     assert Sim.random.__annotations__["return"] is random.Random
+
+
+def test_random_outside_run_message_unchanged() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=r"desyncio\.run\(\.\.\.\).*there is no such loop running here",
+    ):
+        sim.random("x")
+
+
+def test_random_in_fresh_context_task_names_the_cause() -> None:
+    async def child() -> None:
+        sim.random("x")
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(child(), context=contextvars.Context())
+        with pytest.raises(RuntimeError) as info:
+            await task
+        msg = str(info.value)
+        assert "simulation is running" in msg
+        assert "random streams" in msg
+        assert "fresh contextvars.Context" in msg
+        assert "no simulation is running" not in msg
+
+    desyncio.run(main())
+
+
+def test_non_random_methods_work_in_fresh_context_task() -> None:
+    # Only sim.random reads a context variable (the run's random streams).
+    # now/timeout/spawn/interruptible only need the running loop, so a task
+    # created with a fresh contextvars.Context can use them.
+    seen: list[float] = []
+
+    async def grandchild() -> str:
+        await sim.timeout(1)
+        return "done"
+
+    async def child() -> None:
+        seen.append(sim.now)
+        await sim.timeout(1)
+        seen.append(sim.now)
+        assert await sim.spawn(grandchild()) == "done"
+        seen.append(sim.now)
+        async with sim.interruptible():
+            await sim.timeout(1)
+        seen.append(sim.now)
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        await loop.create_task(child(), context=contextvars.Context())
+
+    desyncio.run(main())
+    assert seen == [0.0, 1.0, 2.0, 3.0]
