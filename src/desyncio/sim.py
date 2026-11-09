@@ -70,8 +70,7 @@ class Sim:
         """The current virtual time (``loop.time()``).
 
         Raises:
-            RuntimeError: outside ``desyncio.run(...)``, or in a task created
-                with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            RuntimeError: outside ``desyncio.run(...)``.
         """
         return _loop().time()
 
@@ -87,8 +86,7 @@ class Sim:
         Raises:
             TypeError: ``dt`` is not a real number (``bool`` is rejected).
             ValueError: ``dt`` is NaN, infinite or negative.
-            RuntimeError: outside ``desyncio.run(...)``, or in a task created
-                with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            RuntimeError: outside ``desyncio.run(...)``.
         """
         # Checks run when the coroutine is awaited, not when it is created.
         _loop()
@@ -119,8 +117,7 @@ class Sim:
 
         Raises:
             TypeError: ``coro`` is not a coroutine object.
-            RuntimeError: outside ``desyncio.run(...)``, or in a task created
-                with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            RuntimeError: outside ``desyncio.run(...)``.
         """
         try:
             loop = _loop()
@@ -176,8 +173,7 @@ class Sim:
         docstring for the full analogy and mechanism.
 
         Raises:
-            RuntimeError: outside ``desyncio.run(...)``, or in a task created
-                with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            RuntimeError: outside ``desyncio.run(...)``.
         """
         _loop()
         return Interruptible()
