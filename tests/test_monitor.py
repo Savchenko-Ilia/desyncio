@@ -292,3 +292,106 @@ def test_record_earlier_than_last_record_raises_and_leaves_series_unchanged() ->
     assert ts.samples == ((5.0, 3.0),)
     assert ts.mean(until=7) == pytest.approx(3.0)
     assert (ts.min(), ts.max(), ts.last()) == (3, 3, 3)
+
+
+# --- time-weighted distribution (STA-02) -----------------------------------
+
+
+async def _dist(ts: TimeSeries) -> None:
+    ts.record(1)  # t=0, 1 for 1s
+    await sim.timeout(1)
+    ts.record(5)  # t=1, 5 for 1s
+    ts.record(2)  # same instant: last wins, 5 gets no entry
+    await sim.timeout(1)
+    ts.record(1)  # t=2, 1 again
+
+
+def test_distribution_exact_on_hand_made_series() -> None:
+    ts = run_ts(_dist)
+    # until=4: 1 for 1s, 2 for 1s, 1 for 2s
+    fr = ts.time_fractions(until=4)
+    assert fr == {1.0: 0.75, 2.0: 0.25}  # 5.0 was held for zero time: no entry
+    assert math.fsum(fr.values()) == pytest.approx(1.0, abs=1e-12)
+    assert ts.mean(until=4) == pytest.approx(1.25)
+    assert ts.variance(until=4) == pytest.approx(0.75 * 0.25**2 + 0.25 * 0.75**2)
+    q = [ts.quantile(p, until=4) for p in (0, 0.5, 0.75, 0.76, 1)]
+    assert q == [1.0, 1.0, 1.0, 2.0, 2.0]
+    assert all(type(x) is float for x in [*q, ts.variance(until=4)])
+
+
+def test_distribution_zero_length_span() -> None:
+    async def body(ts: TimeSeries) -> None:
+        ts.record(1)
+        ts.record(7)
+
+    ts = run_ts(body)
+    assert ts.time_fractions(until=0) == {7.0: 1.0}
+    assert ts.quantile(0.3, until=0) == 7.0
+    assert ts.variance(until=0) == 0.0
+
+
+def test_distribution_errors_like_mean() -> None:
+    ts = run_ts(_dist)
+    calls: list[Callable[..., object]] = [
+        ts.time_fractions,
+        ts.variance,
+        lambda until=None: ts.quantile(0.5, until=until),
+    ]
+    for call in calls:
+        with pytest.raises(RuntimeError):
+            call()  # until=None outside a run
+        with pytest.raises(ValueError):
+            call(until=1.5)  # earlier than the last record (t=2)
+        with pytest.raises(TypeError):
+            call(until=True)
+        with pytest.raises(ValueError):
+            call(until=math.nan)
+    empty = TimeSeries()
+    for call in (
+        lambda: empty.time_fractions(until=1),
+        lambda: empty.quantile(0.5, until=1),
+        lambda: empty.variance(until=1),
+    ):
+        with pytest.raises(ValueError):
+            call()
+    for p in (-0.1, 1.1, math.nan):
+        with pytest.raises(ValueError):
+            ts.quantile(p, until=4)
+
+
+def test_mm1_time_fractions_match_geometric_law() -> None:
+    rho = 0.5
+
+    async def main() -> dict[float, float]:
+        number = TimeSeries()
+        count = 0
+
+        def change(delta: int) -> None:
+            nonlocal count
+            count += delta
+            number.record(count)
+
+        number.record(0)
+        arrivals, service = sim.random("arrivals"), sim.random("service")
+        lock = asyncio.Lock()
+
+        async def customer() -> None:
+            change(1)
+            async with lock:
+                await sim.timeout(service.expovariate(1.0))
+            change(-1)
+
+        tasks = []
+        for _ in range(10_000):
+            await sim.timeout(arrivals.expovariate(rho))
+            tasks.append(sim.spawn(customer()))
+        await asyncio.gather(*tasks)
+        return number.time_fractions()
+
+    # Band: over seeds 1..10 (10k customers) the largest error of P(N=k),
+    # k = 0..3, was 0.0123 (seed 10; the other seeds 0.0026-0.0105). The band
+    # 0.04 is about 3x that (P(N=3) = 0.0625). The test runs seeds 1..3.
+    for seed in (1, 2, 3):
+        fr = desyncio.run(main(), seed=seed)
+        for k in range(4):
+            assert fr[float(k)] == pytest.approx((1 - rho) * rho**k, abs=0.04)
