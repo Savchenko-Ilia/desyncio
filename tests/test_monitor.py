@@ -388,9 +388,10 @@ def test_mm1_time_fractions_match_geometric_law() -> None:
         await asyncio.gather(*tasks)
         return number.time_fractions()
 
-    # Bands: seeds 1..10 were checked locally (10k customers); the error of
-    # P(N=k) was within about +-0.02, so the band is 0.05 (P(N=3) = 0.0625).
+    # Band: over seeds 1..10 (10k customers) the largest error of P(N=k),
+    # k = 0..3, was 0.0123 (seed 10; the other seeds 0.0026-0.0105). The band
+    # 0.04 is about 3x that (P(N=3) = 0.0625). The test runs seeds 1..3.
     for seed in (1, 2, 3):
         fr = desyncio.run(main(), seed=seed)
         for k in range(4):
-            assert fr[float(k)] == pytest.approx((1 - rho) * rho**k, abs=0.05)
+            assert fr[float(k)] == pytest.approx((1 - rho) * rho**k, abs=0.04)
