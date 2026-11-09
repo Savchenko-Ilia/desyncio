@@ -269,3 +269,12 @@ The same false sentence is in the `src/desyncio/interrupt.py` module docstring, 
 
 ## D040 — CLN-05: `speed` with an int too large for a float raises `ValueError` (lead)
 `realtime._check_speed` calls `float(value)` without catching `OverflowError`. So `run(..., speed=10**400)` raises `OverflowError`, which breaks the common rule that bad arguments raise `TypeError`/`ValueError` (module 2 rules; module 1 validators do the same). CLN-05 unifies the validators, and with that `speed` gets the same `ValueError` as the others. This is the one behaviour change that CLN-05 allows. Every other error type, message and returned value stays exactly as it is (for example, `clock` normalises `-0.0` and the others don't).
+
+## D041 — CLN-05: trim the redundant tests before merging (lead, after the owner questioned the suite's size)
+The owner said the test suite may be larger than needed, and a suite-wide audit is running. CLN-05 passed review, but it added about 129 test lines to a refactor. Most of its `to_float` helper tests repeat what the exact-message tests on each caller already prove. The lead promoted the reviewer's SHOULD to a MUST:
+- drop the four redundant helper tests and merge the two option tests into one;
+- move the bool check into a caller test;
+- put the D040 assertion in its own test;
+- use one top-level import;
+- add a comment that `what` in `clock._check_finite` must be a brace-free internal constant.
+The exact-message tests per caller stay. They are the only proof that messages are unchanged, because the older tests use loose `match=` patterns.
