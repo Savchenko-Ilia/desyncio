@@ -285,3 +285,14 @@ The owner approved the cut proposed in `docs/test-audit.md`, with the lead's rec
 - **Tests that only re-prove asyncio are dropped** (principle 6). One exception: `test_no_barging_same_instant_newcomer` stays, as a guard in case `Resource` is ever moved off `Semaphore`.
 - **Not in scope** (still open for the owner): adding `mypy tests` to the gate, and new tests for the gaps the audit found.
 This is a spec change for the test files involved, so editing, merging and deleting tests is allowed in TST-01..04. Nothing else changes: every logged regression guard and every determinism test stays, and each merged test must fail under the mutations the old tests caught.
+
+## D043 — Type-check the tests, and add the gap tests (owner: "go with 3 4 also")
+The owner extended D042 with the two remaining audit points:
+- **`mypy tests` joins the gate.** `LINT_CMD` type-checks `src` and `tests`. The type errors in `tests/` (34 at the time of the audit) are fixed in the tests, not silenced wholesale. A targeted `# type: ignore[code]` is allowed only where a test deliberately passes a wrong type, and it carries a comment. This makes `test_overload_types` a real check.
+- **Gap tests:**
+  - a late interrupt (`interrupted` is True and no `Interrupt` is raised), plus a docstring line;
+  - the ExceptionGroup limit (a real child failure while interrupting propagates untranslated, with `interrupted` True and `cancelling()` restored);
+  - a raising monitor on `shutdown(immediate=True)` inside a run (the error reaches the loop exception handler, and the shutdown completes);
+  - moving `test_interruptible_enter_and_exit_never_await` from test_resource.py to test_interrupt.py.
+- **Scheduling.** Both points touch files owned by batch 16, so they run after it: TST-06 (gap tests) in batch 17, then TST-05 (mypy) in batch 18, so that mypy checks the final tests.
+- **Out of scope:** the outside-a-loop case of a raising monitor on immediate shutdown ("no running event loop", a STO-01 SHOULD). It needs a src change.
