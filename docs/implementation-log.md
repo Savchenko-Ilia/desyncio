@@ -648,3 +648,29 @@ Branch: feat/INT-01-v2 + fix/INT-01-v2-1  ·  Merged: f5d2caa  ·  (discarded: f
 - The PR to `main` must flag the PSF-adapted code in `interrupt.py`.
 
 **Follow-ups.** The SHOULDs above. RES-03 (preemption) builds on `interruptible()`.
+
+## RND-01 — Random streams: rename and reuse stdlib seeding (2026-11-09, batch 10a)
+Branch: feat/RND-01 + fix/RND-01-1  ·  Merged: ddc6dda
+
+**Approach.** `git mv rng.py randomness.py`, with no shim. `RngStreams` became `RandomStreams`, `current_rng_streams()` became `current_random_streams()`, the ContextVar became `_random_streams` (`"desyncio_random_streams"`), and `sim.rng(name)` became `sim.random(name)`. `derive_seed` and the SHA-256 encoding are gone. A stream is `random.Random(f"{seed}:{name}")`, cached in the per-run `RandomStreams`, so repeated calls continue one sequence and a new `desyncio.run` restarts it. Seed and name validation are unchanged. Every caller in tests now uses `sim.random`.
+
+**asyncio internals.** None new. The run's `RandomStreams` still reaches tasks through a ContextVar set in a fresh `contextvars.Context` (see LOOP-04). `random.Random(str)` uses version-2 seeding: the string is hashed with SHA-512, never with `hash()`, so `PYTHONHASHSEED` does not affect it. A subprocess test checks that with two hash seeds.
+
+**Trade-offs.** The `:` separator needs no length prefix, because a seed is a non-negative int (digits only, `bool` rejected). The first `:` always ends it, even when the name contains `:`. A test covers `(1,"23")`/`(12,"3")` and `(1,":2")`/`(1,"2")`. Every random sequence changed once (D026). The new known values are pinned in `tests/test_randomness.py`, and the M/M/1 band was re-picked (D026 outcome).
+
+**Review findings.**
+- Round 0 FAILED on one MUST: on Python 3.14, `def random(self, name) -> random.Random` inside `Sim` resolves `random` to the method (PEP 649 evaluates annotations lazily, in class scope), so `typing.get_type_hints(Sim.random)` raised `AttributeError`. 3.13, mypy and ruff all miss it.
+- Fix round 1: `from random import Random`, `-> Random`, and `test_random_return_annotation_resolves_to_random_class`, which was shown to fail on 3.14 before the fix. The fixer scanned src/ for other class members shadowing imported names and found none.
+- Re-review PASSED. The gate passes with 468 tests.
+- SHOULD:
+  - Explain in the M/M/1 band comment that the band is about ±2 sd.
+  - The cross-process test passes `env={"PYTHONHASHSEED": ...}` only, dropping PATH. Use `{**os.environ, ...}`.
+  - Add an explicit test that a second `desyncio.run` with the same seed restarts a stream (covered indirectly by `tests/test_sim.py::_draw`).
+  - `ruff format --check` flags 6 files, all predating this feature. The gate does not run the formatter.
+
+**Gotchas.**
+- Naming a method after a module the class uses breaks annotations on 3.14 only. Import the class itself (`from random import Random`).
+- Reviewers twice ran a command in the main checkout before their worktree existed (harmless). Tell them to `mkdir -p` the scratch dir and `cd` in the same command.
+
+**Follow-ups.** The SHOULDs above. D027: the gate tests only 3.13. Older log entries keep the old names (`sim.rng`, `RngStreams`, `derive_seed`) as history.
+

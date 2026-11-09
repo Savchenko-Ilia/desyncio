@@ -19,7 +19,7 @@ This cloud session pushes the session branch `claude/setup-batch-1-5bb5vp`. Per 
 ## D004 — Batch 2 scope calls (lead)
 - **Time unit:** `VirtualClock` time is a unitless float, documented as "seconds by convention". The owner said "go" without choosing between this and a configurable unit, so the lead applied its proposed default. Resolves the first half of AGENTS.md §7 open question 1 provisionally; calendar/shift handling stays open. Revisit if the owner prefers otherwise.
 - **LOOP-08 split:** the `sim` facade does not exist yet, so LOOP-08 delivered standalone `RngStreams`/`derive_seed`. LOOP-05 must expose them as `sim.rng(name)`, backed by `RngStreams(seed)` with the seed from `desyncio.run(..., seed=)`.
-- **RNG encoding v1** (SHA-256, domain tag `desyncio.rng.v1`, length-prefixed seed, UTF-8 name) is now a compatibility contract. Changing it means a new domain tag.
+- **RNG encoding v1** (SHA-256, domain tag `desyncio.rng.v1`, length-prefixed seed, UTF-8 name) is now a compatibility contract. Changing it means a new domain tag. _Superseded by D026: the SHA-256 encoding was removed in RND-01._
 - **SHOULD findings not fixed:** both reviews were PASS. Per protocol, `fixer` handles only MUST findings. The SHOULDs are recorded in the implementation log for the owner to schedule.
 
 ## D005 — CI-01 and LOOP-01b added (owner approved)
@@ -187,3 +187,12 @@ The owner asked "what is `sim.rng`?" and then "why do we need our own rng?". Two
 - The supporting names follow: `RandomStreams`, `current_random_streams()`, `randomness.py`.
 - This is scheduled as RND-01 in its own batch 10a, because it edits test files owned by RES-02 and STO-02.
 The motivating example was the owner's car wash: 2 bays, washes of 2–4 min for cars under 2 t and 3–6 min otherwise, cars as agents with a weight. It already works on `integration` with `Resource(2)` and `sim.spawn`, and is a candidate example for DOC-02.
+
+## D026 — outcome
+Implemented as RND-01 (batch 10a), merged in ddc6dda after one fix round.
+- **Band re-picked:** the M/M/1 sanity band in `tests/test_determinism.py` went from `8 < x < 12` to `6 < x < 14`. The new seeding gives a mean time in system of 7.86 against a theoretical 10. The lead accepted this as the permitted spec-change edit. The reviewer ran 40 seeds at n=10000: mean 9.69, sd 1.91. So 7.86 is noise, and the band still rejects swapped rates (≈518), ρ=0.8 (≈4.3) and no queueing (≈1). It would not reject ρ=0.95 (≈13.6).
+- **Python 3.14:** the review found that a method named `random` annotated `-> random.Random` resolves to the method itself under PEP 649 lazy annotations. It is now annotated with `from random import Random`, with a regression test. The gate runs only 3.13, so 3.14-only bugs are invisible to it.
+
+## D027 — Python 3.14 is supported but not gated (lead, open for the owner)
+`requires-python = ">=3.13"`, but `scripts/gate.sh` runs only the locked 3.13 interpreter. During RND-01 review, `uv run --python 3.14` showed one failure already present on `integration`: `tests/test_loop.py::test_loop_instance_dict_is_not_larger_than_before_loop_09`. It is unrelated to RND-01. The lead did not fix it, because it is outside batch 10's scope. Proposed to the owner: either add a 3.14 test run to the gate (plus a feature to fix that test), or document 3.13 as the only tested version.
+
