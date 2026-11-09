@@ -86,3 +86,22 @@ def test_no_from_desyncio_import_x() -> None:
                 assert node.module != "desyncio", f"{path}: {ast.unparse(node)}"
             else:
                 assert node.module is not None, f"{path}: {ast.unparse(node)}"
+
+
+def test_numpy_and_scipy_import() -> None:
+    """Module 3 (statistics) depends on numpy >= 2 and scipy (D047, D048)."""
+    import numpy
+    import scipy.stats
+
+    assert int(numpy.__version__.split(".")[0]) >= 2
+    assert scipy.stats.norm.cdf(0.0) == 0.5
+
+
+def test_import_desyncio_does_not_import_numpy_or_scipy() -> None:
+    """The core never needs numpy or scipy; only the statistics code imports them."""
+    result = _run_python(
+        "import sys, desyncio; "
+        "bad = [m for m in ('numpy', 'scipy') if m in sys.modules]; "
+        "assert not bad, bad"
+    )
+    assert result.returncode == 0, result.stderr
