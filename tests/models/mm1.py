@@ -58,8 +58,8 @@ async def mm1(
     Must run inside ``desyncio.run(...)``. Returns one record per customer, in
     arrival order.
     """
-    arrivals = sim.rng("arrivals")  # a random.Random: its own seeded stream
-    service = sim.rng("service")
+    arrivals = sim.random("arrivals")  # a random.Random: its own seeded stream
+    service = sim.random("service")
     server = asyncio.Lock()
     records: list[CustomerRecord | None] = [None] * n_customers
 

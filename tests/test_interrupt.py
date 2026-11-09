@@ -873,7 +873,7 @@ def test_machine_breakdown_worker_resumes_remaining_work() -> None:
 async def _chaos(n_workers: int = 6) -> dict[str, object]:
     """Workers use Resource, Container and Store inside interruptible blocks while
     a chaos task randomly interrupts and cancels them. Returns final invariants."""
-    rng = sim.rng("chaos")
+    rng = sim.random("chaos")
     res = Resource(2)
     cont = Container(capacity=20, init=10)
     store: Store[int] = Store(capacity=3)
@@ -906,7 +906,7 @@ async def _chaos(n_workers: int = 6) -> dict[str, object]:
             await store.get()
 
     async def worker(i: int) -> None:
-        wrng = sim.rng(f"w{i}")
+        wrng = sim.random(f"w{i}")
         while True:
             try:
                 async with sim.interruptible():
@@ -968,7 +968,7 @@ def test_stress_conserves_container_amount() -> None:
 
         async def worker(i: int) -> None:
             nonlocal total_in, total_out
-            r = sim.rng(f"c{i}")
+            r = sim.random(f"c{i}")
             while True:
                 amount = float(r.randint(1, 5))
                 try:
@@ -984,7 +984,7 @@ def test_stress_conserves_container_amount() -> None:
                     pass
 
         tasks = [sim.spawn(worker(i)) for i in range(5)]
-        chaos = sim.rng("chaos")
+        chaos = sim.random("chaos")
         for _ in range(200):
             await sim.timeout(chaos.random() * 0.5)
             t = chaos.choice(tasks)

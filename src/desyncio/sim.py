@@ -22,13 +22,13 @@ the way ``asyncio.sleep`` and ``asyncio.create_task`` do. Outside
 
 import asyncio
 import math
-import random
 from collections.abc import Coroutine
+from random import Random
 from typing import Any
 
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
-from desyncio.runners import current_rng_streams
+from desyncio.runners import current_random_streams
 
 _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
@@ -132,7 +132,7 @@ class Sim:
             raise
         return loop.create_task(coro, name=name)
 
-    def rng(self, name: str) -> random.Random:
+    def random(self, name: str) -> Random:
         """Return the named random stream of this run (same object each call).
 
         Streams derive from the ``seed`` given to ``desyncio.run``: the same
@@ -142,7 +142,7 @@ class Sim:
             RuntimeError: outside ``desyncio.run(...)``.
         """
         _loop()
-        return current_rng_streams().stream(name)
+        return current_random_streams().stream(name)
 
     def interruptible(self) -> Interruptible:
         """Return an async context manager marking code that may be interrupted.
