@@ -8,7 +8,12 @@ import pytest
 import desyncio
 from desyncio import sim
 from desyncio.interrupt import Interrupt
-from desyncio.resource import PriorityResource, Resource
+from desyncio.resource import (
+    Preempted,
+    PreemptiveResource,
+    PriorityResource,
+    Resource,
+)
 from models.mm1 import CustomerRecord, mm1
 
 
@@ -578,8 +583,8 @@ def test_two_units_freed_at_same_instant_go_to_two_best() -> None:
             sim.spawn(_use(res, log, "h2", 0, 2)),
         ]
         await sim.timeout(0.5)
-        # Arrival order is the reverse of priority, so Condition's FIFO wake-up
-        # order disagrees with key order.
+        # Arrival order is the reverse of priority, so first-come first-served
+        # order would disagree with key order.
         for name, prio in [("c", 3), ("b", 2), ("a", 1)]:
             tasks.append(sim.spawn(_use(res, log, name, prio, 1)))
         await asyncio.gather(*tasks)
@@ -863,19 +868,7 @@ def test_priority_determinism() -> None:
 # The round-0 design released through ``async with self._cond:``, which can
 # suspend when the Condition's lock is contended, so a cancel or interrupt
 # arriving at the holder's exit skipped the decrement and leaked the unit.
-# With the public API alone that lock is never contended, so the reviewer's
-# probe held it from a helper task. ``_hold_round0_lock`` reproduces that probe
-# when the resource has such a lock (round 0) and does nothing otherwise
-# (D030: there is no lock, release cannot suspend). The assertions are on the
-# public outcome only, so they hold for any correct design.
-
-
-async def _hold_round0_lock(res: PriorityResource, until: float) -> None:
-    cond = getattr(res, "_cond", None)
-    if cond is None:  # per-request futures (D030): nothing to contend
-        return
-    async with cond:
-        await sim.timeout(until - sim.now)
+# Release is now synchronous. The assertions are on the public outcome only.
 
 
 def _spawn_holder_and_waiters(
@@ -903,13 +896,11 @@ def test_cancel_at_holder_exit_does_not_leak_unit() -> None:
         h = sim.spawn(holder())
         waiters = _spawn_holder_and_waiters(res, log)
         await sim.timeout(4)
-        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
         await sim.timeout(16)  # t=20: far past every service
         assert h.cancelled()
         assert (res.count, res.queue_length) == (0, 0)
         assert log == ["holder", "w0", "w1"]
         assert all(w.done() for w in waiters)
-        await helper
 
     desyncio.run(main())
 
@@ -935,14 +926,12 @@ def test_body_exception_and_cancel_at_exit_release_and_keep_body_error() -> None
         h = sim.spawn(holder())
         waiters = _spawn_holder_and_waiters(res, log)
         await sim.timeout(4)
-        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
         await sim.timeout(16)
         assert len(seen) == 1 and isinstance(seen[0], ValueError)  # not replaced
         assert h.cancelled()
         assert (res.count, res.queue_length) == (0, 0)
         assert log == ["holder", "w0", "w1"]
         assert all(w.done() for w in waiters)
-        await helper
 
     desyncio.run(main())
 
@@ -966,7 +955,6 @@ def test_interrupt_of_holder_at_exit_does_not_leak_unit() -> None:
         h = sim.spawn(holder())
         waiters = _spawn_holder_and_waiters(res, log)
         await sim.timeout(4)
-        helper = sim.spawn(_hold_round0_lock(res, until=5.5))
         await sim.timeout(1)  # t=5, right after the holder's exit step
         sim.interrupt(h, "boom")
         await sim.timeout(15)
@@ -975,7 +963,6 @@ def test_interrupt_of_holder_at_exit_does_not_leak_unit() -> None:
         assert (res.count, res.queue_length) == (0, 0)
         assert log == ["holder", "w0", "w1"]
         assert all(w.done() for w in waiters)
-        await helper
 
     desyncio.run(main())
 
@@ -1014,3 +1001,778 @@ def test_waiter_cancelled_when_granted_passes_unit_to_next() -> None:
         return log
 
     assert desyncio.run(main()) == [("holder", 0.0), ("next", 1.0), ("last", 2.0)]
+
+
+# --- PreemptiveResource (RES-03, D032) ---------------------------------------
+
+
+async def _victim_job(
+    res: PreemptiveResource,
+    log: list[tuple[str, str, float]],
+    name: str,
+    priority: float,
+    work: float,
+    *,
+    preempt: bool = True,
+    delay: float = 0,
+) -> None:
+    """Hold ``res`` for ``work``; log start/done/preempted with virtual times."""
+    await sim.timeout(delay)
+    try:
+        async with res.request(priority=priority, preempt=preempt):
+            log.append((name, "start", sim.now))
+            await sim.timeout(work)
+            log.append((name, "done", sim.now))
+    except Interrupt as exc:
+        assert isinstance(exc.cause, Preempted)
+        log.append((name, "preempted", sim.now))
+
+
+def test_preemption_basic_same_instant_and_cause() -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, str, float]] = []
+        causes: list[Preempted] = []
+
+        async def low() -> None:
+            try:
+                async with res.request(priority=5):
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                causes.append(exc.cause)
+                log.append(("low", "preempted", sim.now))
+
+        lo = sim.spawn(low())
+        await sim.timeout(3)
+        hi = sim.spawn(_victim_job(res, log, "high", 0, 2))
+        await sim.timeout(0)
+        assert (res.count, res.queue_length) == (1, 0)  # swapped at t=3
+        await asyncio.gather(lo, hi)
+        assert log == [
+            ("high", "start", 3.0),  # same virtual time as the request
+            ("low", "preempted", 3.0),
+            ("high", "done", 5.0),
+        ]
+        assert causes[0].by is hi
+        assert causes[0].usage_since == 0.0
+        assert causes[0].resource is res
+        assert (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(main())
+
+
+def test_preempted_dataclass_is_frozen() -> None:
+    async def main() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        p = Preempted(by=task, usage_since=1.0, resource=PreemptiveResource(1))
+        with pytest.raises(AttributeError):
+            p.usage_since = 2.0  # type: ignore[misc]
+
+    desyncio.run(main())
+
+
+def test_machine_shop_resubmits_remaining_work() -> None:
+    async def main() -> list[tuple[str, float]]:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, float]] = []
+
+        async def job() -> None:
+            remaining = 10.0
+            while remaining > 0:
+                try:
+                    async with res.request(priority=5):
+                        log.append(("job start", sim.now))
+                        await sim.timeout(remaining)
+                        remaining = 0
+                except Interrupt as exc:
+                    assert isinstance(exc.cause, Preempted)
+                    remaining -= sim.now - exc.cause.usage_since
+                    log.append(("job preempted", sim.now))
+            log.append(("job done", sim.now))
+
+        async def urgent() -> None:
+            await sim.timeout(4)
+            async with res.request(priority=0):
+                log.append(("urgent start", sim.now))
+                await sim.timeout(3)
+
+        await asyncio.gather(sim.spawn(job()), sim.spawn(urgent()))
+        return log
+
+    assert desyncio.run(main()) == [
+        ("job start", 0.0),
+        ("urgent start", 4.0),
+        ("job preempted", 4.0),
+        ("job start", 7.0),
+        ("job done", 13.0),
+    ]
+
+
+def test_preempt_false_never_preempts() -> None:
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "low", 5, 4)),
+            sim.spawn(_victim_job(res, log, "high", 0, 1, preempt=False, delay=1)),
+        )
+        return log
+
+    assert desyncio.run(main()) == [
+        ("low", "start", 0.0),
+        ("low", "done", 4.0),
+        ("high", "start", 4.0),
+        ("high", "done", 5.0),
+    ]
+
+
+def test_equal_priority_never_preempts() -> None:
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "first", 3, 4)),
+            sim.spawn(_victim_job(res, log, "second", 3, 1, delay=1)),
+        )
+        return log
+
+    assert desyncio.run(main()) == [
+        ("first", "start", 0.0),
+        ("first", "done", 4.0),
+        ("second", "start", 4.0),
+        ("second", "done", 5.0),
+    ]
+
+
+def test_worse_priority_request_never_preempts() -> None:
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "good", 1, 4)),
+            sim.spawn(_victim_job(res, log, "bad", 9, 1, delay=1)),
+        )
+        return log
+
+    assert [e[:2] for e in desyncio.run(main())] == [
+        ("good", "start"),
+        ("good", "done"),
+        ("bad", "start"),
+        ("bad", "done"),
+    ]
+
+
+def test_better_waiting_non_preempting_request_is_not_jumped() -> None:
+    # H holds (prio 5). W (prio 1, preempt=False) waits. P (prio 3, preempt=True)
+    # is better than H but is not at the head of the queue (W's key is better),
+    # so it must not preempt (RES-02's no-barging rule).
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(1)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "H", 5, 4)),
+            sim.spawn(_victim_job(res, log, "W", 1, 1, preempt=False, delay=1)),
+            sim.spawn(_victim_job(res, log, "P", 3, 1, delay=2)),
+        )
+        return log
+
+    assert desyncio.run(main()) == [
+        ("H", "start", 0.0),
+        ("H", "done", 4.0),
+        ("W", "start", 4.0),
+        ("W", "done", 5.0),
+        ("P", "start", 5.0),
+        ("P", "done", 6.0),
+    ]
+
+
+def test_tie_among_worst_holders_picks_most_recent() -> None:
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(2)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "early", 5, 10)),
+            sim.spawn(_victim_job(res, log, "late", 5, 10, delay=1)),
+            sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
+        )
+        return log
+
+    log = desyncio.run(main())
+    assert ("late", "preempted", 2.0) in log
+    assert ("early", "done", 10.0) in log
+    assert ("early", "preempted", 2.0) not in log
+
+
+def test_worst_priority_holder_is_chosen_not_the_latest() -> None:
+    async def main() -> list[tuple[str, str, float]]:
+        res = PreemptiveResource(2)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "worst", 7, 10)),
+            sim.spawn(_victim_job(res, log, "mid", 3, 10, delay=1)),
+            sim.spawn(_victim_job(res, log, "urgent", 0, 1, delay=2)),
+        )
+        return log
+
+    log = desyncio.run(main())
+    assert ("worst", "preempted", 2.0) in log
+    assert ("mid", "done", 11.0) in log
+
+
+def test_plain_async_with_is_preemptible_and_preempts() -> None:
+    async def main() -> list[str]:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def plain_holder() -> None:
+            try:
+                async with res:  # priority 0, preemptible
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                log.append(f"plain preempted at {sim.now}")
+
+        async def better() -> None:
+            await sim.timeout(2)
+            async with res.request(priority=-1):
+                log.append(f"better start at {sim.now}")
+                await sim.timeout(1)
+
+        async def low() -> None:
+            await sim.timeout(5)
+            try:
+                async with res.request(priority=3):
+                    await sim.timeout(10)
+            except Interrupt:
+                log.append(f"low preempted at {sim.now}")
+
+        async def plain_preemptor() -> None:
+            await sim.timeout(8)
+            async with res:  # plain: priority 0, may preempt priority 3
+                log.append(f"plain start at {sim.now}")
+                await sim.timeout(1)
+
+        await asyncio.gather(
+            sim.spawn(plain_holder()),
+            sim.spawn(better()),
+            sim.spawn(low()),
+            sim.spawn(plain_preemptor()),
+        )
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [
+        "better start at 2.0",  # the preemptor runs first, the victim unwinds after
+        "plain preempted at 2.0",
+        "plain start at 8.0",
+        "low preempted at 8.0",
+    ]
+
+
+def test_victim_exit_does_not_release_twice() -> None:
+    async def main() -> None:
+        counts: list[tuple[int, int]] = []
+        res = PreemptiveResource(
+            1, monitor=lambda r: counts.append((r.count, r.queue_length))
+        )
+        log: list[tuple[str, str, float]] = []
+        victim = sim.spawn(_victim_job(res, log, "victim", 5, 10))
+        await sim.timeout(1)
+        urgent = sim.spawn(_victim_job(res, log, "urgent", 0, 5))
+        queued = sim.spawn(_victim_job(res, log, "queued", 9, 1))
+        await sim.timeout(2)  # t=3: the victim has long since unwound
+        assert (res.count, res.queue_length) == (1, 1)  # urgent holds, queued waits
+        await asyncio.gather(victim, urgent, queued)
+        assert [e for e in log if e[0] == "queued"] == [
+            ("queued", "start", 6.0),
+            ("queued", "done", 7.0),
+        ]
+        assert (res.count, res.queue_length) == (0, 0)
+        assert all(0 <= c <= 1 for c, _ in counts)
+
+    desyncio.run(main())
+
+
+def test_monitor_called_once_after_preemption_settles() -> None:
+    async def main() -> list[tuple[float, int, int]]:
+        seen: list[tuple[float, int, int]] = []
+        res = PreemptiveResource(
+            1, monitor=lambda r: seen.append((sim.now, r.count, r.queue_length))
+        )
+        log: list[tuple[str, str, float]] = []
+        v = sim.spawn(_victim_job(res, log, "v", 5, 10))
+        await sim.timeout(2)
+        p = sim.spawn(_victim_job(res, log, "p", 0, 1))
+        await asyncio.gather(v, p)
+        return seen
+
+    # grant, preemption (swap: still one unit used), release
+    assert desyncio.run(main()) == [(0.0, 1, 0), (2.0, 1, 0), (3.0, 0, 0)]
+
+
+def test_raising_monitor_on_preemption_is_reported_and_preemption_stands() -> None:
+    async def main() -> tuple[list[tuple[str, str, float]], int]:
+        errors = _capture_loop_errors()
+
+        def boom(r: PriorityResource) -> None:
+            raise MonitorBoom
+
+        res = PreemptiveResource(1, monitor=boom)
+        log: list[tuple[str, str, float]] = []
+        await asyncio.gather(
+            sim.spawn(_victim_job(res, log, "v", 5, 10)),
+            sim.spawn(_victim_job(res, log, "p", 0, 1, delay=2)),
+        )
+        assert (res.count, res.queue_length) == (0, 0)
+        return log, len(errors)
+
+    log, n_errors = desyncio.run(main())
+    assert ("v", "preempted", 2.0) in log and ("p", "done", 3.0) in log
+    assert n_errors > 0  # reported, not raised
+
+
+def test_preempt_must_be_bool_and_priority_validated() -> None:
+    res = PreemptiveResource(1)
+    with pytest.raises(TypeError):
+        res.request(preempt=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        res.request(priority=True)
+    with pytest.raises(ValueError):
+        res.request(priority=float("nan"))
+    assert isinstance(res, PriorityResource)
+    assert res.request().priority == 0
+
+
+def test_preemptive_request_is_single_use() -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        req = res.request()
+        async with req:
+            pass
+        with pytest.raises(RuntimeError):
+            async with req:
+                pass
+        assert (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(main())
+
+
+# Case a: the preemptor's own task already holds a unit ----------------------
+
+
+def test_case_a_never_interrupts_itself_takes_next_worst_holder() -> None:
+    async def main() -> list[str]:
+        res = PreemptiveResource(2)
+        log: list[str] = []
+
+        async def other() -> None:
+            try:
+                async with res.request(priority=3):
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                log.append(f"other preempted at {sim.now}")
+
+        async def both() -> None:
+            async with res.request(priority=5):  # worst holder overall: ours
+                await sim.timeout(1)
+                async with res.request(priority=0):  # better request, same task
+                    log.append(f"second unit at {sim.now}")
+                    assert res.count == 2
+                    await sim.timeout(1)
+                log.append("inner out")
+
+        o = sim.spawn(other())
+        await sim.timeout(0)
+        b = sim.spawn(both())
+        await asyncio.gather(o, b)
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [
+        "second unit at 1.0",  # the preemptor runs first, the victim unwinds after
+        "other preempted at 1.0",
+        "inner out",
+    ]
+
+
+def test_case_a_only_own_units_worse_waits_instead_of_self_interrupt() -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        outcome: list[str] = []
+
+        async def selfish() -> None:
+            async with res.request(priority=5):
+                try:
+                    async with res.request(priority=0):
+                        outcome.append("got it")  # pragma: no cover
+                except asyncio.CancelledError:
+                    outcome.append("cancelled while waiting")
+                    raise
+
+        t = sim.spawn(selfish())
+        await sim.timeout(5)
+        # It waits for itself (like any nested acquire of a busy unit); it was
+        # not interrupted and nothing was preempted.
+        assert not t.done()
+        assert (res.count, res.queue_length) == (1, 1)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        assert outcome == ["cancelled while waiting"]
+        assert (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(main())
+
+
+# Case b: the victim has its own interruptible block --------------------------
+
+
+def test_case_b_nested_user_block_receives_preemption() -> None:
+    async def main() -> list[str]:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def victim() -> None:
+            async with res.request(priority=5):
+                try:
+                    async with sim.interruptible():
+                        await sim.timeout(10)
+                except Interrupt as exc:
+                    # Inside the async with: the unit is already gone.
+                    assert isinstance(exc.cause, Preempted)
+                    log.append(f"swallowed at {sim.now}, count={res.count}")
+                await sim.timeout(5)  # keeps running WITHOUT the unit
+                log.append(f"victim body ends at {sim.now}")
+            log.append(f"victim out, count={res.count}")
+
+        async def urgent() -> None:
+            await sim.timeout(2)
+            async with res.request(priority=0):
+                log.append(f"urgent start at {sim.now}")
+                await sim.timeout(10)  # holds past the victim's exit
+            log.append("urgent out")
+
+        await asyncio.gather(sim.spawn(victim()), sim.spawn(urgent()))
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [
+        "urgent start at 2.0",
+        "swallowed at 2.0, count=1",  # urgent's unit, not the victim's
+        "victim body ends at 7.0",
+        "victim out, count=1",  # the victim's exit did not release urgent's unit
+        "urgent out",
+    ]
+
+
+def test_case_b_propagating_the_interrupt_is_the_recommended_pattern() -> None:
+    async def main() -> list[str]:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def victim() -> None:
+            try:
+                async with res.request(priority=5):
+                    async with sim.interruptible():  # own block, not swallowed
+                        await sim.timeout(10)
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                log.append(f"victim saw Preempted at {sim.now}")
+
+        async def urgent() -> None:
+            await sim.timeout(2)
+            async with res.request(priority=0):
+                log.append("urgent start")
+                await sim.timeout(1)
+
+        await asyncio.gather(sim.spawn(victim()), sim.spawn(urgent()))
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == ["urgent start", "victim saw Preempted at 2.0"]
+
+
+# Case c: late preemption ------------------------------------------------------
+
+
+def test_case_c_late_preemption_no_interrupt_no_double_release() -> None:
+    # The victim's body swallows the cancellation and has no await left, so
+    # INT-01's late-interrupt rule applies: the scope exits normally.
+    async def main() -> list[str]:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def victim() -> None:
+            async with res.request(priority=5):
+                try:
+                    await sim.timeout(10)
+                except asyncio.CancelledError:
+                    log.append("body swallowed the cancel")
+            log.append(f"victim exits normally, count={res.count}")
+
+        async def urgent() -> None:
+            await sim.timeout(2)
+            async with res.request(priority=0):
+                log.append("urgent start")
+                await sim.timeout(5)
+            log.append("urgent out")
+
+        v = sim.spawn(victim())
+        u = sim.spawn(urgent())
+        await asyncio.gather(v, u)
+        assert not v.cancelled()
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [
+        "urgent start",
+        "body swallowed the cancel",
+        "victim exits normally, count=1",
+        "urgent out",
+    ]
+
+
+# Case d: victim cancelled / failing in the instant it is preempted ------------
+
+
+@pytest.mark.parametrize("cancel_first", [True, False])
+def test_case_d_victim_cancelled_in_the_same_instant(cancel_first: bool) -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def victim() -> None:
+            async with res.request(priority=5):
+                await sim.timeout(10)
+
+        async def urgent() -> None:
+            async with res.request(priority=0):
+                log.append(f"urgent start at {sim.now}")
+                await sim.timeout(3)
+
+        v = sim.spawn(victim())
+        await sim.timeout(2)
+        if cancel_first:
+            v.cancel()
+            u = sim.spawn(urgent())
+        else:
+            u = sim.spawn(urgent())
+            await sim.timeout(0)  # urgent preempts first
+            v.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await v  # a real cancel wins over the preemption interrupt (INT-01)
+        await u
+        assert (res.count, res.queue_length) == (0, 0)  # exactly one release each
+        assert log == ["urgent start at 2.0"]
+        assert sim.now == 5.0
+
+    desyncio.run(main())
+
+
+def test_case_d_victim_turns_its_cancel_into_another_exception() -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        seen: list[BaseException] = []
+
+        async def victim() -> None:
+            try:
+                async with res.request(priority=5):
+                    try:
+                        await sim.timeout(10)
+                    except asyncio.CancelledError:
+                        raise ValueError("cleanup failed") from None
+            except ValueError as exc:
+                seen.append(exc)
+
+        async def urgent() -> None:
+            await sim.timeout(2)
+            async with res.request(priority=0):
+                await sim.timeout(3)
+
+        await asyncio.gather(sim.spawn(victim()), sim.spawn(urgent()))
+        assert len(seen) == 1  # the body's own exception, not an Interrupt
+        assert (res.count, res.queue_length) == (0, 0)
+        assert sim.now == 5.0
+
+    desyncio.run(main())
+
+
+def test_cancel_at_preemptive_holder_exit_does_not_leak_unit() -> None:
+    async def main() -> None:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+
+        async def holder() -> None:
+            async with res.request(priority=1):
+                log.append("holder")
+                await sim.timeout(5)
+                asyncio.current_task().cancel()  # type: ignore[union-attr]
+
+        h = sim.spawn(holder())
+        w = sim.spawn(_use(res, log, "w", 2, 1, delay=1))
+        await sim.timeout(10)
+        assert h.cancelled() and w.done()
+        assert log == ["holder", "w"]
+        assert (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(main())
+
+
+# Case e: several preemptions in one instant -----------------------------------
+
+
+def test_case_e_several_preemptions_in_one_instant() -> None:
+    async def main() -> None:
+        seen: list[int] = []
+        res = PreemptiveResource(2, monitor=lambda r: seen.append(r.count))
+        log: list[tuple[str, str, float]] = []
+        causes: dict[str, Preempted] = {}
+
+        async def victim(name: str, prio: float) -> None:
+            try:
+                async with res.request(priority=prio):
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                causes[name] = exc.cause
+                log.append((name, "preempted", sim.now))
+
+        v1 = sim.spawn(victim("a", 8))
+        await sim.timeout(1)
+        v2 = sim.spawn(victim("b", 6))
+        await sim.timeout(1)
+        # t=2: three requests in the same instant, capacity 2.
+        p1 = sim.spawn(_victim_job(res, log, "p1", 4, 1))  # preempts a (worst)
+        p2 = sim.spawn(_victim_job(res, log, "p2", 5, 1))  # b(6) is worst now
+        p3 = sim.spawn(_victim_job(res, log, "p3", 9, 1))  # worse than all: waits
+        await asyncio.gather(v1, v2, p1, p2, p3)
+        assert [e for e in log if e[1] == "preempted"] == [
+            ("a", "preempted", 2.0),
+            ("b", "preempted", 2.0),
+        ]
+        assert causes["a"].by is p1 and causes["a"].usage_since == 0.0
+        assert causes["b"].by is p2 and causes["b"].usage_since == 1.0
+        assert [e for e in log if e[0] == "p3"] == [
+            ("p3", "start", 3.0),
+            ("p3", "done", 4.0),
+        ]
+        assert max(seen) <= 2 and (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(main())
+
+
+# Reservation: a unit handed to a waiter that has not resumed yet -------------
+
+
+def test_preempting_a_waiter_that_was_granted_but_has_not_resumed() -> None:
+    async def main() -> list[str]:
+        res = PreemptiveResource(1)
+        log: list[str] = []
+        got: list[Preempted] = []
+
+        async def holder() -> None:
+            async with res.request(priority=1):
+                await sim.timeout(5)
+
+        async def waiter() -> None:
+            await sim.timeout(1)
+            try:
+                async with res.request(priority=5):
+                    log.append("waiter body")  # pragma: no cover
+            except Interrupt as exc:
+                assert isinstance(exc.cause, Preempted)
+                got.append(exc.cause)
+                log.append(f"waiter preempted at {sim.now}")
+
+        async def urgent() -> None:
+            await sim.timeout(5)  # same instant as holder's release, after it
+            async with res.request(priority=0):
+                log.append(f"urgent start at {sim.now}")
+                await sim.timeout(1)
+
+        h = sim.spawn(holder())
+        w = sim.spawn(waiter())
+        u = sim.spawn(urgent())
+        await asyncio.gather(h, w, u)
+        assert got[0].by is u and got[0].usage_since == 5.0
+        assert (res.count, res.queue_length) == (0, 0)
+        return log
+
+    assert desyncio.run(main()) == [
+        "urgent start at 5.0",
+        "waiter preempted at 5.0",
+    ]
+
+
+# Stress and determinism -------------------------------------------------------
+
+
+async def _preemption_stress(n: int = 40) -> list[tuple[float, str, str]]:
+    rnd = sim.random("stress")
+    capacity = rnd.randint(1, 3)
+    trace: list[tuple[float, str, str]] = []
+
+    def monitor(r: PriorityResource) -> None:
+        assert 0 <= r.count <= r.capacity
+        assert r.queue_length >= 0
+        trace.append((sim.now, "mon", f"{r.count}/{r.queue_length}"))
+
+    res = PreemptiveResource(capacity, monitor=monitor)
+
+    async def job(i: int, delay: float, prio: int, work: float, pre: bool) -> None:
+        await sim.timeout(delay)
+        try:
+            async with res.request(priority=prio, preempt=pre):
+                trace.append((sim.now, f"j{i}", "start"))
+                await sim.timeout(work)
+            trace.append((sim.now, f"j{i}", "done"))
+        except Interrupt as exc:
+            assert isinstance(exc.cause, Preempted)
+            assert exc.cause.usage_since <= sim.now
+            trace.append((sim.now, f"j{i}", "preempted"))
+        except asyncio.CancelledError:
+            trace.append((sim.now, f"j{i}", "cancelled"))
+            raise
+
+    tasks = [
+        sim.spawn(
+            job(
+                i,
+                round(rnd.uniform(0, 20), 1),
+                rnd.randint(0, 4),
+                round(rnd.uniform(0.5, 6), 1),
+                rnd.random() < 0.7,
+            )
+        )
+        for i in range(n)
+    ]
+    for _ in range(n // 4):
+        await sim.timeout(round(rnd.uniform(0, 4), 1))
+        victim = rnd.choice(tasks)
+        if not victim.done():
+            victim.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(r is None or isinstance(r, asyncio.CancelledError) for r in results)
+    assert (res.count, res.queue_length) == (0, 0)  # nothing leaked
+    ends = {name: what for _, name, what in trace if what in ("done", "preempted")}
+    for i, r in enumerate(results):
+        # Everyone finished, was preempted, or was cancelled (possibly before
+        # it ever ran, which leaves no trace line).
+        assert (f"j{i}" in ends) == (r is None)
+    return trace
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_preemption_stress(seed: int) -> None:
+    desyncio.run(_preemption_stress(), seed=seed)
+
+
+def test_preemption_determinism() -> None:
+    a = desyncio.run(_preemption_stress(), seed=11)
+    b = desyncio.run(_preemption_stress(), seed=11)
+    c = desyncio.run(_preemption_stress(), seed=12)
+    assert a == b
+    assert a != c
