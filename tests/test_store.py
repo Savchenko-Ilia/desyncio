@@ -432,6 +432,59 @@ def test_raising_monitor_on_get_still_returns_the_item() -> None:
     assert len(seen) == 1
 
 
+def test_raising_monitor_on_put_completes_and_keeps_mirror_in_step() -> None:
+    async def main() -> tuple[int, int, str]:
+        _capture_handler(asyncio.get_running_loop())
+        calls = 0
+
+        def monitor(store: Store[str]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # raise once, on the first put
+                raise MonitorBoom("monitor failed")
+
+        s: Store[str] = Store(monitor=monitor)
+        await s.put("x")  # must not raise
+        n, n_items = len(s), len(s.items)
+        later = await s.get()  # the stored item is still there
+        return n, n_items, later
+
+    assert desyncio.run(main()) == (1, 1, "x")
+
+
+def test_raising_monitor_error_goes_to_the_loop_exception_handler() -> None:
+    async def main() -> tuple[Store[str], list[dict[str, Any]]]:
+        seen = _capture_handler(asyncio.get_running_loop())
+
+        def monitor(store: Store[str]) -> None:
+            raise MonitorBoom("monitor failed")
+
+        s: Store[str] = Store(monitor=monitor)
+        await s.put("x")
+        await s.get()
+        return s, seen
+
+    s, seen = desyncio.run(main())
+    assert len(seen) == 2  # one for the put, one for the get
+    for ctx in seen:
+        assert isinstance(ctx["exception"], MonitorBoom)
+        assert ctx["store"] is s
+        assert ctx["message"] == "Store monitor raised"
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_monitor_base_exceptions_propagate(exc_type: type[BaseException]) -> None:
+    async def main() -> None:
+        def monitor(store: Store[str]) -> None:
+            raise exc_type()
+
+        s: Store[str] = Store(monitor=monitor)
+        await s.put("x")
+
+    with pytest.raises(exc_type):
+        desyncio.run(main())
+
+
 # --- validation ---------------------------------------------------------
 
 
