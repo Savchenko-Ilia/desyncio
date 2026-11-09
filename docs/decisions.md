@@ -221,3 +221,12 @@ This also removes the O(waiters) thundering herd.
 - **FilterStore has no `shutdown()`:** `Condition.notify_all()` needs the lock, so a synchronous `shutdown` (as in `Queue.shutdown`) can't be built on it. It is omitted rather than half-done. API-01 and DOC-02 must not claim it exists. An async variant can be a follow-up if the owner wants one.
 - **Same-instant barging:** a fresh `get` in the instant of a `put` can take the item ahead of a parked waiter. The reviewer showed that `Store`, `PriorityStore` and `FilterStore` behave identically here (all follow `asyncio.Queue`), so FilterStore is no less fair than STO-01. Strict arrival-order fairness would need hand-written ticket logic, which principle 6 rules out.
 
+
+## D032 — RES-03 preemption semantics (owner, batch 11)
+The RES-03 spec text tied `preempt=True` to the holder opting in to preemption. The owner chose SimPy's semantics instead:
+- **A separate class:** `PreemptiveResource` extends `PriorityResource`. `request(priority=0, preempt=True)`.
+- **Every holder is preemptible.** On a `PreemptiveResource`, the body of every holder (`request(...)` or plain `async with res:`) runs inside a `sim.interruptible()` block.
+- **`preempt=True`** (the default) means this request may preempt. With `preempt=False` it waits like a `PriorityResource` request.
+- **When preemption happens:** a `preempt=True` request preempts only when no unit is free, it would be at the head of the queue (no live waiter has a better-or-equal key, which keeps RES-02's no-barging rule), and its priority is strictly lower than the worst holder's. The worst holder is the one with the largest `(priority, request order)` key, i.e. the most recent among the worst priority (owner).
+- **Mechanism (lead, following D030):** preemption is synchronous. It removes the victim from the holders, decrements the count, grants the unit to the preemptor in the same step, then calls `sim.interrupt(victim, Preempted(by=preemptor_task, usage_since=t))`, where `t` is the virtual time the victim got the unit. The victim's `async with` exits with `Interrupt` and does not release a second time. Release stays free of awaits.
+- **The rest of the batch:** the RES-02 SHOULD clean-ups are folded into RES-03 (owner): remove the dead `_hold_round0_lock` helper, fix the stale comment, share the duplicated `_changed` monitor helper.
