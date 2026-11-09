@@ -311,3 +311,23 @@ def test_wiring_timeseries_in_does_not_change_the_model() -> None:
     observed = mm1_customer_records(SEED, monitored=True)
     assert len(plain) == 2_000
     assert observed == plain
+
+
+def test_record_earlier_than_last_record_raises_and_leaves_series_unchanged() -> None:
+    # D029: a series belongs to one run. A second desyncio.run restarts the
+    # clock at 0, so recording there would go back in time.
+    ts = TimeSeries()
+
+    async def first() -> None:
+        await sim.timeout(5)
+        ts.record(3)
+
+    async def second() -> None:
+        with pytest.raises(ValueError):
+            ts.record(1)  # t=0 < 5
+
+    desyncio.run(first())
+    desyncio.run(second())
+    assert ts.samples == ((5.0, 3.0),)
+    assert ts.mean(until=7) == pytest.approx(3.0)
+    assert (ts.min(), ts.max(), ts.last()) == (3, 3, 3)

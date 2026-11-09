@@ -18,6 +18,10 @@ Rules (D028):
 * Values are finite real numbers (``int`` or ``float``). ``bool``, other types
   raise ``TypeError``; NaN and infinities raise ``ValueError``. A rejected
   record leaves the series unchanged.
+* Time never goes backwards (D029): ``record`` at a virtual time earlier than
+  the last record raises ``ValueError`` and leaves the series unchanged. A
+  series belongs to one run; a second ``desyncio.run(...)`` restarts the clock
+  at 0, so use a fresh ``TimeSeries`` per run.
 * ``mean(until=None)`` is the time-weighted mean over ``[first record, until]``;
   each value holds until the next record, the last one until ``until``.
   ``until=None`` means ``sim.now``. ``until`` earlier than the last record is a
@@ -72,13 +76,20 @@ class TimeSeries:
 
         Raises:
             TypeError: ``value`` is not an ``int``/``float`` (``bool`` rejected).
-            ValueError: ``value`` is NaN or infinite.
+            ValueError: ``value`` is NaN or infinite, or ``sim.now`` is
+                earlier than the last record (e.g. the series is reused in a
+                second run, D029). The series is left unchanged.
             RuntimeError: outside ``desyncio.run(...)``.
         """
         v = _real(value, "value")
         t = sim.now
         if self._samples:
             t0, v0 = self._samples[-1]
+            if t < t0:
+                raise ValueError(
+                    f"record at t={t!r} is earlier than the last record at "
+                    f"{t0!r}; a TimeSeries belongs to one run"
+                )
             self._area += v0 * (t - t0)
         self._samples.append((t, v))
         self._min = min(self._min, v)
