@@ -34,3 +34,39 @@ Status: `todo` · `in_progress` · `done` · `blocked`
 6. LOOP-06, LOOP-09
 7. LOOP-10 (LOOP-12 deferred, D018)
 
+
+---
+
+# Features — Module 2: DES primitives (DRAFT, awaiting owner review)
+
+Built on module 1. Concepts follow SimPy (AGENTS.md §1); the API is asyncio-style (D019), and interrupts are a dedicated exception (D020).
+Common rules for every feature in this module:
+- **Virtual time:** all blocking happens in virtual time.
+- **Cancellation:** a waiter cancelled or interrupted while queued is removed from the queue, and leaves no stale reservation.
+- **Determinism:** ordering is deterministic (FIFO or `(priority, request order)`), with a same-seed determinism test.
+- **Validation:** bad arguments raise `TypeError`/`ValueError` with clear messages.
+- **Imports:** each feature is importable from its own module. Top-level `desyncio` exports are added in one go by API-01, so no two features edit `__init__.py`.
+
+| ID | Feature | Acceptance criteria | Owns files | Depends on | Status |
+|----|---------|---------------------|------------|------------|--------|
+| RES-01 | Resource | `Resource(capacity=1)` (int ≥ 1).<br>`async with res:` acquires one unit and releases it on exit, also on exception or cancellation.<br>Waiters are served strictly FIFO.<br>Read-only `capacity`, `count` (units in use) and `queue_length`.<br>A waiter cancelled while queued is removed, and its unit is never granted to it.<br>No barging: a same-instant newcomer never overtakes a queued waiter.<br>Cross-check: an M/M/1 model using `Resource` gives the same per-customer records as `tests/models/mm1.py` for the same seed.<br>Determinism test. | `src/desyncio/resource.py`, `tests/test_resource.py` | LOOP-05 | todo |
+| INT-01 | Interrupts | `sim.interrupt(task, cause=None)` raises `desyncio.interrupt.Interrupt` (an `Exception` with `.cause`) inside `task` at its current `await`, at the current virtual time.<br>What the target was waiting on is withdrawn: a pending `sim.timeout` timer is cancelled, and a queued resource or container request is removed.<br>A target that has not yet reached an `await` gets it at its next `await`, at the same virtual time.<br>Interrupting a finished task, or the current task itself, raises `RuntimeError`.<br>Several interrupts are delivered one per `await`, in the order sent.<br>It is not asyncio cancellation: `task.cancelling()` is unchanged, and `TaskGroup`, `timeout()` and `gather` do not treat it as a cancel. A caught `Interrupt` lets the task carry on; an uncaught one fails the task like any exception.<br>Machine-breakdown example test: the worker resumes the remaining work after repair.<br>Determinism test. | `src/desyncio/interrupt.py`, `tests/test_interrupt.py`, `src/desyncio/sim.py`, `tests/test_sim.py` | LOOP-05 | todo |
+| CON-01 | Container | `Container(capacity=inf, init=0)` holds an amount of something, continuous or bulk.<br>`await c.put(amount)` blocks while it would exceed capacity; `await c.get(amount)` blocks while the level is below the amount.<br>`level` and `capacity` are read-only.<br>Puts and gets are each served strictly FIFO (head-of-line: a large waiting `get` blocks smaller later ones; D021).<br>Amounts must be > 0 and ≤ capacity.<br>Cancelled waiters are removed.<br>Determinism test. | `src/desyncio/container.py`, `tests/test_container.py` | LOOP-05 | todo |
+| STO-01 | Store | `Store(capacity=inf)` is a buffer of discrete items.<br>`await s.put(item)` blocks while full; `item = await s.get()` blocks while empty.<br>Items come out FIFO, and waiters are served FIFO.<br>`items` is a read-only snapshot, and `len(store)` is supported.<br>Cancelled waiters are removed, and an item is never lost or duplicated when a getter is cancelled at the instant an item arrives.<br>Determinism test. | `src/desyncio/store.py`, `tests/test_store.py` | LOOP-05 | todo |
+| RES-02 | PriorityResource | `PriorityResource(capacity)`.<br>`async with res.request(priority=p):` — a lower `p` is served first; equal priorities are served in request order.<br>Plain `async with res:` uses priority 0.<br>Same guarantees as RES-01 for cancellation, no barging and determinism. | `src/desyncio/resource.py`, `tests/test_resource.py` | RES-01 | todo |
+| STO-02 | FilterStore and PriorityStore | `FilterStore`: `await s.get(filter=fn)` returns the first item, in FIFO order, for which `fn(item)` is true, and blocks until one exists. Getters are re-checked in FIFO order whenever an item arrives.<br>`PriorityStore`: `get()` returns the smallest item; ties come out in put order.<br>Same cancellation and determinism guarantees as STO-01. | `src/desyncio/store.py`, `tests/test_store.py` | STO-01 | todo |
+| MON-01 | Monitors | A time-weighted statistics helper outside the core (principle 4).<br>`TimeSeries.record(value)` stamps it with `sim.now`; `mean()` gives the time-weighted average, plus `min`, `max` and `last`.<br>Thin adapters observe a `Resource`'s `count`/`queue_length`, a `Container`'s `level` or a `Store`'s `len`, without changing those classes (e.g. by polling on state changes through an explicit `monitor=` hook added here).<br>Test: M/M/1 utilisation ≈ ρ and mean queue length ≈ ρ²/(1−ρ) within a band, for a fixed seed. | `src/desyncio/monitor.py`, `tests/test_monitor.py` | RES-01, CON-01, STO-01 | todo |
+| RES-03 | PreemptiveResource | `PreemptiveResource(capacity)`. A request with `preempt=True` (the default) and a strictly lower priority than the worst current user interrupts that user with `Interrupt(cause=Preempted(by=task, usage_since=t))`, and takes the unit at the same virtual time.<br>The preempted user's `async with` exits by exception unless caught.<br>Preemption ties follow `(priority, request order)`.<br>Determinism test. | `src/desyncio/resource.py`, `tests/test_resource.py` | RES-02, INT-01 | todo |
+| API-01 | Public exports | `from desyncio import Resource, PriorityResource, PreemptiveResource, Container, Store, FilterStore, PriorityStore, Interrupt, TimeSeries` works, plus `RealIOError`, `SimulationDeadlock` and `RealTimePacer` from module 1.<br>`__all__` is complete.<br>A test imports every name.<br>No import cycles: each module imports cleanly in a fresh interpreter. | `src/desyncio/__init__.py`, `tests/test_import.py` | RES-03, STO-02, MON-01 | todo |
+| DOC-02 | Primitives guide | `docs/primitives.md` covers:<br>— each primitive with a runnable example (bank tellers, fuel tank, producer/consumer, machine breakdown with interrupts, preemption);<br>— how each maps onto asyncio (what is stock and what is ours);<br>— ordering and cancellation guarantees.<br>Examples are run in a test, so they stay true.<br>Linked from README. | `docs/primitives.md`, `README.md`, `tests/test_docs_examples.py` | API-01 | todo |
+
+## Suggested batches (module 2)
+9. RES-01, INT-01, CON-01, STO-01
+10. RES-02, STO-02, MON-01
+11. RES-03
+12. API-01, then DOC-02
+
+Open questions for the owner before batch 9:
+- **D021, Container fairness:** strict FIFO (head-of-line blocking), as SimPy does by default, or first-fit, where a small `get` may go ahead of a large waiting one? The draft says strict FIFO.
+- **Interrupting a task that is not waiting** (INT-01): the draft delivers it at the task's next `await`. The alternative is to raise `RuntimeError` in the caller.
+- **MON-01:** is a small `monitor=` hook on the primitives acceptable, or should monitors only poll or read the trace?

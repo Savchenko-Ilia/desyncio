@@ -84,8 +84,10 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
 - Name: **desyncio** (PyPI and GitHub).
 - License: **Apache-2.0**.
 - Python 3.13+.
+- Time is a unitless float, "seconds by convention" (D004).
+- Primitives use asyncio-style context managers: `async with resource:` (D019).
+- Interrupts are a dedicated `Interrupt` exception, not asyncio cancellation (D020).
 
 ## 7. Open questions
 
-- Base time unit (seconds vs configurable) and calendar/shift handling.
-- Public API shape for primitives (SimPy-like `request()` vs asyncio-like `async with resource`).
+- Calendar/shift handling (time unit itself is settled by D004).

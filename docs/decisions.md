@@ -108,3 +108,15 @@ Under CPython 3.13, adding instance attributes to `VirtualTimeLoop` beyond its p
 
 ## D018 — LOOP-12 (benchmark) deferred (owner request)
 The owner chose to skip the benchmark for now. LOOP-12 stays `todo` in `docs/features.md` but is not scheduled in any batch until the owner asks for it. When it is picked up, the open question is how to install the comparison libraries (`simpy`, `asimpy`): the lead's proposal is a separate `[dependency-groups] bench` group, which is never installed for the test gate and runs by hand only.
+
+## D019 — Primitive API is asyncio-style context managers (owner)
+Resources are used with `async with resource:`, or `async with res.request(priority=...)` for the priority variants, rather than SimPy's `req = res.request(); yield req; res.release(req)`. Release on exit, including on exception, cancellation or interrupt, is guaranteed by the context manager. This resolves AGENTS.md §7's API question; AGENTS.md is updated.
+
+## D020 — Interrupts are a dedicated `Interrupt` exception (owner chose option B)
+`sim.interrupt(task, cause)` raises `Interrupt(cause)` in the target at its current `await`. It is deliberately not asyncio cancellation: `TaskGroup`, `timeout()` and `gather` treat a cancel as "shut down", which is the wrong meaning for "a breakdown happened, react to it". Real cancellation keeps its normal asyncio meaning. Implementing it needs care (INT-01): the target's wait must be woken with `Interrupt` without disturbing `task.cancelling()`.
+
+## D021 — Module 2 draft open points (lead proposals, pending owner review)
+- **Container fairness:** strict FIFO (head-of-line blocking).
+- **Interrupting a non-waiting task:** delivered at its next `await`.
+- **Monitors:** an explicit `monitor=` hook on primitives.
+- **Exports:** every new public name is exported only in API-01, so features don't collide on `__init__.py`.
