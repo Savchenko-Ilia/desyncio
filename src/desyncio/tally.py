@@ -13,8 +13,12 @@ customer's waiting time. For a value that holds over time (a queue length) use
 
 Rules:
 
-* ``record(value)`` never reads ``sim.now``, so it works inside or outside
-  ``desyncio.run(...)``.
+* With the default ``warmup=0``, ``record(value)`` never reads ``sim.now``, so
+  it works inside or outside ``desyncio.run(...)``.
+* ``Tally(warmup=t)`` (a finite real >= 0, STA-03) drops an observation recorded
+  while ``sim.now < t``: it is neither stored nor in ``samples``. With
+  ``warmup > 0``, ``record`` reads ``sim.now`` and so needs a run
+  (``RuntimeError`` outside one). The value is validated before it is dropped.
 * Values are finite real numbers (``int`` or ``float``). ``bool`` and other
   types raise ``TypeError``; NaN and infinities raise ``ValueError``. A
   rejected record leaves the tally unchanged.
@@ -29,16 +33,34 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from desyncio.monitor import _real
+from desyncio.sim import sim
 
 if TYPE_CHECKING:
     import numpy as np
 
 
+def _probability(p: float) -> float:
+    """``p`` as a float in ``[0, 1]``, validated like ``TimeSeries.quantile``."""
+    p = _real(p, "p")
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"p must be in [0, 1], got {p!r}")
+    return p
+
+
 class Tally:
     """Observations with summary statistics, quantiles and a histogram."""
 
-    def __init__(self) -> None:
+    def __init__(self, warmup: float = 0.0) -> None:
+        warmup = _real(warmup, "warmup")
+        if warmup < 0:
+            raise ValueError(f"warmup must be >= 0, got {warmup!r}")
+        self._warmup = warmup
         self._values: list[float] = []
+
+    @property
+    def warmup(self) -> float:
+        """The warm-up time: observations before it are dropped."""
+        return self._warmup
 
     def __len__(self) -> int:
         return len(self._values)
@@ -49,13 +71,17 @@ class Tally:
         return tuple(self._values)
 
     def record(self, value: float) -> None:
-        """Record one observation.
+        """Record one observation (dropped if ``sim.now`` is before the warm-up).
 
         Raises:
             TypeError: ``value`` is not an ``int``/``float`` (``bool`` rejected).
             ValueError: ``value`` is NaN or infinite. The tally is left unchanged.
+            RuntimeError: ``warmup > 0`` and called outside ``desyncio.run(...)``.
         """
-        self._values.append(_real(value, "value"))
+        v = _real(value, "value")
+        if self._warmup > 0 and sim.now < self._warmup:
+            return
+        self._values.append(v)
 
     def mean(self) -> float:
         """Arithmetic mean (``ValueError`` if empty)."""
@@ -96,14 +122,19 @@ class Tally:
             t.quantile([0.9, 0.99])   # (p90, p99)
 
         Raises:
-            ValueError: empty tally, or ``p`` outside ``[0, 1]``.
+            TypeError: ``p`` (or an element) is not a real number; ``bool`` and
+                ``str`` are rejected.
+            ValueError: empty tally, or ``p`` NaN or outside ``[0, 1]``.
         """
         import numpy as np
 
-        values = self._array("quantile")
-        if isinstance(p, Sequence):
-            return tuple(float(q) for q in np.quantile(values, list(p)))
-        return float(np.quantile(values, p))
+        # A str is a Sequence: reject it before treating p as one (D050).
+        if isinstance(p, Sequence) and not isinstance(p, str):
+            ps = [_probability(q) for q in p]
+            values = self._array("quantile")
+            return tuple(float(q) for q in np.quantile(values, ps))
+        q = _probability(p)
+        return float(np.quantile(self._array("quantile"), q))
 
     def histogram(
         self, bins: int | Sequence[float]

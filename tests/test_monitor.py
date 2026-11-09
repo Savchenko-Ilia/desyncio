@@ -395,3 +395,142 @@ def test_mm1_time_fractions_match_geometric_law() -> None:
         fr = desyncio.run(main(), seed=seed)
         for k in range(4):
             assert fr[float(k)] == pytest.approx((1 - rho) * rho**k, abs=0.04)
+
+
+# --- warm-up (STA-03) ---------------------------------------------------------
+
+
+def run_warm(
+    warmup: float, body: Callable[[TimeSeries], Awaitable[None]]
+) -> TimeSeries:
+    ts = TimeSeries(warmup=warmup)
+
+    async def main() -> None:
+        await body(ts)
+
+    desyncio.run(main())
+    return ts
+
+
+def test_warmup_validation() -> None:
+    assert TimeSeries().warmup == 0.0
+    assert TimeSeries(warmup=5).warmup == 5.0
+    for bad in (True, "1", None):
+        with pytest.raises(TypeError):
+            TimeSeries(warmup=bad)  # type: ignore[arg-type]
+    for bad_value in (-1, math.nan, math.inf):
+        with pytest.raises(ValueError):
+            TimeSeries(warmup=bad_value)
+
+
+async def _straddle(ts: TimeSeries) -> None:
+    ts.record(10)  # t=0, before warm-up: no weight
+    await sim.timeout(3)
+    ts.record(1)  # t=3, 10 held [0,3) and 10 -> 1 at 3; window starts at 2
+    await sim.timeout(2)
+    ts.record(3)  # t=5
+
+
+def test_warmup_straddling_segment_and_window_statistics() -> None:
+    ts = run_warm(2, _straddle)
+    # Window [2, 7]: 10 for 1s (the straddling segment), 1 for 2s, 3 for 2s.
+    assert ts.mean(until=7) == pytest.approx((10 + 2 + 6) / 5)
+    assert ts.time_fractions(until=7) == {10.0: 0.2, 1.0: 0.4, 3.0: 0.4}
+    assert (ts.min(), ts.max(), ts.last()) == (1.0, 10.0, 3.0)
+    assert ts.quantile(0.1, until=7) == 1.0
+    assert ts.quantile(1, until=7) == 10.0
+    mean = (10 + 2 + 6) / 5
+    var = (0.2 * (10 - mean) ** 2) + 0.4 * (1 - mean) ** 2 + 0.4 * (3 - mean) ** 2
+    assert ts.variance(until=7) == pytest.approx(var)
+    assert len(ts) == 3 and ts.samples == ((0.0, 10.0), (3.0, 1.0), (5.0, 3.0))
+
+
+def test_warmup_value_before_window_is_ignored_by_min_max() -> None:
+    async def body(ts: TimeSeries) -> None:
+        ts.record(100)  # t=0
+        ts.record(7)  # t=0: both before warm-up
+        await sim.timeout(2)  # warm-up 2: a record exactly at 2 replaces them
+        ts.record(4)
+        await sim.timeout(1)
+        ts.record(5)
+
+    ts = run_warm(2, body)
+    assert (ts.min(), ts.max()) == (4.0, 5.0)
+    assert ts.mean(until=4) == pytest.approx((4 + 5) / 2)
+
+
+def test_warmup_without_record_before_it_starts_at_first_record() -> None:
+    async def body(ts: TimeSeries) -> None:
+        await sim.timeout(4)
+        ts.record(2)  # first record at t=4 >= warm-up 3: window starts at 4
+        await sim.timeout(2)
+        ts.record(8)
+
+    ts = run_warm(3, body)
+    assert ts.mean(until=8) == pytest.approx((2 * 2 + 8 * 2) / 4)
+    assert ts.time_fractions(until=8) == {2.0: 0.5, 8.0: 0.5}
+
+
+def test_warmup_not_reached_by_any_record_last_value_holds_from_warmup() -> None:
+    async def body(ts: TimeSeries) -> None:
+        ts.record(1)
+        await sim.timeout(1)
+        ts.record(6)  # t=1 < warm-up 4
+
+    ts = run_warm(4, body)
+    assert ts.mean(until=10) == 6.0  # window [4, 10] holds 6
+    assert ts.time_fractions(until=10) == {6.0: 1.0}
+    assert ts.mean(until=4) == 6.0  # zero-length window: the last value
+    assert (ts.min(), ts.max(), ts.last()) == (6.0, 6.0, 6.0)
+    with pytest.raises(ValueError, match="warm-up"):
+        ts.mean(until=3)  # until < warmup
+    for call in (ts.time_fractions, ts.variance):
+        with pytest.raises(ValueError, match="warm-up"):
+            call(until=3)
+    with pytest.raises(ValueError, match="warm-up"):
+        ts.quantile(0.5, until=3)
+
+
+def _mm1(seed: int, *series: TimeSeries) -> None:
+    """M/M/1, rho=0.5, with 50 customers already waiting at t=0; horizon 1500."""
+
+    async def main() -> None:
+        count = 0
+
+        def change(delta: int) -> None:
+            nonlocal count
+            count += delta
+            for ts in series:
+                ts.record(count)
+
+        arrivals, service = sim.random("arrivals"), sim.random("service")
+        lock = asyncio.Lock()
+
+        async def customer() -> None:
+            change(1)
+            async with lock:
+                await sim.timeout(service.expovariate(1.0))
+            change(-1)
+
+        change(0)
+        tasks = [sim.spawn(customer()) for _ in range(50)]
+        while sim.now < 1500:
+            await sim.timeout(arrivals.expovariate(0.5))
+            tasks.append(sim.spawn(customer()))
+        await asyncio.gather(*tasks)
+
+    desyncio.run(main(), seed=seed)
+
+
+def test_warmup_removes_initial_transient_in_mm1() -> None:
+    # Theory: E[N] = rho/(1-rho) = 1. The 50 initial customers drain at net rate
+    # 0.5, so the system is near steady state after t ~ 100 (relaxation time
+    # ~12). Measured over seeds 1..8 (mean N over [0, ~1505], the last record as
+    # the end): no warm-up 1.79..3.42 (always > 1.7); warmup=200 0.88..1.13
+    # (largest error 0.13). The band 0.25 is about 2x that; the test runs 1..3.
+    for seed in (1, 2, 3):
+        cold, warm = TimeSeries(), TimeSeries(warmup=200)
+        _mm1(seed, cold, warm)
+        end = cold.samples[-1][0]
+        assert cold.mean(until=end) > 1.7
+        assert warm.mean(until=end) == pytest.approx(1.0, abs=0.25)
