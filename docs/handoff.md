@@ -3,12 +3,12 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 18. The test-suite trim (D042, D043) is done. Nothing is in flight. Next: the owner defines module 3._
+_Last updated: 2026-11-09, end of batch 19. The SHOULD clean-ups (CLN-06..08, D045, D046) are done. Nothing is in flight. Next: the owner defines module 3._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
   `claude/setup-batch-1-5bb5vp` mirrors it; fast-forward it after each push.
-- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) is open for the owner. It covers batches 14–18.
+- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) is open for the owner. It covers batches 14–19 (batch 19 was pushed to `integration` after the PR was opened, so it is in the PR).
   PR #3 was merged at `74c88b7` (end of batch 13). Only the owner merges into `main`.
   **Lesson:** after the owner merges a PR, the next batch's work needs a new PR. Check `list_pull_requests` before telling the owner that an open PR already contains it.
 - **CI is manual-only (D013)**: there are no GitHub Actions credits, so `scripts/gate.sh <branch>` is the check for every merge.
@@ -68,13 +68,21 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 18:** TST-05 (D043): the gate runs `mypy src tests`. D044: gate.sh reads gate.env from the main checkout, so gate changes are verified after merge.
 - `integration` passes the gate: 556 tests on 3.13 and 3.14, ruff, and mypy on 36 files. Nothing is in flight; no agents are running.
 
+## Clean-up follow-ups, batch 19 — DONE
+- CLN-08 (36d0215): the import guard also rejects `from . import X`; the late-interrupt docstring covers the non-eager case.
+- CLN-06 (c22b7ee): `gate.sh` sources `gate.env` from the tree under test (D046 resolves D044 for `gate.env`; changes to `gate.sh` itself are still verified after merge).
+- CLN-07 (0da8d5e): a raising monitor outside a running loop is logged on the `desyncio` logger (D045, owner may revise); one helper in `_monitor.py`.
+- All 0 fix rounds. `integration` passes the gate: 558 tests on 3.13 and 3.14, ruff, mypy. Nothing is in flight; no agents are running.
+
 ## Next batches
 1. **Module 3 is undefined. Ask the owner.** Candidates: calendar/shift handling (AGENTS.md open question), LOOP-12 benchmark (deferred, D018), statistics consumers on the monitor hook.
-2. **Small SHOULD clean-ups, if the owner wants them:**
-   - `gate.sh` should source `gate.env` from the worktree under test (D044).
-   - The raising-monitor-on-immediate-shutdown case outside a loop gives "no running event loop" (STO-01; needs a src change).
-   - CLN-04: guard relative `from . import X`.
-   - The TST-06 docstring could add one clause about the non-eager case.
+2. **Small SHOULDs left, if the owner wants them:**
+   - `gate.sh`: set the cleanup trap right after `mktemp -d` (a bad branch name leaks an empty temp dir; pre-existing).
+   - Outside-loop monitor tests for Resource and Container (CLN-07 covered the stores only).
+
+## Lessons learned
+- "Go" with several options open: run the work that needs no owner definition, record the choice as a decision, and say so in the report.
+- Run `gate.sh` with its output redirected to a file and check `$?` directly (D035); it is quiet and reliable that way.
 
 ## Open questions for the owner
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
@@ -124,3 +132,4 @@ Run Claude Code on Opus with `integration` checked out, and send:
 ```
 Read AGENTS.md, CLAUDE.md and docs/handoff.md. Continue from the handoff: finish the in-flight batch if any, then report and wait for "go".
 ```
+- **D045:** confirm that a monitor error outside a running loop should be logged on the `desyncio` logger.

@@ -1069,3 +1069,48 @@ Branch: feat/TST-05  ·  Merged: f02743c
 
 **Follow-ups (SHOULD).** Source `gate.env` from the checked-out worktree in `gate.sh`. The alternative `items: tuple[object, ...] = store.items` keeps the tuple check without narrowing.
 
+
+## CLN-06 — Gate reads gate.env from the tested tree (2026-11-09, batch 19)
+Branch: feat/CLN-06  ·  Merged: c22b7ee
+
+**Approach.** The `gate.env` source and the `${VAR:-default}` lines moved from before `git worktree add` to just after `cd "$TMP"`. The script sources `$TMP/scripts/gate.env` if present, else the main checkout's, else uses the built-in defaults. Steps, order, exit 2 and the `GATE PASS (<branch>)` line are unchanged.
+
+**asyncio internals.** None.
+
+**Trade-offs.** Sourcing the tested tree's file means the branch decides its own gate commands (D046). The alternative, keeping the main checkout's file, was the D044 gap.
+
+**Review findings.** No MUST. Proof reproduced by the reviewer: a throwaway branch with `TEST_CMD="false"` gives `GATE FAIL` with the new script and `GATE PASS` with the old; a tree without `gate.env` falls back to the main checkout's; a partial `gate.env` takes defaults for the rest under `set -u`.
+
+**Gotchas.** `gate.sh` itself still runs from the checkout it is started in, so changes to the script are still verified after merge (D044, D046).
+
+**Follow-ups (SHOULD).** The trap is set only after `git worktree add` succeeds, so a bad branch name leaves an empty `mktemp` directory behind (pre-existing). Set the trap right after `mktemp -d`.
+
+## CLN-07 — Raising monitor outside a running loop (2026-11-09, batch 19)
+Branch: feat/CLN-07  ·  Merged: 0da8d5e
+
+**Approach.** A new private `src/desyncio/_monitor.py` has `report_monitor_error(message, exc, key, primitive)`. Resource/PriorityResource (`_call_monitor`), Container (`_notify_monitor`) and the stores (`_call_monitor`) call it from their existing `except Exception`. Inside a loop it calls `call_exception_handler` with the same context as before; with no running loop it logs the message at ERROR on the `desyncio` logger with `exc_info` (D045). Two new parametrized tests (Store, PriorityStore) call `shutdown(immediate=True)` after `desyncio.run` has closed its loop. 556 → 558 tests.
+
+**asyncio internals.** `asyncio.get_running_loop()` raises `RuntimeError` when the thread has no running loop; unlike `get_event_loop()` it never creates or guesses one. The `try` covers only that call, so a `RuntimeError` from a custom exception handler is not swallowed.
+
+**Trade-offs.** One helper instead of three copies of the reporting code. The `desyncio` logger, not `asyncio`'s, so users can tell the source; the message text matches the handler's context message.
+
+**Review findings.** No MUST. The reviewer reverted the src changes and saw both new tests fail with the original `RuntimeError`.
+
+**Gotchas.** Each call site keeps its own `except Exception`, so `KeyboardInterrupt`/`SystemExit` still propagate (D023 v2).
+
+**Follow-ups (SHOULD).** Resource and Container use the helper but have no outside-loop test (the spec asked for stores only).
+
+## CLN-08 — Relative-import guard; late-interrupt docstring (2026-11-09, batch 19)
+Branch: feat/CLN-08  ·  Merged: 36d0215
+
+**Approach.** `test_no_from_desyncio_import_x` now also asserts `node.module is not None` for any `ImportFrom` with `level >= 1`, so `from . import X` and `from .. import X` fail while `from .sim import sim` passes. `interrupt.py`'s late-interrupt bullet gains one clause: with a non-eager task the late `interrupt()` raises `RuntimeError` ("not inside ..."), because the block has already closed.
+
+**asyncio internals.** A non-eager task created inside the block first runs on the next loop iteration, after the block has exited; an eager task (`eager_start`) runs its first step synchronously at creation, inside the block.
+
+**Trade-offs.** None.
+
+**Review findings.** No MUST. Mutation reproduced by the reviewer: `from . import clock` in `store.py` makes the guard fail. `SUBMODULES` globs every module, including private ones like `_validate.py`.
+
+**Gotchas.** `__init__.py` is not scanned, where `from . import X` is legitimate.
+
+**Follow-ups.** None.

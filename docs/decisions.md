@@ -304,3 +304,6 @@ The owner extended D042 with the two remaining audit points:
 ## D045 — Batch 19: the SHOULD clean-ups; monitor errors outside a loop are logged (lead, the owner may revise)
 The owner said "go" with Module 3 still undefined, so the lead ran the defined work: the four SHOULD clean-ups from the batch 18 handoff, as CLN-06..08. Module 3 still waits for the owner.
 For CLN-07, a monitor that raises when there is no running loop (e.g. `Store.shutdown(immediate=True)` called outside a simulation) is logged at ERROR on the `desyncio` logger with the traceback, the way asyncio's default exception handler logs (to its `asyncio` logger). The operation still completes. Inside a loop nothing changes: `call_exception_handler` as in D023 v2.
+
+## D046 — D044 is resolved by CLN-06; a branch's gate.env is trusted (lead)
+`scripts/gate.sh` now sources `scripts/gate.env` from the tree under test, so a branch that changes its gate commands is gated by its own commands. D044's merge-then-verify procedure is no longer needed for `gate.env` changes. It is still needed for changes to `gate.sh` itself, because the script runs from the checkout it is started in. A branch's `gate.env` runs as shell code inside the gate (an `exit 0` there would end the gate early); that adds no trust the gate did not already give to the branch's tests, and the lead reads every diff before gating.
