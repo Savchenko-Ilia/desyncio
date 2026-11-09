@@ -26,6 +26,7 @@ import random
 from collections.abc import Coroutine
 from typing import Any
 
+from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_rng_streams
 
@@ -142,6 +143,47 @@ class Sim:
         """
         _loop()
         return current_rng_streams().stream(name)
+
+    def interruptible(self) -> Interruptible:
+        """Return an async context manager marking code that may be interrupted.
+
+        Use it like ``asyncio.timeout()``::
+
+            try:
+                async with sim.interruptible() as scope:
+                    await sim.timeout(10)
+            except Interrupt as exc:
+                print(exc.cause, scope.interrupted)
+
+        Another process calls ``sim.interrupt(task, cause)``; the block then
+        exits with ``desyncio.interrupt.Interrupt``. See that module's
+        docstring for the full analogy and mechanism.
+
+        Raises:
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        _loop()
+        return Interruptible()
+
+    def interrupt(self, task: "asyncio.Task[Any]", cause: object = None) -> None:
+        """Interrupt ``task``'s innermost active ``interruptible()`` block.
+
+        The interrupt is delivered at the current virtual time, at the task's
+        current ``await`` (or the next one, if its wait already completed this
+        instant): the block exits with ``Interrupt(cause)``. Like a timeout
+        firing, it is ``task.cancel()`` underneath, and the block translates
+        the cancellation in ``__aexit__``. A real ``task.cancel()`` always
+        wins. A second ``interrupt`` to a block that is already interrupted
+        is ignored (the first cause is kept); once the block has exited a new
+        ``interruptible()`` block is needed.
+
+        Raises:
+            RuntimeError: ``task`` is finished, is the calling task itself, or
+                is not inside an ``interruptible()`` block; or outside
+                ``desyncio.run(...)``.
+        """
+        _loop()
+        interrupt_task(task, cause)
 
 
 sim = Sim()
