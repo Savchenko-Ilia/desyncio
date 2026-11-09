@@ -222,9 +222,12 @@ def test_cpython_adapted_code_carries_psf_notice() -> None:
 
 
 # On the integration branch before LOOP-09, ``len(vars(VirtualTimeLoop()))``
-# was 28 (measured with CPython 3.13). Do not add instance attributes to the
-# loop: put new per-loop state on ``loop._state`` instead.
-_INTEGRATION_LOOP_ATTRS = 28
+# was 28 (measured with CPython 3.13), i.e. 2 more than the stock
+# ``SelectorEventLoop`` (26 on 3.13). The stock loop's own count differs between
+# interpreters (27 on 3.14), so the limit is relative to the running
+# interpreter's baseline. Do not add instance attributes to the loop: put new
+# per-loop state on ``loop._state`` instead.
+_EXTRA_LOOP_ATTRS = 2
 
 
 def test_loop_instance_dict_is_not_larger_than_before_loop_09() -> None:
@@ -240,8 +243,13 @@ def test_loop_instance_dict_is_not_larger_than_before_loop_09() -> None:
     a timing test, so it is the regression guard; the benchmark numbers are
     in docs/how-the-loop-works.md section 10.
     """
+    stock = asyncio.SelectorEventLoop()
+    try:
+        limit = len(vars(stock)) + _EXTRA_LOOP_ATTRS
+    finally:
+        stock.close()
     loop = VirtualTimeLoop()
     try:
-        assert len(vars(loop)) <= _INTEGRATION_LOOP_ATTRS, sorted(vars(loop))
+        assert len(vars(loop)) <= limit, sorted(vars(loop))
     finally:
         loop.close()
