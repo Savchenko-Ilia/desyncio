@@ -372,6 +372,9 @@ def test_raising_monitor_never_changes_model(cls: type[AnyResource]) -> None:
                 cancel_seen.append(exc)
                 raise
 
+        # --- holder, queued waiter, cancelled waiter: 7 monitor calls
+        # holder acquire, release (2); waiter queue, acquire, release (3);
+        # victim queue, leave (2).
         # A holder and a queued waiter, which is still served.
         holder = sim.spawn(user("holder", 2))
         await sim.timeout(1)
@@ -389,12 +392,14 @@ def test_raising_monitor_never_changes_model(cls: type[AnyResource]) -> None:
         await asyncio.gather(holder, waiter)
         assert got == [("holder", 0.0), ("waiter", 2.0)]
 
+        # --- body exception: 2 monitor calls (acquire, release)
         # Exit by exception: the body's exception propagates unchanged.
         with pytest.raises(ValueError, match="body") as info:
             async with res:
                 raise ValueError("body")
         assert info.value.__context__ is None
 
+        # --- cancelled holder: 2 monitor calls (acquire, release)
         # Exit by cancelling the holder: the cancel is not masked.
         t = sim.spawn(user("cancelled holder", 100))
         await sim.timeout(1)
@@ -403,9 +408,7 @@ def test_raising_monitor_never_changes_model(cls: type[AnyResource]) -> None:
             await t
         assert t.cancelled()
 
-        # holder: acquire, release; waiter: queue, acquire, release;
-        # victim: queue, leave; body exception: acquire, release;
-        # cancelled holder: acquire, release.
+        # Every monitor call raised once: 7 + 2 + 2 = 11.
         assert len(errors) == 11
         for ctx in errors:
             assert isinstance(ctx["exception"], MonitorBoom)
@@ -1440,6 +1443,7 @@ async def _preemption_stress(n: int = 40) -> list[tuple[float, str, str]]:
 
 
 @given(st.integers(0, 2**32))
+# The seeds are 40 derandomized hypothesis draws, not the fixed seeds 0..39 (D042).
 @settings(max_examples=40, derandomize=True, deadline=None)
 def test_preemption_stress(seed: int) -> None:
     desyncio.run(_preemption_stress(), seed=seed)
