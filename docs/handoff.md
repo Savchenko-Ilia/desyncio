@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 10. Next session starts batch 11 after the owner's "go"._
+_Last updated: 2026-11-09, end of batch 11. Next session starts batch 12 (API-01) after the owner's "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -18,7 +18,7 @@ _Last updated: 2026-11-09, end of batch 10. Next session starts batch 11 after t
 17 of 18 features are done. LOOP-12 (benchmark) is deferred by the owner (D018).
 `docs/implementation-log.md` has an entry per feature; `docs/how-the-loop-works.md` is the explainer.
 
-## Module 2: DES primitives — IN PROGRESS (batch 10 done)
+## Module 2: DES primitives — IN PROGRESS (batch 11 done)
 The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D019: primitives use `async with`.
 - D020 (refined) and D024: interrupts are timeout-style `async with sim.interruptible():` scopes.
@@ -27,14 +27,15 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D023 v2: the monitor contract, below.
 - D026: random streams are `sim.random(name)`, which is `random.Random(f"{seed}:{name}")`.
 - D028–D031: batch 10 contracts and outcomes.
+- D032: RES-03 preemption is SimPy-style (owner). D034: a reservation can be preempted (owner to confirm). D033: the gate runs 3.13 + 3.14 + `ruff format --check`.
 
-**Done:** RES-01, CON-01, STO-01 and INT-01 (batch 9); RND-01, MON-01, STO-02 and RES-02 (batch 10). `integration` passes the gate with 573 tests. Nothing is in flight.
+**Done:** RES-01, CON-01, STO-01, INT-01 (batch 9); RND-01, MON-01, STO-02, RES-02 (batch 10); CI-03, RES-03 (batch 11). `integration` passes the gate with 642 tests on 3.13 and on 3.14. Nothing is in flight.
 
-**Merged in batch 10:**
-- RND-01: `sim.random`, stdlib seeding; ddc6dda; 1 fix round (a PEP 649 annotation on 3.14).
-- MON-01: `TimeSeries`; 457ab52; 1 fix round (an M/M/1 band that couldn't tell Lq from ρ; D029 promotions).
-- STO-02: `PriorityStore(put(item, priority=))` and `FilterStore`; 11f488a; 0 fix rounds (D031).
-- RES-02: `PriorityResource` on per-request futures; 40e9dca; 1 fix round (Condition release leak, D030).
+**Merged in batch 11:**
+- CI-03: the gate runs the suite on Python 3.14 too, and adds `ruff format --check .`; 0 fix rounds. The 3.14 failure was an interpreter difference (stock loop: 26→27 attributes), and the test is now relative to the running interpreter.
+- RES-03: `PreemptiveResource` and `Preempted`; 525deb1; 1 fix round (formatting, plus the promoted no-await guard). The merge deviated from the process (D035): the branch alone failed the new gate on the 3.14 test that CI-03 had fixed, while the merged tree passed.
+
+**Merged in batch 10:** RND-01 (ddc6dda), MON-01 (457ab52), STO-02 (11f488a), RES-02 (40e9dca). See the log.
 `feat/INT-01` on origin is a discarded design; never merge it.
 
 **D023 v2, the monitor contract (every primitive):** `monitor(primitive)` is called synchronously after every state change, once the state has settled. An `Exception` from the monitor goes to `loop.call_exception_handler(...)`; `KeyboardInterrupt`/`SystemExit` propagate. The operation always completes, and a `CancelledError` is never masked.
@@ -48,12 +49,13 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 **Release must be synchronous (D030).** Any `await` in an `__aexit__` is a cancellation point. RES-03 must keep `PriorityResource`'s release free of awaits.
 
 ## Next batches
-- **Batch 11: RES-03 PreemptiveResource**, alone (it owns `resource.py`). It extends `PriorityRequest` with `preempt=True`: the holder's body runs inside `sim.interruptible()`, and a strictly better request interrupts the worst holder with `Preempted(by=task, usage_since=t)`, taking the unit at the same instant. Tell the implementer about D023 v2, D024 and D030. It could also take the RES-02 SHOULDs (dead `_hold_round0_lock` helper, stale comment, shared `_changed`), since it owns the same files; ask the owner.
-- **Batch 12:** API-01 (exports, including `PriorityStore`, `FilterStore` and `TimeSeries`; FilterStore has no `shutdown`, D031), then DOC-02 (primitives guide; the car-wash example from D026 uses `sim.random`).
+- **Batch 12: API-01** (public exports). Start it in a fresh lead session if the context is long. It exports `Resource`, `PriorityResource`, `PreemptiveResource`, `Preempted`, `Container`, `Store`, `PriorityStore`, `FilterStore`, `Interrupt`, `TimeSeries`, `RealIOError`, `SimulationDeadlock` and `RealTimePacer`. `Preempted` is not in the feature row yet: ask the owner or add it as a lead decision. FilterStore has no `shutdown` (D031).
+- **Batch 13: DOC-02** (primitives guide). It includes the car-wash example (D026, `sim.random`) and the machine-shop preemption example (RES-03).
 
 ## Open questions for the owner
-- **D028/D031:** confirm the `TimeSeries` wiring (a lambda on `monitor=`, explicit initial record, `mean(until=)`), `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
-- _(Resolved by D033/CI-03: the gate now runs 3.14 and `ruff format --check`.)_
+- **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
+- **D028/D031:** confirm the `TimeSeries` wiring, `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
+- **API-01:** should `Preempted` be a top-level export?
 
 ## Open SHOULD backlog (not scheduled; propose to the owner as clean-up features)
 - **Reuse audit of module 1:** no MUSTs. SHOULDs:
@@ -67,6 +69,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **sim:** `sim.random` from a task created with a fresh `contextvars.Context` gives a misleading error.
 - **Tests:** `from models.mm1 import` depends on pytest's default `prepend` import mode.
 - Per-feature SHOULDs are listed in `docs/implementation-log.md`.
+- **Batch 10–11 SHOULDs:** CI-03 (add `.venv-3.14` to ruff's exclude or `.gitignore`, and an explicit `uv python install 3.14` in ci.yml); RES-03 (the AST guard can't see a helper that awaits).
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
@@ -79,6 +82,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - Tests never sleep in real time. Use the fake wall clock pattern from `tests/test_realtime.py`.
 - **Give reviewers an exact worktree command:** `mkdir -p` the scratch dir, `git worktree add --detach <dir>/wt origin/integration`, and prefix every later command with `cd <dir>/wt &&`. Without that, two reviewers in batch 10 ran their first commands in the main checkout.
 - **Ask reviewers to probe concurrency with scripts, and to try mutations of the tests.** Batch 10's two real bugs (a release leak, and a statistics test that could not fail) were found that way, not by reading.
+- **Never pipe `scripts/gate.sh` inside a `&&` chain** (D035): the chain sees the status of the last pipe stage. When the gate changes, gate older branches on the merged tree.
 - **Statistical tests:** pick parameters where the quantities you compare differ, and give the band against a spread over several seeds.
 
 ## Starting a new lead session

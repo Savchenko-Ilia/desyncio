@@ -790,3 +790,41 @@ Branch: feat/CI-03  ·  Merged: d17d8d3
 
 **Follow-ups.** The SHOULDs above.
 
+## RES-03 — PreemptiveResource (2026-11-09, batch 11)
+Branch: feat/RES-03 + fix/RES-03-1  ·  Merged: 525deb1
+
+**Approach.** `PreemptiveResource(PriorityResource)` and `Preempted(by, usage_since, resource)`, a frozen dataclass, are in `src/desyncio/resource.py`. The semantics follow D032 (SimPy-style, chosen by the owner).
+- `request(priority=0, preempt=True)` returns a `PreemptiveRequest`. It acquires a unit, then enters an `Interruptible()`, so every holder's body is preemptible. Plain `async with res:` keeps a per-task stack of requests.
+- `PriorityResource._acquire` gained four no-op hooks (`_arriving`, `_unit_assigned`, `_became_holder`, `_unit_dropped`) and a ticket slot in each waiter entry. A `_Ticket` records the task, priority, preempt flag, seq, `since`, `held` and `evicted`.
+- **Preemption (`_arriving`):** it happens only when all three hold: no unit is free, the request is at the head of the queue, and the worst holder of another task (max `(priority, seq)`) is strictly worse.
+- **Eviction (`_evict`)** is synchronous. It removes the victim, decrements `count` (or `_granted`, for a reservation), and then calls `interrupt_task(victim, Preempted(...))`. The preemptor then takes the freed unit on the fast path, and the monitor is called once.
+- **`__aexit__`:** it releases synchronously, unless the request was evicted, and only then exits the scope.
+
+**asyncio internals.**
+- `Interruptible.__aenter__` and `__aexit__` are `async` but never await. That is what makes "grant, then scope" and "release, then scope exit" free of leaks. `test_interruptible_enter_and_exit_never_await` pins it (D034).
+- `sim.interrupt` delivers to the innermost `interruptible()` block. So a victim with its own nested block receives the preemption there, after the unit is already gone (documented).
+- A real cancel always wins over a preemption (INT-01).
+
+**Trade-offs.**
+- **Hooks in RES-02 vs a separate acquire:** hooks keep a single acquire path. The cost is a few no-op calls per acquire on a plain `PriorityResource`.
+- **A reservation can be preempted** (D034, for the owner to confirm): a granted waiter whose task has not resumed yet counts as held. Its `__aenter__` raises `Interrupt(Preempted)` itself, without any cancellation.
+
+**Review findings.**
+- Round 0 FAILED on formatting only: `resource.py` was not `ruff format`-clean under D033.
+  - The reviewer's stress test (1000 seeds: preempt on and off, cancels, `asyncio.timeout()`, nested `interruptible()`) found no leaked or double-released unit.
+  - The D032 rules and cases a–e held.
+  - The lead promoted the no-await guard to MUST (D034).
+- Fix round 1: `ruff format` (the ASTs are identical) and the AST guard test (a mutation that adds `await` fails it).
+- Re-review PASSED on the merged tree: 642 tests on 3.13 and on 3.14, ruff format clean.
+- The merge itself deviated from the process (D035).
+- SHOULD:
+  - The AST guard can't see an await reached through a helper.
+  - Add a test that would catch a future `await` between `_acquire` and `Interruptible.__aenter__`.
+- The clean-ups D032 folded in are done: the dead `_hold_round0_lock` is removed, the stale comment is fixed, and `_call_monitor` is shared between `Resource` and `PriorityResource`.
+
+**Gotchas.**
+- Within one instant, the preemptor's body runs before the victim's `except Interrupt` handler.
+- A task that holds every unit and asks for another one waits for itself. Avoid nesting there.
+
+**Follow-ups.** API-01 exports `PreemptiveResource` and `Preempted`. DOC-02 adds the machine-shop example.
+

@@ -240,3 +240,10 @@ The owner chose: "Test python 3.14. Add ruff format." Scheduled as CI-03 in batc
 ## D034 — RES-03 review: a granted reservation can be preempted; a no-await guard is promoted (lead, for the owner to confirm)
 - **Extension accepted (owner to confirm).** On a `PreemptiveResource`, a unit already granted to a waiter that has not resumed yet counts as held, as in SimPy, where a granted request is already in `users`. So it can be preempted. That waiter's `async with` raises `Interrupt(Preempted(...))` from `__aenter__`, its body never starts, and nothing is cancelled underneath (`task.cancelling()` stays 0). Without this, a better request arriving in the same instant as a release would wait behind a worse one. The reviewer found that no guarantee breaks. It is the only `Interrupt` not delivered through an `interruptible()` scope, and it is documented in the class docstring.
 - **Promoted to MUST.** RES-03 being free of leaks depends on `Interruptible.__aenter__` and `__aexit__` never awaiting (D030). A test must pin that, so a future `await` there fails loudly.
+
+## D035 — RES-03 merged when the branch alone did not pass the gate (lead, process deviation)
+`scripts/gate.sh origin/fix/RES-03-1` printed `GATE FAIL` on the Python 3.14 run. The lead's command chained `gate.sh … | tail -1 && git merge …`, so the merge ran anyway, because the pipeline's status was `tail`'s. The lead investigated before going further. The only failure was `test_loop_instance_dict_is_not_larger_than_before_loop_09`. The branch was cut before CI-03, which fixed that test. The merged `integration` (525deb1) passes the full gate: 642 tests on 3.13 and on 3.14, and ruff check, ruff format and mypy are clean. The re-reviewer had run the same full gate on the merged tree. The merge is kept.
+Rules from now on:
+- Gate a branch on its merged tree when the gate itself changed after the branch was cut (or rebase the branch first).
+- Never pipe `gate.sh` into another command in a `&&` chain. Check the exit status with `set -o pipefail`, or run the gate on its own.
+
