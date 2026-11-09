@@ -346,3 +346,7 @@ The lead proposed these defaults, and the owner accepted all six ("go"):
 ## D052 — CAL-01 review: two SHOULDs promoted to MUST (lead)
 - The round-trip test's tolerance was `1e-6 * unit` seconds-in-sim-units, which for an hour unit allows 3.6 ms, not the row's 1 µs. A test that does not check the spec is a test defect.
 - `to_sim` leaked a bare `OverflowError` for an out-of-range datetime, while `to_datetime` raises `ValueError`. Both must raise `ValueError`.
+
+## D053 — CAL-02: two gaps in the spec, filled by the lead
+- **`Schedule.changes(after)` ends** when capacity can never change again. The row said "endless", but a schedule whose capacity is constant forever (e.g. 24-hour shifts every day) would then loop forever without yielding. The generator stops after 400 days without a change past the last closed date and the date of `after`. The weekly pattern repeats, so that means no change ever again. A consumer (CAL-03) keeps the last capacity once `changes` ends.
+- **A shift that lies entirely inside a DST gap** (start and end both at non-existent local times) moves to the same instant at both ends, so it is empty and never runs.
