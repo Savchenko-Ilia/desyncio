@@ -90,6 +90,7 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
 
+from desyncio._monitor import report_monitor_error
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
 
 
@@ -100,20 +101,15 @@ def _call_monitor(primitive: object, monitor: Callable[[Any], object] | None) ->
     Reuses asyncio's callback error handling (``Handle._run``): an
     ``Exception`` goes to the loop's exception handler instead of the calling
     task, so it can neither leave the primitive half-updated nor mask an
-    exception (e.g. ``CancelledError``) already in flight.
+    exception (e.g. ``CancelledError``) already in flight. Outside a running
+    loop the error is logged on the ``desyncio`` logger instead (D045).
     """
     if monitor is None:
         return
     try:
         monitor(primitive)
     except Exception as exc:  # KeyboardInterrupt/SystemExit propagate
-        asyncio.get_running_loop().call_exception_handler(
-            {
-                "message": "Resource monitor raised",
-                "exception": exc,
-                "resource": primitive,
-            }
-        )
+        report_monitor_error("Resource monitor raised", exc, "resource", primitive)
 
 
 class Resource:

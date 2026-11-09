@@ -32,6 +32,8 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
+from desyncio._monitor import report_monitor_error
+
 
 def _check_capacity(capacity: float) -> None:
     """Validate ``capacity`` (shared by all stores): int >= 1 or ``math.inf``."""
@@ -60,16 +62,15 @@ def _call_monitor(monitor: "Callable[[Any], None] | None", store: object) -> Non
     ``BaseException`` and propagate, as in asyncio. ``CancelledError`` is
     also a ``BaseException``; the stores call this only after their
     operation has finished, with no ``await`` left, so there is no pending
-    cancellation to mask.
+    cancellation to mask. Outside a running loop (e.g. ``shutdown()`` before
+    ``run``) the error is logged on the ``desyncio`` logger instead (D045).
     """
     if monitor is None:
         return
     try:
         monitor(store)
     except Exception as exc:
-        asyncio.get_running_loop().call_exception_handler(
-            {"message": "Store monitor raised", "exception": exc, "store": store}
-        )
+        report_monitor_error("Store monitor raised", exc, "store", store)
 
 
 class Store[T]:
