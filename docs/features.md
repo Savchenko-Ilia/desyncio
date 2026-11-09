@@ -32,5 +32,5 @@ Status: `todo` · `in_progress` · `done` · `blocked`
 4. LOOP-03, LOOP-04, LOOP-07
 5. LOOP-05, LOOP-11, DOC-01
 6. LOOP-06, LOOP-09
-7. LOOP-10, then LOOP-12
+7. LOOP-10 (LOOP-12 deferred, D018)
 

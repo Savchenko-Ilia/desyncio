@@ -105,3 +105,6 @@ The LOOP-09 reviewer rated as SHOULD that a sink exception became the running ta
 
 ## D017 — Performance guard on `VirtualTimeLoop` attributes (batch 7)
 Under CPython 3.13, adding instance attributes to `VirtualTimeLoop` beyond its post-construction count of 28 measurably slows every loop iteration: the inline-values / shared-keys instance-dict layout is lost. Any new per-loop state goes on `self._state` (a `__slots__` object). `tests/test_loop.py::test_loop_instance_dict_is_not_larger_than_before_loop_09` enforces this.
+
+## D018 — LOOP-12 (benchmark) deferred (owner request)
+The owner chose to skip the benchmark for now. LOOP-12 stays `todo` in `docs/features.md` but is not scheduled in any batch until the owner asks for it. When it is picked up, the open question is how to install the comparison libraries (`simpy`, `asimpy`): the lead's proposal is a separate `[dependency-groups] bench` group, which is never installed for the test gate and runs by hand only.
