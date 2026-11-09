@@ -500,3 +500,38 @@ Branch: feat/LOOP-09 + fix/LOOP-09-1 + fix/LOOP-09-2  ·  Merged: 62caa24
 - A test that deliberately makes `run` fail with a bad argument needs `# type: ignore[call-overload]`.
 
 **Follow-ups.** The SHOULDs above.
+
+## LOOP-10 — Determinism invariant (2026-11-09, batch 8)
+Branch: feat/LOOP-10  ·  Merged: 30103ad
+
+**Approach.** `tests/models/mm1.py` is a reference M/M/1 queue, heavily commented for learners, using the public API only:
+- exponential inter-arrival times from `sim.rng("arrivals")` and service times from `sim.rng("service")` (λ=0.9, μ=1.0);
+- each customer is a `sim.spawn`ed task;
+- the single FIFO server is an `asyncio.Lock`.
+It returns frozen `CustomerRecord(arrival, service_start, departure)` objects.
+
+`tests/test_determinism.py` covers:
+- the same seed gives an identical full trace (over 10k `TraceRecord`s) and identical results;
+- a different seed gives a different trace and results;
+- the same seed in a subprocess, with `PYTHONHASHSEED` 0 and 12345, gives identical SHA-256 digests of `repr(trace)` and `repr(records)`;
+- a sanity check: the mean time in system is 8.64 for seed 42 (theory 10, band 8–12), plus FIFO and single-server invariants.
+The file takes about 3–4 s, and it runs in `scripts/gate.sh`, since CI is manual-only (D013).
+
+**asyncio internals.** `asyncio.Lock` can't be barged in 3.13. `acquire`'s fast path needs no un-cancelled waiters. `release` → `_wake_up_first` resolves the first waiter's future, but the waiter stays in `_waiters` until it resumes, so a same-instant arrival queues behind it. That is why a Lock is a correct FIFO server.
+
+**Trade-offs.** The same-seed comparison covers the whole trace, not just the statistics. Any nondeterminism anywhere in the stack (names, ordering, RNG) shows up as a diff.
+
+**Review findings.** PASS.
+- Mutations:
+  - an unseeded RNG is caught by 3 tests;
+  - swapped rates are caught by the sanity band (mean 582);
+  - LIFO timer ties are NOT caught here. The model has no equal timestamps (20,001 distinct), and any deterministic mutation passes a same-seed test by construction. `tests/test_ordering.py` catches it (6 tests).
+- SHOULD:
+  - `from models.mm1 import` depends on pytest's default `prepend` import mode (`--import-mode=importlib` fails). Add a note, or load the model by path.
+  - The band's lower bound is 0.64 below the seeded value; a change to RNG derivation might need it widened.
+  - Add a model variant with quantised service times so ties occur.
+  - Use `itertools.pairwise`.
+
+**Gotchas.** A same-seed test can only catch *nondeterminism*, not a deterministic change in semantics.
+
+**Follow-ups.** The SHOULDs above. With this, Module 1 is complete except LOOP-12 (deferred, D018).
