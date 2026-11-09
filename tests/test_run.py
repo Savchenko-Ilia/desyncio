@@ -330,9 +330,8 @@ def test_no_submodule_named_run_shadows_the_function() -> None:
 
 
 def test_overload_types() -> None:
-    # assert_type is a runtime no-op. It is checked only by running
-    # `uv run mypy tests/test_run.py` by hand: the gate runs `mypy src` only
-    # (D042 left adding `mypy tests` to the gate open for the owner).
+    # assert_type is a runtime no-op: this test does nothing at runtime;
+    # it is checked by running mypy on tests/.
     async def main() -> int:
         return 1
 
