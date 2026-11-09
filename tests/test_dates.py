@@ -20,7 +20,18 @@ START = datetime(2026, 1, 1, tzinfo=UTC)
 @given(t=st.floats(-1e6, 1e6), unit_s=st.sampled_from([1, 60, 3600]))
 def test_round_trip_sim_time(t: float, unit_s: int) -> None:
     cal = Calendar(START.astimezone(BERLIN), unit=timedelta(seconds=unit_s))
-    assert cal.to_sim(cal.to_datetime(t)) == pytest.approx(t, abs=1e-6 * unit_s)
+    # The spec's 1 µs, in sim units: 1 µs is 1e-6 / unit_s units (unit_s=3600:
+    # 2.8e-10 units), not 1e-6 * unit_s.
+    one_us = 1e-6 / unit_s
+    # Float slack: to_sim returns the float nearest to the exact quotient, so the
+    # result can be off by up to half of a float's spacing at t on top of the
+    # 0.5 µs rounding of to_datetime. That spacing is math.ulp(t), at most
+    # math.ulp(1e6) = 1.2e-10 for |t| <= 1e6. The worst case (0.5 µs + half a
+    # spacing) fits in 1 µs today; the slack keeps the test about the 1 µs
+    # spec and not about how floats happen to round at the edge.
+    assert cal.to_sim(cal.to_datetime(t)) == pytest.approx(
+        t, rel=0, abs=one_us + math.ulp(t)
+    )
 
 
 @given(
