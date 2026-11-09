@@ -39,7 +39,8 @@ parts, calls). `tally.record(x)` adds an observation. Then:
   versions, dividing by n-1, and need two observations): `numpy.mean`, `numpy.var`, ...
 - `quantile(p)`: `numpy.quantile`. The 0.5 quantile is the median, 0.9 the value that 90% of
   the observations stay below. Pass a list to get several at once.
-- `histogram(bins)`: `numpy.histogram`, as `(counts, edges)` tuples.
+- `histogram(bins)`: `numpy.histogram`, returned as a pair `(counts, edges)`: a tuple of the
+  counts per bin and a tuple of the bin edges (one more edge than counts).
 - `len(tally)` and `tally.samples` give the raw observations.
 
 The model: customers arrive, wait for the single server (a `Resource`), and record how long
@@ -109,10 +110,13 @@ can feed a `TimeSeries` for you, see the [primitives guide](primitives.md#timese
   Also desyncio's own: it adds up the durations per value with `math.fsum`, no numpy.
 - `quantile(p, until=None)`: `numpy.quantile(..., weights=durations, method="inverted_cdf")`.
 - `variance(until=None)`: `numpy.average` of the squared deviations, durations as weights.
+  This is the population (time-weighted) variance, dividing by the total time; `Tally.variance`
+  is the sample variance, dividing by n-1.
 - `min()`, `max()`, `last()`, `samples`.
 
 For M/M/1 the share of time with k customers in the system is (1-0.8) * 0.8**k, which is
-0.200, 0.160, 0.128 for k = 0, 1, 2. The measured shares are near these; a longer run gets closer.
+0.200, 0.160, 0.128 for k = 0, 1, 2. The measured shares below are within about 0.04 of these
+here; a longer run gets closer.
 
 ```python
 import asyncio
@@ -215,8 +219,10 @@ with warm-up=500: 4.6
 
 How long a warm-up should be depends on the model: look at a plot of the series over time, or
 try a few values and see where the mean stops changing. Too short leaves some bias, too long
-throws away data. For a system that starts empty and is not far from typical, a warm-up
-is often unnecessary.
+throws away data. An empty start is a start-up bias too: an empty queue is not typical of a
+busy server, so the first customers wait less than in the long run. That bias is usually
+smaller than a backlog's, but it is there, and the replications example below uses `warmup`
+for that reason.
 
 ## Replications and confidence intervals
 
