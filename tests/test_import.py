@@ -1,5 +1,6 @@
 """Public API: exports, identity with defining modules, no import cycles."""
 
+import ast
 import importlib
 import os
 import subprocess
@@ -75,3 +76,12 @@ def _run_python(code: str) -> subprocess.CompletedProcess[str]:
 def test_submodule_imports_first(module: str) -> None:
     result = _run_python(f"import desyncio.{module}; import desyncio")
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("module", SUBMODULES)
+def test_no_from_desyncio_import_sim(module: str) -> None:
+    """`from desyncio import sim` can yield the submodule; use `desyncio.sim`."""
+    path = Path(desyncio.__file__).parent / f"{module}.py"
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module == "desyncio":
+            assert "sim" not in [a.name for a in node.names], path
