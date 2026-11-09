@@ -786,39 +786,45 @@ def test_abandoned_task_leaves_no_registry_entry_after_gc() -> None:
 # --- gap tests (TST-06) --------------------------------------------------
 
 
-def test_late_interrupt_after_the_last_await_is_not_raised() -> None:
-    # An interrupt that lands after the block's last await, before __aexit__,
-    # has nothing to cancel: the body is already running. To get one there we
-    # need another task to run *inside* the worker's step, and an eagerly
-    # started task does exactly that. task.cancel() then only sets the task's
-    # _must_cancel flag. __aexit__ calls uncancel(), and from 3.13 on, when the
-    # count reaches 0, that clears the flag. So the block exits normally.
-    async def main() -> tuple[bool, int, float]:
-        async def worker() -> tuple[bool, int, float]:
+@pytest.mark.parametrize("eager", [True, False])
+def test_late_interrupt_after_the_last_await_is_not_raised(eager: bool) -> None:
+    # An eager task runs inside the worker's step: its cancel() only sets
+    # _must_cancel, which uncancel() in __aexit__ clears, so no Interrupt. A
+    # normal task runs only after that step, when the block is already closed.
+    async def main() -> tuple[bool, int, float, str]:
+        if eager:
+            asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+
+        async def worker() -> tuple[bool, int, float, str]:
             task = asyncio.current_task()
             assert task is not None
 
-            async def interrupter() -> None:
-                sim.interrupt(task, "late")
+            async def interrupter() -> str:
+                try:
+                    sim.interrupt(task, "late")
+                except RuntimeError as exc:
+                    return str(exc)
+                return "delivered"
 
             async with sim.interruptible() as scope:
                 await sim.timeout(1)
-                # Runs interrupter() now, inside this step, up to its end.
-                asyncio.Task(interrupter(), loop=task.get_loop(), eager_start=True)
-            # No Interrupt, and the stale cancel is gone: this await survives.
-            await sim.timeout(1)
-            return scope.interrupted, task.cancelling(), sim.now
+                job = sim.spawn(interrupter())
+            await sim.timeout(1)  # no stale cancel: this await survives
+            return scope.interrupted, task.cancelling(), sim.now, await job
 
         return await sim.spawn(worker())
 
-    assert desyncio.run(main()) == (True, 0, 2.0)
+    interrupted, cancelling, now, outcome = desyncio.run(main())
+    assert (interrupted, cancelling, now) == (eager, 0, 2.0)
+    if eager:
+        assert outcome == "delivered"
+    else:
+        assert "not inside" in outcome
 
 
 def test_real_taskgroup_failure_while_interrupted_is_not_translated() -> None:
-    # Known limit: if a TaskGroup child fails for real at the same instant the
-    # block is interrupted, the ExceptionGroup is a real error and propagates
-    # as it is. The scope still says it was interrupted, and cancelling() is
-    # back to its entry value.
+    # Known limit: a real TaskGroup failure at the instant of the interrupt
+    # propagates as an untranslated ExceptionGroup; the scope is still interrupted.
     async def main() -> tuple[ExceptionGroup[Exception], bool, int]:
         async def failing_child() -> None:
             await sim.timeout(1)
