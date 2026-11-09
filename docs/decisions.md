@@ -140,3 +140,12 @@ The batch 9 implementers each invented a different monitor signature (`monitor(r
 - Monitors must not block, or acquire the primitive.
 
 The lead promoted RES-01's reviewer SHOULD ("a raising monitor leaks a held unit") to a MUST under this contract. CON-01 and STO-01 are reviewed against it too.
+
+## D023 v2 — Monitor errors go to the loop's exception handler (lead, replaces the error clause of D023)
+In STO-01's review, a monitor that raised during `Store.get` lost the item: it was already off the queue, but the caller never received it. Under "propagate but stay consistent", every primitive needs its own undo logic, and for `get` there is none. asyncio already solves this for callbacks: `Handle._run` catches the exception and calls `loop.call_exception_handler(...)`, which logs by default and leaves the program running. Primitives reuse that (principle 6), and observation never alters the model (principle 4):
+- The monitor is called through one helper: try `monitor(primitive)`; on `Exception`, call `loop.call_exception_handler({"message": ..., "exception": exc, <primitive>: obj})`. `KeyboardInterrupt` and `SystemExit` propagate, as in asyncio.
+- The operation always completes normally for the calling task (grant, put, get, release), and an original `CancelledError` is never masked.
+- `monitor(primitive)` and "called after state is fully settled" from D023 stand.
+- A user who wants monitor errors to be fatal sets `loop.set_exception_handler(...)`.
+- This differs from trace sinks (D016), which abort the run. A sink is the whole trace; a monitor is a per-primitive callback, so it follows asyncio's callback semantics.
+Applied as fix rounds: RES-01 (round 1, redirected), CON-01 (round 1: `monitor(level)` → `monitor(container)` plus this contract) and STO-01 (round 1: no lost item, plus this contract).
