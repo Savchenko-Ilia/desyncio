@@ -967,3 +967,66 @@ Branch: feat/CLN-05 (+ fix/CLN-05-1)  ·  Merged: fb22adf
 
 **Follow-ups (SHOULD).** `_helper_kwargs()` is only used once. The ids of the `_BIG` table rows print the full `10**400` value.
 
+## TST-01 — Trim resource and container tests (2026-11-09, batch 16)
+Branch: feat/TST-01 (+ fix/TST-01-1)  ·  Merged: 116e770
+
+**Approach.** test_resource.py went from 1813 lines to about 1500, and test_container.py from 374 to 292. Together they went from 153 items to 103.
+- The Resource/PriorityResource twins are parametrized by class: release, monitor sequence, cancelled leave, granted-then-cancelled, constructor validation and read-only properties.
+- The 5 raising-monitor tests became `test_raising_monitor_never_changes_model`, which asserts exactly 11 handler errors (7 + 2 + 2, commented per scenario).
+- `test_preemption_stress[0..39]` became one hypothesis test (40 derandomized draws).
+- Never-preempts and victim choice are parametrized, and the validation tables are trimmed.
+- Dropped: Resource FIFO, the docs duplicates (machine shop, fuel tank) and Container's basic blocking.
+- `test_no_barging_same_instant_newcomer` stays (D042).
+
+**Review findings.**
+- FAIL in round 1. MUST: the merged release test used plain `async with` on PriorityResource, which lost the only guard for `PriorityRequest.__aexit__`'s release. A mutation that released only when `exc_type is None` passed the trimmed suite and failed the old one.
+- The fix added explicit `(cls, hold)` pairs. The request case now also covers a holder that is cancelled while holding: a release skipped on CancelledError was never caught before, by the old suite either.
+- PASS on re-review: both mutations fail `[PriorityResource-request]`.
+
+**Follow-ups (SHOULD).** `False` was dropped from the bool rows of the validation tables, and `-1`, `None` and `1j` from `test_bad_amount`. They share branches with the rows kept, so this is low risk.
+
+## TST-02 — Trim store and monitor tests (2026-11-09, batch 16)
+Branch: feat/TST-02  ·  Merged: 8c69f38
+
+**Approach.** test_store.py went from 83 items and 1412 lines to 56 and 631; test_monitor.py from 33 and 333 to 17 and 280.
+- One contract per behaviour, parametrized over `[Store, PriorityStore, FilterStore]` through a 5-line `get(store, match=None)` adapter. FilterStore always gets a filter, so its Condition path is exercised.
+- The tests that re-proved `asyncio.Queue` (FIFO, blocking, shutdown wake-ups) and the docs duplicates were dropped. Those guarantees are now pinned by `<!-- pins -->` comments on the docs examples (TST-04).
+- The 1.8 s M/M/1 same-seed TimeSeries test was dropped.
+- New case: `TimeSeries.record(10**400)` raises ValueError.
+
+**asyncio internals.** None new. The module docstring says why Queue behaviour is deliberately not re-proved (principle 6).
+
+**Review findings.**
+- PASS. The reviewer redid the monitor and mirror mutations for all three kinds.
+- Two gaps went to TST-06, not to a fix round:
+  - the default priority-0 FIFO of `PriorityStore.put(item)` was asserted only by a dropped test;
+  - no test guards a cancelled putter leaking into `items`. The old suite missed that too.
+
+## TST-03 — Trim interrupt and asyncio-compat tests (2026-11-09, batch 16)
+Branch: feat/TST-03  ·  Merged: cb4fa4c
+
+**Approach.**
+- test_interrupt.py went from 1112 lines to 783 (62 → 32 tests).
+  - The `asyncio.timeout` nesting tests became a 2×2 parametrize, asserting `cancelling() == 0` in all four cases. The cancel-wins orders and the delivered-at-await tests were parametrized, and the 20 stress seeds became one loop with the seed in the failure message.
+  - The raw asyncio tests and the docs duplicates were dropped.
+  - The D024 design-2 Lock, Condition and TaskGroup regressions, the weakref GC test and the PSF notice were kept.
+- test_asyncio_compat.py went from 988 lines to 656 (47 → 25 functions, 31 cases). Pure-asyncio tests and duplicates were dropped. The reschedule, TaskGroup failure source, gather and shield tests were parametrized.
+
+**Review findings.**
+- PASS. The merged reschedule-later case still checks both "extends" and "fires". The shield cases still check that the inner task outlives the stop.
+- Not regressions: a LIFO tie-break mutation passes the compat suite before and after the trim; test_resource and test_ordering catch it. "Interrupt a task not yet started" lost its own test, but it shares a branch that is still tested.
+
+## TST-04 — Trim module 1, import and docs tests; pin docs examples (2026-11-09, batch 16)
+Branch: feat/TST-04 (+ fix/TST-04-1)  ·  Merged: ff97718
+
+**Approach.** 11 files went from 437 items and 3342 lines to 306 and 3017.
+- Each docs example is one test, run twice against its expected output.
+- test_import dropped the 15 `submodule_imports_first` subprocesses: Python always runs the package `__init__` first, which `-X importtime` confirmed. The AST guard is now one test.
+- test_guards dropped 8 tests that duplicated the per-method refusal test.
+- Duplicates and redundant validation rows were dropped across loop, ordering, realtime, run, sim, trace, clock and randomness.
+- docs/primitives.md got 14 `<!-- pins: ... (D042) -->` lines above the examples that are now the only guard. No example code or output changed.
+
+**Review findings.**
+- FAIL in round 1. MUST: the PriorityResource pin claimed "default priority 0 in a plain request", but the example never makes a plain request. The fix dropped that claim. The same round reworded the `test_overload_types` comment so it does not depend on the gate (TST-05 changes the gate).
+- The lead reviewed the 2-line comment-only fix diff directly, instead of running another reviewer.
+- The implementer's commits lack the attribution trailers. They are accepted, because history rewrites are blocked.
