@@ -44,7 +44,7 @@ Everything below is importable from the top level: `from desyncio import Resourc
 
 - `run`: run a coroutine on a fresh virtual-time loop (`seed=`, `until=`, `speed=`, `trace=`)
 - `sim`: the facade used inside a run (`sim.now`, `sim.timeout`, `sim.spawn`, `sim.random`,
-  `sim.interruptible`, `sim.interrupt`)
+  `sim.np_random`, `sim.interruptible`, `sim.interrupt`)
 - `Resource`: counted resource, first come first served
 - `PriorityResource`: served by `(priority, request order)`
 - `PreemptiveResource`: a priority resource whose holders can be preempted
@@ -55,6 +55,9 @@ Everything below is importable from the top level: `from desyncio import Resourc
 - `PriorityStore`: store that hands out the lowest priority value first
 - `Interrupt`: raised by `async with sim.interruptible():` when another process interrupts it
 - `TimeSeries`: time-weighted statistics, fed from a primitive's `monitor=` hook
+- `Tally`: statistics of individual observations (mean, quantiles, histogram, `warmup=`)
+- `replicate`: run a model `n` times with consecutive seeds
+- `confidence_interval`: Student t interval for the mean of the replications
 - `RealTimePacer`: pacing for scaled real-time runs
 - `RealIOError`: raised when a simulation tries real I/O
 - `SimulationDeadlock`: raised when nothing can ever run again
@@ -68,6 +71,10 @@ Everything below is importable from the top level: `from desyncio import Resourc
 
 - [How the loop works](docs/how-the-loop-works.md): how asyncio's `_run_once`, timer
   heap and selector are turned into a virtual-time loop, with a traced worked example.
+
+- [Statistics guide](docs/statistics.md): `Tally`, `TimeSeries`, warm-up, replications with
+  confidence intervals, and input distributions with `sim.np_random` (numpy and scipy do the maths).
+  The examples are run by the test suite.
 
 ## License
 
