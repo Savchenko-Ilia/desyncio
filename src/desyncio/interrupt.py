@@ -71,8 +71,10 @@ open blocks. They are kept in a module-level ``WeakKeyDictionary`` mapping
 belongs to the task that set it, is copied into every child task (a child
 spawned inside a block would wrongly see the parent's block as its own), and
 another task cannot reliably read it. A weak mapping drops an entry when the
-task is garbage collected, nothing is added to ``VirtualTimeLoop`` (D017), and
-it is never iterated, so its ordering cannot affect determinism.
+task is garbage collected (each block holds only a ``weakref.ref`` to its
+task, so the stored blocks do not keep the key alive), nothing is added to
+``VirtualTimeLoop`` (D017), and it is never iterated, so its ordering cannot
+affect determinism.
 
 Provenance
 ----------
@@ -139,7 +141,10 @@ class Interruptible:
 
     def __init__(self) -> None:
         self._state = _State.CREATED
-        self._task: asyncio.Task[object] | None = None
+        # A weak reference: the registry below stores this scope as a value
+        # keyed weakly by the task, so a strong reference here would keep the
+        # key alive forever and the entry could never be dropped.
+        self._task: weakref.ref[asyncio.Task[object]] | None = None
         self._cancelling = 0  # task.cancelling() on entry
         self._cause: object = None
         self._interrupted = False
@@ -164,7 +169,7 @@ class Interruptible:
         if task is None:
             raise RuntimeError("Interruptible should be used inside a task")
         self._state = _State.ENTERED
-        self._task = task
+        self._task = weakref.ref(task)
         self._cancelling = task.cancelling()
         _open_blocks.setdefault(task, []).append(self)
         return self
@@ -175,12 +180,19 @@ class Interruptible:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        task = self._task
-        assert task is not None
-        stack = _open_blocks[task]
-        stack.remove(self)
-        if not stack:
-            del _open_blocks[task]
+        assert self._task is not None
+        task = self._task()
+        if task is None:
+            # The task is being garbage collected while suspended in the block
+            # (its coroutine is closed with GeneratorExit). Its registry entry
+            # is already gone with it, and there is nothing to translate.
+            self._state = _State.EXITED
+            return
+        stack = _open_blocks.get(task)
+        if stack is not None and self in stack:
+            stack.remove(self)
+            if not stack:
+                del _open_blocks[task]
         was_interrupting = self._state is _State.INTERRUPTING
         self._state = _State.EXITED
         if not was_interrupting:
@@ -196,10 +208,13 @@ class Interruptible:
         if self._state is not _State.ENTERED:
             return  # already interrupting: later causes are dropped
         assert self._task is not None
+        task = self._task()
+        if task is None:
+            return  # unreachable in practice: the caller holds the task
         self._state = _State.INTERRUPTING
         self._interrupted = True
         self._cause = cause
-        self._task.cancel()
+        task.cancel()
 
 
 # task -> its open interruptible blocks, innermost last. See module docstring.

@@ -1033,3 +1033,40 @@ def test_cpython_adapted_code_carries_psf_notice() -> None:
     assert "src/desyncio/interrupt.py" in header
 
     assert "LICENSES/PSF.txt" in inspect.getsource(interrupt_module)
+
+
+# --- registry lifetime ---------------------------------------------------
+
+
+def test_abandoned_task_leaves_no_registry_entry_after_gc() -> None:
+    """A task dropped mid-block is collectable and its registry entry goes away.
+
+    The registry must not keep the task alive: its values must not hold a
+    strong reference back to the task (the WeakKeyDictionary key).
+    """
+    import gc
+    import weakref
+
+    from desyncio.interrupt import _open_blocks
+
+    async def main() -> tuple[bool, int, int]:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, _ctx: None)  # "destroyed but pending"
+        before = len(_open_blocks)
+        never = loop.create_future()
+
+        async def worker(fut: asyncio.Future[None]) -> None:
+            async with sim.interruptible():
+                await fut  # never resolved: the task is abandoned mid-block
+
+        task = sim.spawn(worker(never))
+        await sim.timeout(1)
+        assert len(_open_blocks) == before + 1
+        ref = weakref.ref(task)
+        del task, never  # nothing outside the registry references the task now
+        gc.collect()
+        return ref() is None, len(_open_blocks), before
+
+    collected, after, before = desyncio.run(main())
+    assert collected, "the registry kept the abandoned task alive"
+    assert after == before
