@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, batch 9: 3 of 4 merged, INT-01 redesigned (D024) and waiting for "go"._
+_Last updated: 2026-11-09, end of batch 9. Next session starts batch 10 after the owner's "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -18,31 +18,37 @@ _Last updated: 2026-11-09, batch 9: 3 of 4 merged, INT-01 redesigned (D024) and 
 17 of 18 features are done. LOOP-12 (benchmark) is deferred by the owner (D018).
 `docs/implementation-log.md` has an entry per feature; `docs/how-the-loop-works.md` is the explainer.
 
-## Module 2: DES primitives — IN PROGRESS
-The backlog is in `docs/features.md`, Module 2 section. The governing decisions:
+## Module 2: DES primitives — IN PROGRESS (batch 9 done)
+The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D019: primitives use `async with`.
-- D020: interrupts are an `Interrupt` exception, not a cancel.
-- D021: Container is strict FIFO; an interrupt to a non-waiting task is delivered at its next await; primitives have a monitor hook.
-- D022 / AGENTS.md principle 6: **reuse asyncio first**.
-- D023 v2: monitor contract (below).
+- D020 (refined) and D024: interrupts are timeout-style `async with sim.interruptible():` scopes.
+- D021: Container is strict FIFO; primitives have a monitor hook.
+- D022 / AGENTS.md principle 6: reuse asyncio first.
+- D023 v2: the monitor contract, below.
 
-### Batch 9 (RES-01, INT-01, CON-01, STO-01)
-| Feature | State |
-|---|---|
-| RES-01 Resource | **merged** f13f3bc (fix round 1) |
-| CON-01 Container | **merged** 4831169 (fix round 1) |
-| STO-01 Store | **merged** a833dd6 (fix round 1) |
-| INT-01 Interrupts | **Redesigned (D024).** The spec is approved; waiting for "go" to re-dispatch a fresh implementer. |
+**Merged in batch 9:**
+- RES-01 `Resource` (wraps `Semaphore`), f13f3bc
+- CON-01 `Container` (on `Condition`), 4831169
+- STO-01 `Store` (wraps `Queue`), a833dd6
+- INT-01 interrupts (`sim.interruptible()` / `sim.interrupt()`), f5d2caa
+Every one needed one fix round. `integration` passes the gate with 467 tests.
+`feat/INT-01` on origin is a discarded design; never merge it.
 
-**INT-01: redesigned (D024), waiting for the owner's "go" to implement.**
-The owner chose the design that is most intuitive for asyncio users: timeout-style scopes. `async with sim.interruptible():` blocks exit with `Interrupt(cause)`, delivered via `task.cancel()` and translated at `__aexit__` with `uncancel()`, exactly like `asyncio.timeout()`. The full spec is the INT-01 row in `docs/features.md`. D024 lists the rejected designs and why.
-- `feat/INT-01` (the earlier future-failing design) is **discarded**. Do not merge it. INT-01 is re-dispatched to a fresh **implementer** from current `integration`. That is a new design, not a fix round, so the round count restarts.
-- On "go": implementer → reviewer (probe Lock, Condition, TaskGroup, nested timeout/interruptible, real cancel, stress against Resource/Container/Store) → gate → merge → mark done → log entry → rewrite this file for batch 10.
+**D023 v2, the monitor contract (every primitive):** `monitor(primitive)` is called synchronously after every state change, once the state has settled. An `Exception` from the monitor goes to `loop.call_exception_handler(...)`; `KeyboardInterrupt`/`SystemExit` propagate. The operation always completes, and a `CancelledError` is never masked.
 
-## Next batches (module 2)
-- **Batch 10:** RES-02 (PriorityResource, `resource.py`), STO-02 (PriorityStore wraps `PriorityQueue` with a sequence number; FilterStore on `Condition`; `store.py`), MON-01 (`TimeSeries`, `monitor.py`, uses the D023 v2 hook).
-- **Batch 11:** RES-03 (PreemptiveResource, via `sim.interrupt`).
-- **Batch 12:** API-01 (top-level exports; the only feature that edits `__init__.py`), then DOC-02 (`docs/primitives.md` with tested examples).
+**Interrupt model (D024):**
+- Code that can be interrupted goes inside `async with sim.interruptible():`. That block exits with `Interrupt(cause)`, just as `asyncio.timeout()` exits with `TimeoutError`.
+- Underneath, it is `task.cancel()` plus `uncancel()` at `__aexit__`.
+- Interrupting a task outside a block raises `RuntimeError`.
+- The code is adapted from `asyncio.Timeout` and PSF-marked.
+
+## Next: batch 10, to be started in a FRESH lead session (D025)
+Specs are in `docs/features.md`. All three own disjoint files:
+- **RES-02 PriorityResource** (`resource.py`, `tests/test_resource.py`): asyncio has no priority semaphore, so build on `asyncio.Condition`, or per-request futures woken in priority order if Condition can't express it (justify the choice). It must keep RES-01's guarantees and use the D023 v2 monitor.
+- **STO-02 PriorityStore + FilterStore** (`store.py`, `tests/test_store.py`): PriorityStore wraps `asyncio.PriorityQueue` with `(key, seq, item)` entries; FilterStore is built on `Condition`. D023 v2 monitor.
+- **MON-01 Monitors** (`monitor.py`, `tests/test_monitor.py`): `TimeSeries` built on the D023 v2 `monitor(primitive)` hook. Check M/M/1 utilisation ≈ ρ and mean queue length ≈ ρ²/(1−ρ).
+
+Tell each implementer about D023 v2 and D024. Then batch 11 is RES-03 (preemption: a preemptible holder's body runs inside `interruptible()`), and batch 12 is API-01, then DOC-02.
 
 ## Open SHOULD backlog (not scheduled; propose to the owner as clean-up features)
 - **Reuse audit of module 1:** no MUSTs. SHOULDs:

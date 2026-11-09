@@ -611,3 +611,40 @@ Branch: feat/STO-01 + fix/STO-01-1  ·  Merged: a833dd6
 **Gotchas.** Capacity `3.0` is rejected; it must be an int.
 
 **Follow-ups.** The SHOULDs above, and the mirror-vs-`_queue` question.
+
+## INT-01 — Interrupts, timeout-style (2026-11-09, batch 9)
+Branch: feat/INT-01-v2 + fix/INT-01-v2-1  ·  Merged: f5d2caa  ·  (discarded: feat/INT-01, design 2 of D024)
+
+**Approach.** In `src/desyncio/interrupt.py`, `Interrupt(Exception)` carries `.cause`, and `Interruptible` is the scope returned by `sim.interruptible()`, with `.interrupted` and `.cause`. `sim.interrupt(task, cause)` is on the `Sim` facade.
+- **Registry:** a module-level `WeakKeyDictionary[Task, list[Interruptible]]` holds each task's open blocks, innermost last. The blocks keep only a `weakref.ref` to their task, so entries really are dropped on GC (unless the cause refers back to the task).
+- **Delivery:** `sim.interrupt` marks the innermost block (first cause wins) and calls `task.cancel()`. The block's `__aexit__` then calls `task.uncancel()` once, and if the result is ≤ the `cancelling()` value recorded on entry, it raises `Interrupt(cause) from CancelledError`. So a real cancel always wins.
+- **RuntimeError** for: a target with no open block, a finished target, or the current task.
+
+**asyncio internals.**
+- An exception raised at the innermost `await` can only be translated by a frame it passes through on the way out. `asyncio.timeout()` works because its `__aexit__` runs in the user's frame, and this design copies exactly that (D024).
+- Delivery is an ordinary cancel, so every primitive cleans up through its standard cancel path: the `Lock` waiter handover, `Condition` re-acquire, `Semaphore`'s grant fix-up, the `Queue` waiter, and a `TaskGroup` cancelling its children.
+- In 3.13, `uncancel()` also clears a pending `_must_cancel` once the count reaches 0. So an interrupt that arrives after the body's last await leaves no stray `CancelledError`: the block exits normally with `interrupted=True`.
+- Nesting with `asyncio.timeout()` firing at the same instant follows asyncio's own double-fire semantics, so the outer scope wins.
+- A ContextVar is the wrong registry: the interrupter runs in another task, and child tasks copy the context.
+
+**Trade-offs.** Interruptible code must be marked explicitly; in exchange, the mental model is the familiar `asyncio.timeout()` one and only public APIs are used. D024 records the two rejected designs:
+- failing the awaited future: three proven bugs (Lock, Condition, TaskGroup exit) and a private `_fut_waiter`;
+- `Interrupt(CancelledError)`: leaked `Semaphore` capacity and ended tasks as cancelled.
+
+**Review findings.**
+- The first design (`feat/INT-01`) FAILED review, with three MUSTs, and the design was replaced.
+- v2, round 0 FAILED on one MUST: the code is adapted from CPython's `asyncio.Timeout` (`_State`, `__aenter__`, `__aexit__`, `_on_timeout`: same states, error strings and `uncancel()` condition), so it needs the PSF marking (AGENTS §3, as D009). The lead also promoted, under D011, a false docstring claim that registry entries are dropped on GC (the blocks held a strong reference to the task).
+- Fix round 1: a marking block plus a list of changes, `interrupt.py` added to the `LICENSES/PSF.txt` header, a notice test, a `weakref.ref` to the task, a dead-task-safe `__aexit__`, and a GC test.
+- Re-review PASSED: the adversarial probes all held (Lock handover, Condition re-acquire under contention, TaskGroup, nesting, real cancel in both orders, late interrupt), plus 300 stress seeds against Resource, Container and Store with zero failures and determinism checked.
+- SHOULD:
+  - Add a test and a docstring line for a late interrupt (`interrupted` can be True with no `Interrupt` raised).
+  - Add a test pinning the ExceptionGroup limit: a real child failure while interrupting propagates untranslated, with `interrupted` True and `cancelling()` restored. `asyncio.timeout()` splices its error into the group; we don't.
+  - Document that an interrupt aimed at an already-unwinding inner block is dropped, not passed to the outer block.
+  - The shipped stress test has only 20 seeds; add the same-instant interrupt+cancel mix.
+  - The "changes from the original" list misses the state rename (`EXPIRING`→`INTERRUPTING`), `expired()`→`interrupted`, the dropped assert, and `__repr__`.
+
+**Gotchas.**
+- `except Interrupt` *inside* a block never catches that block's own interrupt: translation happens at that block's exit, as with `TimeoutError`.
+- The PR to `main` must flag the PSF-adapted code in `interrupt.py`.
+
+**Follow-ups.** The SHOULDs above. RES-03 (preemption) builds on `interruptible()`.

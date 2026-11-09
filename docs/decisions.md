@@ -175,3 +175,6 @@ Chosen: copy `asyncio.timeout()`. `async with sim.interruptible():` marks the co
 Cost: interruptible code must be marked explicitly. Interrupting a task outside a block raises `RuntimeError` in the caller.
 
 `feat/INT-01` (design 2) is discarded, and INT-01 is re-dispatched to a fresh implementer from current `integration` (a new design, not a fix round). RES-03 (preemption) opens an `interruptible()` block around a preemptible holder's body.
+
+## D024 — outcome
+Implemented as specified, in `feat/INT-01-v2`. The scope code is adapted from CPython `asyncio.Timeout`, so it carries the PSF marking, and `interrupt.py` is listed in `LICENSES/PSF.txt`, as D009 required for LOOP-03. The PR to `main` must flag it. `feat/INT-01` (design 2) stays on origin, unmerged, for reference only.
