@@ -11,16 +11,19 @@ as your CPU allows, or scaled to real time. The same seed always gives the same 
 import asyncio
 import desyncio
 
+
 async def ship(berth: asyncio.Semaphore, name: str) -> None:
     async with berth:
         await asyncio.sleep(12)  # 12 virtual hours, returns instantly
         print(f"{name} leaves at t={asyncio.get_running_loop().time()}")
+
 
 async def main() -> None:
     berth = asyncio.Semaphore(1)
     async with asyncio.TaskGroup() as tg:
         for i in range(3):
             tg.create_task(ship(berth, f"ship-{i}"))
+
 
 desyncio.run(main())  # ship-0 at 12, ship-1 at 24, ship-2 at 36
 ```

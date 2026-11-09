@@ -35,6 +35,7 @@ _NOT_RUNNING = (
     "VirtualTimeLoop; there is no such loop running here"
 )
 
+
 def _loop() -> VirtualTimeLoop:
     """Return the running VirtualTimeLoop or raise RuntimeError."""
     try:
