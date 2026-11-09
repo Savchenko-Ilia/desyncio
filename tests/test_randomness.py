@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+import os
 import random
 import subprocess
 import sys
@@ -95,6 +96,19 @@ def test_np_stream_cached_independent_and_seeded() -> None:
     assert _np_draw(RandomStreams(3), "x") != _draw(RandomStreams(3), "x", 3)
 
 
+def test_np_golden_values() -> None:
+    assert _np_draw(RandomStreams(0), "x") == [
+        0.22945626321290657,
+        0.6944187036983647,
+        0.6299077727128548,
+    ]
+    assert _np_draw(RandomStreams(42), "service") == [
+        0.40560497668946327,
+        0.09795317063024866,
+        0.8123967060912538,
+    ]
+
+
 @pytest.mark.parametrize("name", ["", 1, None, b"a"])
 def test_np_bad_name_rejected(name: object) -> None:
     with pytest.raises((TypeError, ValueError)):
@@ -129,7 +143,7 @@ def test_np_stream_same_draws_in_another_process() -> None:
     outs = [
         subprocess.run(
             [sys.executable, "-c", code],
-            env={"PYTHONHASHSEED": h, "PATH": ""},
+            env={**os.environ, "PYTHONHASHSEED": h},
             capture_output=True,
             text=True,
             check=True,
