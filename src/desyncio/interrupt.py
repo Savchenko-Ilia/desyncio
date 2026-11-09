@@ -101,7 +101,9 @@ Known limits
   sets ``_must_cancel``, and ``uncancel()`` in ``__aexit__`` clears it again
   (3.13+). Timers, ``call_later``, callbacks and ordinary tasks run only
   between steps, while the block waits at an await, so they raise a normal
-  ``Interrupt``; a task interrupting itself gets ``RuntimeError``.
+  ``Interrupt``; a task interrupting itself gets ``RuntimeError``. With a
+  non-eager task the late ``interrupt()`` raises ``RuntimeError`` ("not
+  inside ..."), because the block has already closed.
 * Code that catches ``CancelledError`` inside the block and swallows it also
   swallows the interrupt, exactly as it would swallow a timeout.
 """
