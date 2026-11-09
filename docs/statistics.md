@@ -234,8 +234,14 @@ look at the spread of the results.
   when the number of replications is small. It needs at least 2 values.
 
 Reading the result: "a 95% confidence interval" means that if you repeated the whole
-experiment many times, about 95% of the intervals built this way would contain the true mean.
-More replications, or longer runs, make the interval narrower.
+experiment many times, about 95% of the intervals built this way would contain the true mean
+of the quantity each replication returns. Be careful what that quantity is. Here it is the mean
+wait of the customers who reach the server after time 50 (`warmup=50` is a time: about the
+first 40 customers are dropped) in a run of 500 customers that starts empty. The long-run
+value is 4, but this short run is slightly biased low (the warm-up removes most of the
+empty-start bias, not all of it), so the interval estimates the short-run mean, a little
+under 4. More replications make the interval narrower around that short-run mean; longer runs
+and a longer warm-up move the short-run mean itself closer to 4.
 
 ```python
 import asyncio
@@ -265,15 +271,13 @@ means = replicate(model, 20, seed=100)
 mean, half_width = confidence_interval(means, level=0.95)
 print("replications:", len(means))
 print(f"mean wait: {mean:.1f} +- {half_width:.1f} (95%)")
-print(
-    "interval contains the true value 4:", mean - half_width <= 4 <= mean + half_width
-)
+print(f"interval: [{mean - half_width:.1f}, {mean + half_width:.1f}]")
 ```
 
 ```text
 replications: 20
 mean wait: 3.6 +- 0.7 (95%)
-interval contains the true value 4: True
+interval: [2.9, 4.2]
 ```
 
 Note `model` is passed without parentheses: `replicate` calls it once per run. Use the
