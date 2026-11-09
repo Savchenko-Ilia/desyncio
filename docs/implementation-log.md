@@ -731,3 +731,37 @@ Branch: feat/STO-02  ·  Merged: 11f488a
 
 **Follow-ups.** The SHOULDs above. A possible async `FilterStore.shutdown()`.
 
+## RES-02 — PriorityResource (2026-11-09, batch 10b)
+Branch: feat/RES-02 + fix/RES-02-1  ·  Merged: 40e9dca
+
+**Approach.** `PriorityResource(capacity=1, *, monitor=None)` lives in `src/desyncio/resource.py`, beside `Resource`. `request(priority=0)` returns a single-use `PriorityRequest`, a class so that RES-03 can add `preempt=`. Plain `async with res:` uses priority 0. Priorities must be int or float; `bool` and NaN are rejected, and negative and infinite values are allowed. Request order is fixed when the `async with` is entered.
+- **Final design (D030), modelled on `asyncio.Semaphore`:** each waiter awaits its own `loop.create_future()`. Waiters sit in a sorted list of `(priority, seq, fut)`, kept with `insort`. `seq` comes from `itertools.count()`, so a future is never compared.
+- **Release** is synchronous: decrement, then `_grant_free_units()`, which pops the best live waiters and calls `set_result`. A `_granted` counter covers units handed to waiters that have not resumed yet, so a same-instant newcomer finds no free unit and can't barge.
+- **Fast path:** take a unit without suspending only if one is free and no live waiter has priority <= ours.
+- **Cancellation:** a waiter that was already granted does `_granted -= 1` and passes the unit on; a pending waiter removes its own entry. Either way it then calls `_grant_free_units()`.
+- **Counts:** `queue_length = len(_waiters) + _granted`, the same semantics as RES-01.
+
+**asyncio internals.**
+- `Condition.notify_all()` must hold the lock. After a notify, the woken waiters queue on `Lock._waiters` to re-acquire it, and `Lock.acquire()` skips its fast path whenever others are queued. So under round 0's Condition design, a holder's `__aexit__` could really suspend. A cancel at that point skipped the decrement for good (D030).
+- `Semaphore` avoids this by releasing synchronously and fixing up on `CancelledError` in `_acquire`. RES-02 now copies that pattern; no code is copied.
+
+**Trade-offs.**
+- A sorted list, not a heap: a cancelled pending waiter must leave the order at once so that `queue_length` is right, and a list does that with `bisect_left` plus `del`. Insertion is O(n), which is fine at simulation queue sizes.
+- The futures design also removes round 0's O(waiters) thundering herd.
+
+**Review findings.**
+- Round 0 FAILED: the Condition design leaked a unit when the holder was cancelled while `__aexit__` waited for the lock. The probe ended with `count 1 queue 1` and no grant.
+- Fix round 1 moved to per-request futures (D030). It added tests for cancel at exit, body exception plus cancel (the body error is kept), interrupt at exit, and a waiter cancelled in the step it was granted.
+- Re-review PASSED. A seeded stress test over 3000 seeds (capacity 1-3, random priorities, cancels and interrupts) found no leak, the invariants held at every monitor call, and service order was consistent. 573 tests pass.
+- SHOULD:
+  - Delete the dead `_hold_round0_lock` test helper, which reads the removed `_cond`, along with its spawns.
+  - Fix the stale "Condition FIFO" comment in `test_two_units_freed_at_same_instant_go_to_two_best`.
+  - Document in `queue_length` that a waiter cancelled while pending is counted until its task runs (the same lag as `Semaphore`).
+  - `_changed` is duplicated between `Resource` and `PriorityResource`.
+
+**Gotchas.**
+- Any `await` in a context manager's `__aexit__` is a cancellation point. A release that must not be skipped has to be synchronous.
+- A public-API test could not make round 0 fail, because the lock was contended only in a particular window. The fixer reproduced it by holding the private lock (see the SHOULD above).
+
+**Follow-ups.** The SHOULDs above. RES-03 extends `PriorityRequest` with `preempt=True`.
+
