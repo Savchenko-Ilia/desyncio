@@ -1,6 +1,8 @@
 """Tests for ``desyncio.scheduled`` (CAL-03). Times: hours * 3600, UTC calendar."""
 
 import asyncio
+import itertools
+from collections.abc import Iterator
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -382,3 +384,56 @@ def test_arrival_at_a_capacity_rise_queues_then_is_granted() -> None:
     desyncio.run(main(), until=10 * H)
     # queued at 09:00 before the rise, then granted by it
     assert seen[:3] == [(9 * H, 0, 0, 1), (9 * H, 1, 0, 1), (9 * H, 1, 1, 0)]
+
+
+class _Broken(Schedule):
+    def changes(self, after: float) -> Iterator[tuple[float, int]]:
+        yield from itertools.islice(super().changes(after), 1)
+        raise ValueError("bad schedule")
+
+
+def test_driver_failure_is_reported_at_once() -> None:
+    errors: list[tuple[float, str, object]] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda _l, ctx: errors.append((sim.now, ctx["message"], ctx["exception"]))
+        )
+        res = ScheduledResource(
+            _Broken(Calendar(MONDAY), [Shift(ALL_DAYS, time(9), time(17), 1)])
+        )
+        await sim.timeout(10 * H)
+        assert res.capacity == 1
+
+    desyncio.run(main())
+    assert [(t, m) for t, m, _ in errors] == [
+        (9 * H, "ScheduledResource driver failed")
+    ]
+    assert isinstance(errors[0][2], ValueError)
+
+
+def test_failed_interrupt_leaves_state_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(task: object, cause: object) -> None:
+        raise RuntimeError("cannot interrupt")
+
+    monkeypatch.setattr("desyncio.scheduled.interrupt_task", boom)
+    errors: list[str] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _l, ctx: errors.append(ctx["message"]))
+        res = ScheduledResource(clinic(Shift(ALL_DAYS, time(0), time(1), 2)))
+
+        async def hold() -> None:
+            async with res:
+                await sim.timeout(H + 1)
+
+        tasks = [sim.spawn(hold()), sim.spawn(hold())]
+        await sim.timeout(H + 0.5)
+        assert res.capacity == 0 and res.count == 0  # both units taken at 01:00
+        await asyncio.gather(*tasks)  # not interrupted: they end, no 2nd release
+        assert res.count == 0 and res.queue_length == 0
+
+    desyncio.run(main())
+    assert errors == ["ScheduledResource driver failed"]

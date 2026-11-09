@@ -77,6 +77,23 @@ really cancelled in the same instant its shift ends ends with
 ``CancelledError`` (a real cancel wins over an interrupt, INT-01); its unit is
 released once.
 
+Limits
+------
+* **Nested ``sim.interruptible()`` in the body.** ``interrupt_task`` delivers
+  to the innermost block, so ``Interrupt(ShiftEnded)`` lands inside the
+  user's own block, and *the unit is already gone*. If the body swallows that
+  ``Interrupt`` and carries on, it runs without the unit (the exit does not
+  release; nothing is double-released, but capacity is no longer respected).
+  Recommended: re-raise an ``Interrupt`` whose ``cause`` is ``ShiftEnded`` and
+  catch it outside the ``async with`` (as RES-03 does for ``Preempted``).
+* **A failing driver.** If ``schedule.changes`` raises (a ``Schedule``
+  subclass, say) or applying a change raises, the driver task ends and the
+  capacity stays where it is. This is reported at once to the loop's
+  exception handler with ``{"message": "ScheduledResource driver failed",
+  "exception": exc, "resource": self}`` (a done-callback on the driver task),
+  not left for "Task exception was never retrieved" at garbage collection.
+  Make it fatal with ``loop.set_exception_handler(...)``.
+
 What is delegated to asyncio, and what is ours (principle 6)
 ------------------------------------------------------------
 asyncio has no semaphore whose size changes over time, so the queue is ours,
@@ -86,8 +103,9 @@ built on asyncio's building blocks like ``PriorityResource`` (D030):
   ``loop.create_future()``, and a cancel, timeout or ``TaskGroup`` arrives as
   the ``CancelledError`` raised at ``await fut``); the driver is an ordinary
   task on the loop with a loop timer (``loop.call_at_priority``, the
-  ``call_at`` of ``VirtualTimeLoop`` with a tie-break priority); interrupts
-  reuse
+  ``call_at`` of ``VirtualTimeLoop`` with a tie-break priority); its failure
+  is reported through a task done-callback and the loop's exception handler,
+  as asyncio reports a failed callback; interrupts reuse
   ``interrupt_task`` (cancel plus translation in ``__aexit__``, INT-01);
 * ours: the FIFO deque of waiters, the grant rule, the grant-order list used
   to pick victims, the counters, and the monitor hook.
@@ -176,6 +194,7 @@ class ScheduledResource:
         self._driver = loop.create_task(
             self._drive(loop, now), name="ScheduledResource driver"
         )
+        self._driver.add_done_callback(self._driver_done)
 
     @property
     def capacity(self) -> int:
@@ -218,26 +237,51 @@ class ScheduledResource:
                 handle.cancel()  # no-op once fired; frees the timer if cancelled
             self._set_capacity(capacity)
 
+    def _driver_done(self, task: "asyncio.Task[None]") -> None:
+        # Report a failed driver at once, not as "Task exception was never
+        # retrieved" when the task is garbage collected. Cancellation (the end
+        # of the run, LOOP-04b) is not a failure. Calling ``exception()`` marks
+        # the exception retrieved, so asyncio does not log it a second time.
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            task.get_loop().call_exception_handler(
+                {
+                    "message": "ScheduledResource driver failed",
+                    "exception": exc,
+                    "resource": self,
+                }
+            )
+
     def _set_capacity(self, capacity: int) -> None:
-        """Apply a new capacity in one synchronous step (no await)."""
+        """Apply a new capacity in one synchronous step (no await).
+
+        All state (capacity, units, counters, grants, monitor) is settled
+        before any interrupt is delivered, so nothing is left half-applied
+        even if ``interrupt_task`` raised. It cannot raise here in practice: a
+        held hold's task is still inside its ``async with`` (release happens in
+        ``__aexit__``), so it is not done, it has the interruptible scope that
+        ``__aenter__`` opened without suspending, and it is not the driver.
+        """
         self._capacity = capacity
+        victims: list[tuple[_Hold, ShiftEnded]] = []
         # Drop: take units from the most recently granted holds first.
         while len(self._units) > capacity:
-            self._take_away(self._units[-1])
+            hold = self._units.pop()
+            hold.lost = ShiftEnded(at=sim.now, resource=self)
+            if hold.held:
+                self._count -= 1
+                victims.append((hold, hold.lost))
+            # else: a reservation. The task is waking up from its future and
+            # raises the Interrupt itself in _acquire; nothing is cancelled.
         # Rise: hand units to waiters.
         self._grant_free_units()
         self._changed()
-
-    def _take_away(self, hold: _Hold) -> None:
-        self._units.remove(hold)
-        hold.lost = ShiftEnded(at=sim.now, resource=self)
-        if hold.held:
-            self._count -= 1
+        for hold, cause in victims:
             # cancel() underneath: the task raises at its next turn, at this
             # same virtual time, and its ``async with`` translates it.
-            interrupt_task(hold.task, hold.lost)
-        # else: a reservation. The task is waking up from its future and raises
-        # the Interrupt itself in _acquire; nothing is cancelled underneath.
+            interrupt_task(hold.task, cause)
 
     # --- granting and releasing ---------------------------------------------
 
