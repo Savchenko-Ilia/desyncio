@@ -828,3 +828,32 @@ Branch: feat/RES-03 + fix/RES-03-1  ·  Merged: 525deb1
 
 **Follow-ups.** API-01 exports `PreemptiveResource` and `Preempted`. DOC-02 adds the machine-shop example.
 
+## API-01 — Public exports (2026-11-09, batch 12)
+Branch: feat/API-01  ·  Merged: aaa8bba
+
+**Approach.**
+- `src/desyncio/__init__.py` re-exports the D036 list: `Resource`, `PriorityResource`, `PreemptiveResource`, `Preempted`, `Container`, `Store`, `PriorityStore`, `FilterStore`, `Interrupt`, `TimeSeries`, `RealIOError`, `SimulationDeadlock` and `RealTimePacer`, plus `run`, `sim` and `__version__`. It has one import line per module, sorted, and a docstring listing the public API.
+- `tests/test_import.py` checks:
+  - the exact `__all__` set;
+  - that each name is the same object as in its defining module;
+  - that a star-import gives exactly `__all__`;
+  - that each submodule imports first, then `desyncio`, in a fresh subprocess;
+  - an AST guard against `from desyncio import sim` inside the package.
+
+**asyncio internals.** None. The trap is Python's import system. `desyncio.sim` is both a submodule and, once `__init__` runs, the `sim` facade object bound over it. `monitor.py`'s `from desyncio import sim` could therefore get the *module*, depending on import order. That broke 16 monitor tests and failed mypy once `__init__` imported monitor. The fix is `from desyncio.sim import sim` (D037).
+
+**Trade-offs.** The implementer's first fix was an import-order workaround in `__init__` (`# isort: skip`). It was replaced by fixing the import at its source.
+
+**Review findings.**
+- The implementer stopped on two blockers outside its files. The lead extended ownership under D037: the INT-01 test `test_not_exported_at_top_level` was inverted (a permitted spec change), and the monitor.py import was fixed.
+- PASS on the first review. 688 tests pass on 3.13 and on 3.14.
+- The mutations were caught: reverting the `sim` import fails the AST guard, and an import cycle in resource.py fails the suite.
+- SHOULD:
+  - add a named subprocess test that `import desyncio` succeeds, so a cycle fails by name and not as a collection error;
+  - generalise the AST guard to any `from desyncio import X` inside the package.
+- Process note: the lead asked the implementer to squash its WIP commit and force-push, but the environment blocked that as a destructive git action, so the WIP commit `843549e` stays in history.
+
+**Gotchas.** Inside the package, never write `from desyncio import <name>`, because a package attribute can shadow a submodule of the same name. Import from the defining module.
+
+**Follow-ups.** The SHOULDs above. DOC-02 uses top-level imports, and the README lists the exports.
+
