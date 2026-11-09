@@ -141,7 +141,7 @@ Two caveats:
 - Priority and sequence only order **timers**. A `call_soon` made from a timer callback
   still runs after the other timers that were due at that instant (they are already in
   `_ready`). That is stock behaviour.
-- The sequence counter is per loop (`SequenceCounter`), so two runs of the same model
+- The sequence counter is per loop (an `itertools.count()` on the loop state), so two runs of the same model
   stamp the same numbers.
 
 ### The `_clock_resolution` window
