@@ -314,3 +314,10 @@ The owner chose statistics as module 3 ("B, after that C"), with:
 - **Standard library only:** no numpy or scipy. The Student t quantile is computed in pure Python.
 - **In scope:** Tally (plain statistics of observations), replications across seeds, confidence intervals, warm-up removal.
 The feature rows (STA-01..06) were drafted by the lead and shown to the owner before the first batch. Module 4 (calendar/shifts) is defined after module 3.
+
+## D048 — numpy and scipy are required runtime dependencies (owner)
+The owner: "use numpy if it's already written there", then chose:
+- **numpy is required**, not an optional extra.
+- **scipy is added too**, for the Student t quantile (`scipy.stats.t`) and its other distributions.
+- **Input randomness:** a new `sim.np_random(name)` returns a numpy `Generator` per named stream, seeded deterministically from the run seed and the name, like `sim.random` (D026). Models use numpy's and scipy's own distributions, so STA-05 (hand-written distributions) is dropped.
+Principle 6 is extended: if numpy or scipy already implements something, call it and never re-implement it. This supersedes D047's "standard library only". The core loop and primitives still import neither: `import desyncio` stays numpy-free, so a simulation that uses no statistics pays no import cost.

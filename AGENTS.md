@@ -43,7 +43,8 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
    a condition, cancellation, task groups, timeouts), use it: delegate to it or wrap it thinly, and
    never re-implement it. Write our own waiting/queueing logic only where asyncio has no equivalent,
    and then build it on asyncio's building blocks (`Condition`, futures). Say in the docstring what is
-   delegated. A hand-written replacement for existing asyncio functionality is a MUST review finding (D022).
+   delegated. The same holds for numpy and scipy in the statistics modules (D048): call what they already
+   implement. A hand-written replacement for existing asyncio functionality is a MUST review finding (D022).
 
 ---
 
@@ -68,7 +69,7 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
   Never use pip directly. `uv.lock` is committed; dev tools live in `[dependency-groups] dev`.
 - `src/` layout, `pyproject.toml`.
 - pytest, pytest-asyncio, hypothesis for property tests; ruff; mypy.
-- Runtime dependencies: none, unless agreed with the owner.
+- Runtime dependencies: **numpy and scipy** (D048), used by the statistics modules only. The core loop and primitives import neither. Nothing else unless agreed with the owner.
 
 ---
 
