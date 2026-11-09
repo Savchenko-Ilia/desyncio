@@ -91,7 +91,8 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
 - Python 3.13+.
 - Time is a unitless float, "seconds by convention" (D004).
 - Primitives use asyncio-style context managers: `async with resource:` (D019).
-- Interrupts are a dedicated `Interrupt` exception, not asyncio cancellation (D020).
+- Interrupts work like `asyncio.timeout()`: `async with sim.interruptible():` blocks exit with a dedicated
+  `Interrupt` exception, delivered through cancellation underneath and translated at `__aexit__` (D020, D024).
 
 ## 7. Open questions
 

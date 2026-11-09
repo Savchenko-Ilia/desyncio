@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, batch 9: 3 of 4 merged, INT-01 waiting for the owner's decision._
+_Last updated: 2026-11-09, batch 9: 3 of 4 merged, INT-01 redesigned (D024) and waiting for "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -32,23 +32,12 @@ The backlog is in `docs/features.md`, Module 2 section. The governing decisions:
 | RES-01 Resource | **merged** f13f3bc (fix round 1) |
 | CON-01 Container | **merged** 4831169 (fix round 1) |
 | STO-01 Store | **merged** a833dd6 (fix round 1) |
-| INT-01 Interrupts (`feat/INT-01`, review round 0 FAILED) | **Waiting for the owner's decision**, then fix round 1 (one round left after it). |
+| INT-01 Interrupts | **Redesigned (D024).** The spec is approved; waiting for "go" to re-dispatch a fresh implementer. |
 
-**INT-01: mechanism and review.**
-- The spec said "cancel → translate → `uncancel()`". The implementer showed this can't work: the `CancelledError` passes through the user's `except Interrupt:` before anything can translate it. The reviewer confirmed this.
-- The implemented mechanism: fail `task._fut_waiter` with `Interrupt(Exception)`. If that future is already done, the interrupt is queued per task and retried with `call_soon`.
-- The review FAILED it with three MUSTs. All three are asyncio cleanup paths that only run for `CancelledError`:
-  1. **Plain `asyncio.Lock`:** interrupting a waiter strands the next waiter forever, with the lock free.
-  2. **`Condition.wait`'s internal lock re-acquire:** an interrupt escapes without the lock, and the user then releases another task's lock.
-  3. **`TaskGroup.__aexit__`:** after the exit, the child keeps running.
-- Our own Resource, Container and Store passed a 300-seed interrupt+cancel stress test.
-- The owner suggested a `CancelledError` subclass. The reviewer tested it and rejects it: `Semaphore`'s cancel fix-up leaks capacity (300/300 seeds), an uncaught interrupt ends the task as cancelled, and library code treats it as a shutdown. It also contradicts D020.
-- **Lead's proposal, put to the owner:** keep D024 (`Interrupt(Exception)`).
-  - Raise a clear `RuntimeError` ("not interruptible here; use desyncio.Resource") when the target is blocked on a plain `Lock.acquire` or inside `TaskGroup` exit, as is already done for awaiting a Task.
-  - Defer the interrupt to the next await when the target is in `Condition.wait`'s re-acquire, so Container works.
-  - Add tests for all three, and docs notes on gather/shield and the `sleep(0)` spin.
-  - The alternative put to the owner: defer for plain Lock too (the interrupt then arrives later in virtual time).
-- **Next:** on the owner's answer, dispatch the INT-01 fixer, then re-review → gate → merge. Write D024 with the final design, mark INT-01 done, and add the log entry (mechanism, per-primitive cleanup, the rejected variant). Probes are in the old session's scratchpad `probes/`; recreate them as needed.
+**INT-01: redesigned (D024), waiting for the owner's "go" to implement.**
+The owner chose the design that is most intuitive for asyncio users: timeout-style scopes. `async with sim.interruptible():` blocks exit with `Interrupt(cause)`, delivered via `task.cancel()` and translated at `__aexit__` with `uncancel()`, exactly like `asyncio.timeout()`. The full spec is the INT-01 row in `docs/features.md`. D024 lists the rejected designs and why.
+- `feat/INT-01` (the earlier future-failing design) is **discarded**. Do not merge it. INT-01 is re-dispatched to a fresh **implementer** from current `integration`. That is a new design, not a fix round, so the round count restarts.
+- On "go": implementer → reviewer (probe Lock, Condition, TaskGroup, nested timeout/interruptible, real cancel, stress against Resource/Container/Store) → gate → merge → mark done → log entry → rewrite this file for batch 10.
 
 ## Next batches (module 2)
 - **Batch 10:** RES-02 (PriorityResource, `resource.py`), STO-02 (PriorityStore wraps `PriorityQueue` with a sequence number; FilterStore on `Condition`; `store.py`), MON-01 (`TimeSeries`, `monitor.py`, uses the D023 v2 hook).

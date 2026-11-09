@@ -156,3 +156,22 @@ The owner asked for new modules to start in new context windows. The repo now ca
 - unmerged `feat/*` and `fix/*` branches are pushed;
 - CLAUDE.md has a "Sessions and handoff" section;
 - the start prompt in `docs/agent-workflow.md` points at the handoff.
+
+## D020 — refined (owner, batch 9)
+The user still always sees a dedicated `Interrupt` and never a `CancelledError`. Underneath, though, interrupts are delivered through asyncio cancellation *inside an explicit `async with sim.interruptible():` block*, the same contract as `asyncio.timeout()`. The original concern (TaskGroup/timeout reading an interrupt as "shut down") is handled the way `asyncio.timeout()` handles it: a TaskGroup *inside* the block cancels its children, which is documented asyncio behaviour, and `task.cancelling()` is restored on exit.
+
+## D024 — Interrupts are timeout-style scopes (owner chose "intuitive for asyncio users"; see INT-01)
+Three designs were evaluated in batch 9:
+1. **Cancel and translate anywhere** (the original INT-01 spec): impossible. The `CancelledError` passes through the user's `except Interrupt:` before any translation can happen.
+2. **Fail the awaited future with `Interrupt(Exception)`** (branch `feat/INT-01`): works for Semaphore, Queue, Event and sleep, but the reviewer proved three bugs, because some asyncio cleanup paths run only for `CancelledError`:
+   - plain `Lock`: the next waiter is stranded;
+   - `Condition.wait` re-acquire: another task's lock gets released;
+   - `TaskGroup` exit: the child keeps running.
+   It also needed a private attribute (`_fut_waiter`) and a retry queue.
+3. **`class Interrupt(CancelledError)`** (the owner's idea): rejected by the reviewer. `Semaphore`'s cancel fix-up leaks capacity (300 of 300 seeds), an uncaught interrupt ends the task as cancelled, and library `except CancelledError` code treats it as a shutdown.
+
+Chosen: copy `asyncio.timeout()`. `async with sim.interruptible():` marks the code; `sim.interrupt(task, cause)` marks the innermost block and calls `task.cancel()`; the block's `__aexit__` (the user's frame) calls `uncancel()` and raises `Interrupt(cause)`. Every primitive cleans up through its standard cancel path, only public APIs are used, and the mental model is the one every asyncio user already has.
+
+Cost: interruptible code must be marked explicitly. Interrupting a task outside a block raises `RuntimeError` in the caller.
+
+`feat/INT-01` (design 2) is discarded, and INT-01 is re-dispatched to a fresh implementer from current `integration` (a new design, not a fix round). RES-03 (preemption) opens an `interruptible()` block around a preemptible holder's body.
