@@ -97,4 +97,4 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
 
 ## 7. Open questions
 
-- Calendar/shift handling (time unit itself is settled by D004).
+- None open. Calendar/shift handling was settled by module 4 (D051, D053, D054).

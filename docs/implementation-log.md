@@ -1264,3 +1264,18 @@ Branch: feat/CAL-03 (+ fix/CAL-03-1)  ·  Merged: 251002b
 **Gotchas.** A body with its own `sim.interruptible()` catches `Interrupt(ShiftEnded)` there and continues after its unit is gone (as RES-03; documented). While the schedule still has changes ahead, a `main` waiting forever is not reported as `SimulationDeadlock`, because the driver has a timer.
 
 **Follow-ups.** None required.
+
+## CAL-04 — Exports and calendar guide (2026-11-09, batch 27)
+Branch: feat/CAL-04 (+ fix/CAL-04-1)  ·  Merged: 60da3ad
+
+**Approach.** `Calendar`, `Shift`, `Schedule`, `ScheduledResource` and `ShiftEnded` are exported at the top level, and listed in `__all__`, the `__init__` docstring and the README, which links the new guide. `docs/calendar.md` has six executed examples: conversions (default unit and minutes), the Berlin DST days, a weekly schedule with weekday/weekend/overnight shifts and a closed date, overlapping shifts, shifts across both DST days, and a clinic (`ScheduledResource`, `Tally` of waits, interrupts caught outside the `async with`). `GUIDES` gets the calendar guide with a minimum of 6 examples. 668 → 683 tests.
+
+**asyncio internals.** None new; the guide explains D054's same-instant order for learners.
+
+**Trade-offs.** The clinic is short (one day), so many patients are still queued at the end; the prose says so and why the printed mean wait is a lower bound.
+
+**Review findings.** Round 1, two MUSTs in the prose: (1) "a visit ending at a shift end finishes" omitted D054's limit (an Event-driven visit can still be interrupted; shown by a scratch run); (2) the "keeps the clock moving" limit hid that a stuck run then never ends. Also: the clinic output now shows the most-recently-granted rule (computed, not hard-coded).
+
+**Gotchas.** `%a`/`%b` in the examples print C-locale names; Python does not call `setlocale` at startup.
+
+**Follow-ups (SHOULD).** Wrap one long line in the clinic intro.

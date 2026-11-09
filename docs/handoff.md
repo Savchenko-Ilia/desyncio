@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 23. **Module 3 (statistics) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`, batches 19–23) is open. Module 4 (calendar/shifts, D051 confirmed) is in progress: CAL-01 (1 fix round), CAL-02, CAL-03 (1 fix round) merged; batch 27 (CAL-04). Per D049, batches run back to back until the module ends._
+_Last updated: 2026-11-09, end of batch 27. **Module 4 (calendar and shifts) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`) is open and now covers batches 19–27. Next: the owner reviews module 4 and decides what comes next._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -83,8 +83,13 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - `integration` passes the gate: 627 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. PR #5 covers batches 19–23.
 - Guide for users: `docs/statistics.md`. Per-feature details and SHOULDs: `docs/implementation-log.md`.
 
+## Module 4: calendar and shifts — DONE (batches 24–27)
+- Rows CAL-01..04 in `docs/features.md`. Decisions: D051 (owner: real dates and zones, shift end interrupts, calendar + schedules; six defaults accepted), D052 (CAL-01 promoted SHOULDs), D053 (`changes` ends when constant; a shift inside a DST gap is empty), D054 (a shift change runs after ordinary timers at the same instant; owner may revise).
+- **Batch 24:** CAL-01 `Calendar` (1 fix round). **Batch 25:** CAL-02 `Shift`/`Schedule` (0 rounds). **Batch 26:** CAL-03 `ScheduledResource`/`ShiftEnded` (1 round). **Batch 27:** CAL-04 exports and `docs/calendar.md` (60da3ad, 1 round).
+- `integration` passes the gate: 683 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. AGENTS.md has no open question left.
+
 ## Next batches
-1. **Module 4: calendar/shifts** (D051): CAL-01..04, batches 24–27, sequential. D051's defaults are confirmed. CAL-01..03 merged. In flight: `feat/CAL-04`.
+1. **Module 5 is undefined.** Candidates: LOOP-12 benchmark (deferred, D018); a 0.1 release (version, changelog, wheel check); an optional `tzdata` dependency for Windows (D051 item 6).
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.
@@ -92,9 +97,12 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - `Tally.quantile(b"x")` should raise `TypeError` (STA-03).
    - The statistics guide's Tally section: an empty-start run is a noisy, slightly low estimate (STA-06).
    - Factor `Sim.random`/`Sim.np_random` error handling into one helper (RND-02).
+   - CAL-02: hypothesis range to reach the October DST day; fixed tests for a midnight gap and a 30-minute zone; bound or document the walk to a far-future closed date; `OverflowError` → `ValueError` near `date.min`/`date.max`.
+   - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
+- **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
 - **D028/D031:** confirm the `TimeSeries` wiring, `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
 - **D036:** `Preempted` is exported (lead decision). Should any of these also be exported: `SimulationCleanupError`, `ListSink`/`TraceSink`, `TraceRecord`, `VirtualTimeLoop`, `PriorityRequest`/`PreemptiveRequest`?
@@ -117,6 +125,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **Check `git branch --show-current` before every merge.** A reviewer left the main checkout on a detached HEAD at the branch under review; the lead's merge was then a no-op and the gate ran on the old `integration` (668 instead of 683 tests). Tell reviewers to use a scratch worktree, never to check out in the main tree.
 - **D049:** stop and report after a whole module, not after each batch (unless blocked or a spec question comes up).
 - **"Go" with several options open:** run the work that needs no owner definition, record the choice as a decision, and say so in the report (batch 19, D045).
 - **Gate quietly:** redirect `gate.sh` output to a file and check `$?` directly (D035).
