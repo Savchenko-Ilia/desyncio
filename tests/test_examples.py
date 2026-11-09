@@ -16,6 +16,8 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 KEY_LINES = {
     "bank.py": [
         "customers served: 3000",
+        "mean wait:      4.28   (theory 4.00)",
+        "time with 0 in system: 0.169   (theory 0.200)",
         "20 replications: mean wait 3.56 +- 0.67 (95% interval)",
     ],
     "machine_shop.py": ["preemptions: 188", "maintenance jobs finished: 163"],
