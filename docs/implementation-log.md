@@ -1189,3 +1189,18 @@ Branch: feat/RND-02 (+ fix/RND-02-1)  ·  Merged: 402bcb4
 **Gotchas.** `Sim.np_random` duplicates about 10 lines of `Sim.random`'s error handling; sharing it would have touched CLN-01's tested message.
 
 **Follow-ups (SHOULD).** Factor the shared error handling into one helper with the method name as a parameter.
+
+## STA-03 — Warm-up removal (2026-11-09, batch 22)
+Branch: feat/STA-03  ·  Merged: 44649b1
+
+**Approach.** `Tally(warmup=t)` drops an observation iff `warmup > 0 and sim.now < t` (the value is validated first; with `warmup == 0` `sim.now` is never read). `TimeSeries(warmup=t)` keeps a `_start` field, `None` until the first record at or after `t`; that record opens the window at `t` with the value that held then, cutting the straddling segment, and `_area`/`min`/`max` accumulate only from then on, so `record` and `mean` stay O(1). `_window(until)` gives `(start, end)` for all statistics; `_weighted` clips segments with `max(t0, start)`. If every record so far is before `t`, the last value holds from `t`. `until` before the window start is a `ValueError`. `samples`, `len` and `last` still cover every record. D050: `Tally.quantile` now validates `p` like `TimeSeries.quantile`. 604 → 615 tests.
+
+**asyncio internals.** None beyond `sim.now`.
+
+**Trade-offs.** Warm-up drops data rather than hiding it, so a series cannot be re-read with another warm-up; it keeps `record` O(1).
+
+**Review findings.** No MUST. The reviewer compared every statistic against an independent brute-force reference on 3000 random cases (records at the warm-up instant, several at one instant, none or all before warm-up, `until` at the window start): 0 mismatches. The M/M/1 tests' measured figures were re-checked on 5 seeds; a no-op warm-up fails them.
+
+**Gotchas.** `min`/`max` include the value holding at the warm-up instant only if it is held for some time: a record exactly at `t` replaces it.
+
+**Follow-ups (SHOULD).** `Tally.quantile(b"x")` raises `ValueError` (bytes is a Sequence of ints), where `TimeSeries.quantile` raises `TypeError`; reject `bytes`/`bytearray` too.

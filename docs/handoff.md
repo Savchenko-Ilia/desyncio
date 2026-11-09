@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 21. Module 3: DEP-01, RND-02, STA-01, STA-02, STA-04 merged. Batch 22 (STA-03) starting. Per D049 the lead runs all module 3 batches without stopping, and reports at the end of the module._
+_Last updated: 2026-11-09, end of batch 22. Module 3: everything but STA-06 merged. Batch 23 (STA-06) starting. Per D049 the lead runs all module 3 batches without stopping, and reports at the end of the module._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -80,8 +80,9 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 21:** STA-01 (47dd7f5, 0 rounds), STA-04 (18e16ce, 1 round), RND-02 (402bcb4, 1 round), STA-02 (24856f2, 1 round). D050 promoted two SHOULDs. `integration` passes the gate: 604 tests on 3.13 and 3.14 (about 12 s, up from 8 s), ruff, mypy.
 
 ## Next batches
-1. **Batch 22:** STA-03 (warm-up; also `Tally.quantile` p validation, D050). In flight: `feat/STA-03`.
-2. **Batch 23:** STA-06 (exports and guide).
+- **Batch 22:** STA-03 (warm-up, 0 fix rounds) merged.
+
+1. **Batch 23:** STA-06 (exports and guide). In flight: `feat/STA-06`.
 3. **Module 4:** calendar/shifts, to define with the owner after module 3.
 4. **Small SHOULDs:** `gate.sh` trap right after `mktemp -d`; outside-loop monitor tests for Resource/Container; numpy floor for 3.14 (DEP-01).
 
