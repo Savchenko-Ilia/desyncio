@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 23. **Module 3 (statistics) is DONE.** Nothing is in flight; no agents are running. Next: the owner reviews module 3, then module 4 (calendar/shifts) is defined._
+_Last updated: 2026-11-09, end of batch 23. **Module 3 (statistics) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`, batches 19–23) is open. Module 4 (calendar/shifts) is drafted as CAL-01..04 (D051); waiting for the owner to confirm the D051 defaults and say "go"._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -80,11 +80,11 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 21:** STA-01 (47dd7f5, 0 rounds), STA-04 (18e16ce, 1 round), RND-02 (402bcb4, 1 round), STA-02 (24856f2, 1 round). D050 promoted two SHOULDs.
 - **Batch 22:** STA-03 (0 fix rounds): warm-up for Tally and TimeSeries.
 - **Batch 23:** STA-06 (34ebdec, 1 fix round): exports and `docs/statistics.md`.
-- `integration` passes the gate: 627 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. No PR is open for batches 19–23 yet.
+- `integration` passes the gate: 627 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. PR #5 covers batches 19–23.
 - Guide for users: `docs/statistics.md`. Per-feature details and SHOULDs: `docs/implementation-log.md`.
 
 ## Next batches
-1. **Module 4: calendar/shifts** (D047). Define it with the owner first: time zones or not, what a shift change does to units in use (finish or interrupt), the API shape.
+1. **Module 4: calendar/shifts** (D051): CAL-01..04, batches 24–27, sequential. The owner must confirm D051's six defaults first.
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.
