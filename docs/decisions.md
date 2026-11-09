@@ -247,3 +247,6 @@ Rules from now on:
 - Gate a branch on its merged tree when the gate itself changed after the branch was cut (or rebase the branch first).
 - Never pipe `gate.sh` into another command in a `&&` chain. Check the exit status with `set -o pipefail`, or run the gate on its own.
 
+
+## D036 — API-01 export list (lead, the owner may revise)
+`desyncio` exports the API-01 row's names plus `Preempted`. Users need `Preempted` for `isinstance(exc.cause, Preempted)` in the preemption pattern (RES-03), and the owner did not answer when asked. `run`, `sim` and `__version__` stay. Other public-looking names, such as `SimulationCleanupError`, `ListSink`/`TraceSink`, `TraceRecord`, `VirtualTimeLoop` and `PriorityRequest`/`PreemptiveRequest`, are NOT added without the owner. They are listed in the batch report as a question.
