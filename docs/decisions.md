@@ -260,3 +260,9 @@ API-01 therefore also owns those lines.
 ## D038 — DOC-02 review: the docs-examples extractor must not skip examples silently (lead)
 The DOC-02 reviewer listed it as a SHOULD that `tests/test_docs_examples.py` skips an indented fence ("  ```python") without failing. The only guard was "at least 8 examples". The lead promoted it to a MUST: DOC-02's acceptance criterion is "examples are run in a test", and an example that is silently not run makes the guide's D011 guarantee void. Fix round 1 also corrects the one false claim the review found (the value of `cancelling()` after an interrupt when a real cancel also fired) and pins it with an executed example.
 The same false sentence is in the `src/desyncio/interrupt.py` module docstring, which is outside DOC-02's files. It is left as a SHOULD for a clean-up feature.
+
+## D039 — Clean-up batch: no behaviour changes for the two open SHOULDs (lead, the owner may revise)
+- **A reused `RealTimePacer` that ended paused** starts the next run paused. The lead keeps this behaviour and documents it (CLN-03). The pause state belongs to the pacer object the user created; resetting it silently on `bind()` would surprise a user who paused on purpose.
+- **`sim.random` in a task with a fresh `contextvars.Context`** still raises `RuntimeError`, with a message that names the real cause (CLN-01). A fallback would need the streams on the loop (D017: `self._state`), and it would change how streams are reached. That is a design change for the owner, not a clean-up.
+- The float-validator unification is a separate batch (CLN-05), because it touches the files of CLN-01 and CLN-03.
+
