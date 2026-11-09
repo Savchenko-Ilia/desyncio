@@ -196,7 +196,7 @@ def test_interrupt_store_get_and_put() -> None:
         await _interrupt_blocked(lambda: store.put(2))
         assert store.items == (1,)
         assert await store.get() == 1
-        assert store.items == ()
+        assert list(store.items) == []
 
     desyncio.run(main())
 

@@ -145,20 +145,22 @@ def test_negative_zero_normalised() -> None:
 _BIG = 10**400
 
 
-def _helper_kwargs() -> dict[str, str]:
-    return {
-        "type_error": "x must be real, got {type}",
-        "overflow_error": "x too large",
-    }
+def _to_float(value: object, *, normalise_zero: bool = False) -> float:
+    return to_float(
+        value,
+        type_error="x must be real, got {type}",
+        overflow_error="x too large",
+        normalise_zero=normalise_zero,
+    )
 
 
 def test_helper_options() -> None:
     # Without finite_error, inf and nan pass through; without normalise_zero,
     # -0.0 keeps its sign.
-    assert to_float(math.inf, **_helper_kwargs()) == math.inf
-    assert math.isnan(to_float(math.nan, **_helper_kwargs()))
-    assert math.copysign(1.0, to_float(-0.0, **_helper_kwargs())) == -1.0
-    kept = to_float(-0.0, normalise_zero=True, **_helper_kwargs())
+    assert _to_float(math.inf) == math.inf
+    assert math.isnan(_to_float(math.nan))
+    assert math.copysign(1.0, _to_float(-0.0)) == -1.0
+    kept = _to_float(-0.0, normalise_zero=True)
     assert math.copysign(1.0, kept) == 1.0
 
 

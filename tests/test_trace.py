@@ -482,7 +482,7 @@ def test_trace_with_pacer_and_fake_wall() -> None:
         await asyncio.sleep(4)
 
     sink = ListSink()
-    pacer = RealTimePacer(2, wall_clock=wall)  # type: ignore[arg-type]
+    pacer = RealTimePacer(2, wall_clock=wall)
     desyncio.run(main(), trace=sink, pacer=pacer)
     assert sink.records == [
         R(0.0, 0, "main", "start"),
