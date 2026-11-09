@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 20. Module 3 (statistics, D047/D048) is defined and started: DEP-01 is merged. Nothing is in flight. Next: batch 21 after the owner's "go"._
+_Last updated: 2026-11-09, end of batch 20. Module 3 (statistics, D047/D048) is defined and started: DEP-01 is merged. Nothing is in flight. Next: batch 21. Per D049 the lead runs all module 3 batches without stopping, and reports at the end of the module._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -108,6 +108,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **D049:** stop and report after a whole module, not after each batch (unless blocked or a spec question comes up).
 - **"Go" with several options open:** run the work that needs no owner definition, record the choice as a decision, and say so in the report (batch 19, D045).
 - **Gate quietly:** redirect `gate.sh` output to a file and check `$?` directly (D035).
 - **`git switch integration` before committing docs.** One commit landed on the session branch by mistake and had to be merged back (`febc420`). Check with `git branch --show-current`.

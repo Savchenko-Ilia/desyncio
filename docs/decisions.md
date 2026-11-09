@@ -321,3 +321,6 @@ The owner: "use numpy if it's already written there", then chose:
 - **scipy is added too**, for the Student t quantile (`scipy.stats.t`) and its other distributions.
 - **Input randomness:** a new `sim.np_random(name)` returns a numpy `Generator` per named stream, seeded deterministically from the run seed and the name, like `sim.random` (D026). Models use numpy's and scipy's own distributions, so STA-05 (hand-written distributions) is dropped.
 Principle 6 is extended: if numpy or scipy already implements something, call it and never re-implement it. This supersedes D047's "standard library only". The core loop and primitives still import neither: `import desyncio` stays numpy-free, so a simulation that uses no statistics pays no import cost.
+
+## D049 — The lead stops after a module, not after each batch (owner)
+The owner: "Stop after module. Do not stop after batch." From module 3 on, the lead runs the module's batches back to back, with the per-batch steps of CLAUDE.md unchanged (review, max 2 fix rounds, gate, merge, log, handoff rewrite, push). It reports and waits for "go" only at the end of a module, or earlier when a feature is blocked, a spec is ambiguous, or an owner decision is needed.
