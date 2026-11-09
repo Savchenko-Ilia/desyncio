@@ -1249,3 +1249,18 @@ Branch: feat/CAL-02  ·  Merged: 00ed281
 **Gotchas.** A shift belongs to the weekday it starts on: with a calendar starting Monday 00:00, Sunday's night shift is already running at t=0.
 
 **Follow-ups (SHOULD).** The hypothesis property never reaches the October fall-back (a fixed test does); fixed tests for a midnight gap and a 30-minute zone; a far-future closed date makes `changes` walk day by day to it (slow for `date.max`; document or bound); `OverflowError` near `date.min`/`date.max` should become `ValueError`.
+
+## CAL-03 — Shift-controlled resource (2026-11-09, batch 26)
+Branch: feat/CAL-03 (+ fix/CAL-03-1)  ·  Merged: 251002b
+
+**Approach.** New `src/desyncio/scheduled.py`: `ScheduledResource(schedule, *, monitor=None)` and `ShiftEnded(at, resource)`. Waiters are a FIFO `deque` of holds, each awaiting its own future (synchronous release, as D030); `_units` lists every hold with a unit in grant order, including granted-but-not-resumed reservations. A driver task (`"ScheduledResource driver"`) waits for each `schedule.changes(now)` entry with `loop.call_at_priority(t, 1, ...)` (D054) and applies it synchronously in `_set_capacity`: on a drop it pops the most recently granted holds, marks them `lost`, settles counters, grants waiters and calls the monitor, then calls `interrupt_task` for the resumed victims. A taken-back reservation raises `Interrupt(ShiftEnded)` from `__aenter__` (D034 behaviour). `__aenter__` opens an `Interruptible` scope after acquiring, so the body is interruptible. A done-callback reports a failed driver at once through `call_exception_handler`.
+
+**asyncio internals.** At one virtual time, `_run_once` moves all due timers to the ready queue in `(when, priority, seq)` order; the callbacks only resolve futures, and task steps follow via `call_soon` in FIFO order. With the driver at priority 1, a holder's release and an arrival's queueing (one step from a priority-0 timer) run before the driver's step. Work further away can still come after it (documented). `task.exception()` in the done-callback marks the exception retrieved, so asyncio does not log it again.
+
+**Trade-offs.** A FIFO deque plus futures instead of a `Semaphore` (asyncio has no semaphore whose size can shrink, and release must be synchronous). `call_at` with the absolute time, so `ShiftEnded.at` is exactly the boundary.
+
+**Review findings.** Round 1, three MUSTs: (1) no test for a waiter cancelled after being granted but before resuming (two leak mutants survived; now killed, plus tests for real-cancel-vs-shift-end and a taken-back reservation then cancelled); (2) D054: the same-instant order depended on timer arming order; now an explicit priority, tested in both arming orders; (3) a failing driver froze capacity silently; now reported at once, and state is settled before interrupts. A stress test (1500 random cases with cancels, interrupts and raising monitors) found no invariant violation before or after.
+
+**Gotchas.** A body with its own `sim.interruptible()` catches `Interrupt(ShiftEnded)` there and continues after its unit is gone (as RES-03; documented). While the schedule still has changes ahead, a `main` waiting forever is not reported as `SimulationDeadlock`, because the driver has a timer.
+
+**Follow-ups.** None required.
