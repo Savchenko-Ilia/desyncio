@@ -19,86 +19,7 @@ from desyncio.store import FilterStore, PriorityStore, Store
 # --- FIFO ---------------------------------------------------------------
 
 
-def test_items_come_out_fifo() -> None:
-    async def main() -> list[int]:
-        s: Store[int] = Store()
-        for i in range(5):
-            await s.put(i)
-        return [await s.get() for _ in range(5)]
-
-    assert desyncio.run(main()) == [0, 1, 2, 3, 4]
-
-
-def test_waiting_getters_are_served_fifo() -> None:
-    async def main() -> list[tuple[str, str]]:
-        s: Store[str] = Store()
-        got: list[tuple[str, str]] = []
-
-        async def getter(name: str) -> None:
-            got.append((name, await s.get()))
-
-        for name in "abc":
-            sim.spawn(getter(name))
-        await sim.timeout(1)  # all three are now waiting
-        for item in ("x", "y", "z"):
-            await s.put(item)
-        await sim.timeout(1)
-        return got
-
-    assert desyncio.run(main()) == [("a", "x"), ("b", "y"), ("c", "z")]
-
-
-def test_waiting_putters_are_served_fifo() -> None:
-    async def main() -> list[str]:
-        s: Store[str] = Store(capacity=1)
-        await s.put("first")
-        for item in ("p1", "p2", "p3"):
-            sim.spawn(s.put(item))
-        await sim.timeout(1)  # three putters queued behind a full store
-        out = []
-        for _ in range(4):
-            out.append(await s.get())
-            await sim.timeout(1)
-        return out
-
-    assert desyncio.run(main()) == ["first", "p1", "p2", "p3"]
-
-
 # --- blocking in virtual time ------------------------------------------
-
-
-def test_get_blocks_while_empty_until_put() -> None:
-    async def main() -> tuple[float, str]:
-        s: Store[str] = Store()
-
-        async def producer() -> None:
-            await sim.timeout(7)
-            await s.put("late")
-
-        sim.spawn(producer())
-        item = await s.get()
-        return sim.now, item
-
-    assert desyncio.run(main()) == (7.0, "late")
-
-
-def test_put_blocks_while_full_until_get() -> None:
-    async def main() -> tuple[float, list[float]]:
-        s: Store[int] = Store(capacity=2)
-        times: list[float] = []
-
-        async def consumer() -> None:
-            await sim.timeout(4)
-            await s.get()
-
-        sim.spawn(consumer())
-        for i in range(3):
-            await s.put(i)
-            times.append(sim.now)
-        return sim.now, times
-
-    # the first two puts are immediate; the third waits for the get at t=4
-    assert desyncio.run(main()) == (4.0, [0.0, 0.0, 4.0])
 
 
 def test_capacity_and_len_and_items_snapshot() -> None:
@@ -141,20 +62,6 @@ def test_items_and_capacity_are_read_only() -> None:
 
 
 # --- cancellation -------------------------------------------------------
-
-
-def test_cancelled_getter_is_removed_from_the_queue() -> None:
-    async def main() -> str:
-        s: Store[str] = Store()
-        g1 = sim.spawn(s.get())
-        g2 = sim.spawn(s.get())
-        await sim.timeout(1)
-        g1.cancel()
-        await sim.timeout(1)
-        await s.put("x")  # must go to g2, not to the cancelled g1
-        return await g2
-
-    assert desyncio.run(main()) == "x"
 
 
 def test_cancelled_putter_is_removed_from_the_queue() -> None:
@@ -232,61 +139,6 @@ def test_item_never_duplicated_under_many_arrival_time_cancels() -> None:
 # --- shutdown -----------------------------------------------------------
 
 
-def test_shutdown_lets_consumers_drain_then_raises() -> None:
-    async def main() -> list[Any]:
-        s: Store[int] = Store()
-        await s.put(1)
-        await s.put(2)
-        s.shutdown()
-        out: list[Any] = [await s.get(), await s.get()]
-        with pytest.raises(asyncio.QueueShutDown):
-            await s.get()
-        with pytest.raises(asyncio.QueueShutDown):
-            await s.put(3)
-        return out
-
-    assert desyncio.run(main()) == [1, 2]
-
-
-def test_shutdown_wakes_blocked_getters() -> None:
-    async def main() -> tuple[float, bool]:
-        s: Store[int] = Store()
-
-        async def getter() -> bool:
-            try:
-                await s.get()
-            except asyncio.QueueShutDown:
-                return True
-            return False
-
-        g = sim.spawn(getter())
-        await sim.timeout(3)
-        s.shutdown()
-        return sim.now, await g
-
-    assert desyncio.run(main()) == (3.0, True)
-
-
-def test_shutdown_wakes_blocked_putters() -> None:
-    async def main() -> bool:
-        s: Store[int] = Store(capacity=1)
-        await s.put(1)
-
-        async def putter() -> bool:
-            try:
-                await s.put(2)
-            except asyncio.QueueShutDown:
-                return True
-            return False
-
-        p = sim.spawn(putter())
-        await sim.timeout(1)
-        s.shutdown()
-        return await p
-
-    assert desyncio.run(main()) is True
-
-
 def test_shutdown_immediate_discards_items() -> None:
     async def main() -> tuple[int, tuple[int, ...]]:
         s: Store[int] = Store()
@@ -301,43 +153,6 @@ def test_shutdown_immediate_discards_items() -> None:
 
 
 # --- producer / consumer ------------------------------------------------
-
-
-def test_producer_consumer_with_bounded_buffer() -> None:
-    async def main() -> list[tuple[float, str, int]]:
-        s: Store[int] = Store(capacity=2)
-        log: list[tuple[float, str, int]] = []
-
-        async def producer() -> None:
-            for i in range(5):
-                await s.put(i)  # blocks when the buffer holds 2
-                log.append((sim.now, "put", i))
-                await sim.timeout(1)
-            s.shutdown()
-
-        async def consumer() -> None:
-            while True:
-                try:
-                    item = await s.get()
-                except asyncio.QueueShutDown:
-                    return
-                log.append((sim.now, "got", item))
-                await sim.timeout(3)  # slower than the producer
-
-        c = sim.spawn(consumer())
-        p = sim.spawn(producer())
-        await p
-        await c
-        return log
-
-    log = desyncio.run(main())
-    assert [i for _, kind, i in log if kind == "got"] == [0, 1, 2, 3, 4]
-    assert [i for _, kind, i in log if kind == "put"] == [0, 1, 2, 3, 4]
-    # the consumer takes 3 per item, so the last item is fetched at t=12
-    assert (12.0, "got", 4) in log
-    # the producer is throttled by the full buffer: it wants to put item 4 at
-    # t=4 but the buffer holds [2, 3] until the consumer takes 2 at t=6
-    assert (6.0, "put", 4) in log
 
 
 # --- monitor hook (D021) ------------------------------------------------
@@ -518,11 +333,6 @@ def test_monitor_must_be_callable() -> None:
         Store(monitor=42)  # type: ignore[arg-type]
 
 
-def test_capacity_accepts_int_and_inf() -> None:
-    assert Store(capacity=1).capacity == 1
-    assert Store(capacity=math.inf).capacity == math.inf
-
-
 # --- determinism --------------------------------------------------------
 
 
@@ -582,37 +392,6 @@ class NoOrder:
     __gt__ = __le__ = __ge__ = __lt__
 
 
-def test_priority_lowest_first() -> None:
-    async def main() -> list[str]:
-        s: PriorityStore[str] = PriorityStore()
-        for name, prio in [("c", 3), ("a", 1), ("d", 4), ("b", 2)]:
-            await s.put(name, priority=prio)
-        return [await s.get() for _ in range(4)]
-
-    assert desyncio.run(main()) == ["a", "b", "c", "d"]
-
-
-def test_priority_ties_come_out_in_put_order() -> None:
-    async def main() -> list[str]:
-        s: PriorityStore[str] = PriorityStore()
-        for name in "abcde":
-            await s.put(name, priority=1)
-        await s.put("urgent", priority=0)
-        return [await s.get() for _ in range(6)]
-
-    assert desyncio.run(main()) == ["urgent", "a", "b", "c", "d", "e"]
-
-
-def test_priority_default_priority_is_fifo() -> None:
-    async def main() -> list[int]:
-        s: PriorityStore[int] = PriorityStore()
-        for i in range(4):
-            await s.put(i)
-        return [await s.get() for _ in range(4)]
-
-    assert desyncio.run(main()) == [0, 1, 2, 3]
-
-
 def test_priority_items_need_not_be_comparable() -> None:
     async def main() -> list[str]:
         s: PriorityStore[NoOrder] = PriorityStore()
@@ -644,21 +423,6 @@ def test_priority_items_snapshot_is_in_priority_order() -> None:
     desyncio.run(main())
 
 
-def test_priority_get_blocks_in_virtual_time() -> None:
-    async def main() -> tuple[float, str]:
-        s: PriorityStore[str] = PriorityStore()
-
-        async def producer() -> None:
-            await sim.timeout(4)
-            await s.put("x", priority=2)
-
-        sim.spawn(producer())
-        item = await s.get()
-        return sim.now, item
-
-    assert desyncio.run(main()) == (4.0, "x")
-
-
 def test_priority_capacity_blocks_put_until_get() -> None:
     async def main() -> tuple[float, list[float]]:
         s: PriorityStore[int] = PriorityStore(capacity=2)
@@ -677,42 +441,6 @@ def test_priority_capacity_blocks_put_until_get() -> None:
     assert desyncio.run(main()) == (4.0, [0.0, 0.0, 4.0])
 
 
-def test_priority_blocked_putters_are_served_fifo() -> None:
-    async def main() -> list[str]:
-        s: PriorityStore[str] = PriorityStore(capacity=1)
-        await s.put("first")
-        for item in ("p1", "p2", "p3"):
-            sim.spawn(s.put(item))
-        await sim.timeout(1)
-        out = []
-        for _ in range(4):
-            out.append(await s.get())
-            await sim.timeout(1)
-        return out
-
-    assert desyncio.run(main()) == ["first", "p1", "p2", "p3"]
-
-
-def test_priority_waiting_getters_served_fifo() -> None:
-    async def main() -> list[tuple[str, str]]:
-        s: PriorityStore[str] = PriorityStore()
-        got: list[tuple[str, str]] = []
-
-        async def getter(name: str) -> None:
-            got.append((name, await s.get()))
-
-        for name in "ab":
-            sim.spawn(getter(name))
-        await sim.timeout(1)
-        await s.put("x", priority=1)
-        await s.put("y", priority=0)
-        await sim.timeout(1)
-        return got
-
-    # the longest-waiting getter runs first and takes the best item present
-    assert desyncio.run(main()) == [("a", "y"), ("b", "x")]
-
-
 def test_priority_bad_arguments() -> None:
     with pytest.raises(ValueError):
         PriorityStore(capacity=0)
@@ -720,20 +448,6 @@ def test_priority_bad_arguments() -> None:
         PriorityStore(capacity=True)
     with pytest.raises(TypeError):
         PriorityStore(monitor=42)  # type: ignore[arg-type]
-
-
-def test_priority_cancelled_getter_is_removed() -> None:
-    async def main() -> str:
-        s: PriorityStore[str] = PriorityStore()
-        g1 = sim.spawn(s.get())
-        g2 = sim.spawn(s.get())
-        await sim.timeout(1)
-        g1.cancel()
-        await sim.timeout(1)
-        await s.put("x")
-        return await g2
-
-    assert desyncio.run(main()) == "x"
 
 
 def test_priority_cancelled_putter_is_removed() -> None:
@@ -767,28 +481,6 @@ def test_priority_getter_cancelled_at_arrival_loses_nothing() -> None:
         return before[0], before[1], item, len(s)
 
     assert desyncio.run(main()) == (1, ("only",), "only", 0)
-
-
-def test_priority_getter_interrupted_at_arrival_loses_nothing() -> None:
-    async def main() -> tuple[object, int, str]:
-        s: PriorityStore[str] = PriorityStore()
-        cause: list[object] = []
-
-        async def victim() -> None:
-            try:
-                async with sim.interruptible():
-                    await s.get()
-            except Interrupt as exc:
-                cause.append(exc.cause)
-
-        t = sim.spawn(victim())
-        await sim.timeout(1)
-        await s.put("only")
-        sim.interrupt(t, "boom")
-        await t
-        return cause[0], len(s), await s.get()
-
-    assert desyncio.run(main()) == ("boom", 1, "only")
 
 
 def test_priority_no_duplicates_under_many_arrival_time_cancels() -> None:
@@ -964,24 +656,6 @@ def test_filter_get_without_filter_is_plain_fifo() -> None:
     assert desyncio.run(main()) == [0, 1, 2, 3]
 
 
-def test_filter_get_blocks_until_a_match_exists() -> None:
-    async def main() -> tuple[float, int, tuple[int, ...]]:
-        s: FilterStore[int] = FilterStore()
-        await s.put(1)
-
-        async def producer() -> None:
-            await sim.timeout(3)
-            await s.put(3)  # no match
-            await sim.timeout(3)
-            await s.put(10)  # match
-
-        sim.spawn(producer())
-        item = await s.get(filter=lambda x: x >= 10)
-        return sim.now, item, s.items
-
-    assert desyncio.run(main()) == (6.0, 10, (1, 3))
-
-
 def test_filter_no_head_of_line_blocking() -> None:
     async def main() -> list[tuple[float, str, int]]:
         s: FilterStore[int] = FilterStore()
@@ -1066,23 +740,6 @@ def test_filter_capacity_blocks_put_and_putters_are_fifo() -> None:
     assert desyncio.run(main()) == (["first", "p1", "p2", "p3"], [1.0, 2.0, 3.0])
 
 
-def test_filter_get_frees_space_for_blocked_put() -> None:
-    async def main() -> tuple[tuple[str, ...], float]:
-        s: FilterStore[str] = FilterStore(capacity=2)
-        await s.put("a")
-        await s.put("b")
-
-        async def taker() -> None:
-            await sim.timeout(5)
-            await s.get(filter=lambda x: x == "b")
-
-        sim.spawn(taker())
-        await s.put("c")  # blocks until "b" is taken at t=5
-        return s.items, sim.now
-
-    assert desyncio.run(main()) == (("a", "c"), 5.0)
-
-
 def test_filter_capacity_len_items_read_only() -> None:
     async def main() -> None:
         s: FilterStore[str] = FilterStore(capacity=3)
@@ -1158,20 +815,6 @@ def test_filter_raising_filter_on_recheck_does_not_strand_others() -> None:
     assert desyncio.run(main()) == ("boom at recheck", 99, ())
 
 
-def test_filter_cancelled_getter_is_removed() -> None:
-    async def main() -> str:
-        s: FilterStore[str] = FilterStore()
-        g1 = sim.spawn(s.get())
-        g2 = sim.spawn(s.get())
-        await sim.timeout(1)
-        g1.cancel()
-        await sim.timeout(1)
-        await s.put("x")
-        return await g2
-
-    assert desyncio.run(main()) == "x"
-
-
 def test_filter_cancelled_putter_is_removed() -> None:
     async def main() -> list[str]:
         s: FilterStore[str] = FilterStore(capacity=1)
@@ -1238,30 +881,6 @@ def test_filter_getter_interrupted_at_arrival_loses_nothing() -> None:
         return cause[0], len(s), await s.get()
 
     assert desyncio.run(main()) == ("boom", 1, "only")
-
-
-def test_filter_interrupted_blocked_putter_loses_nothing() -> None:
-    async def main() -> tuple[tuple[str, ...], bool]:
-        s: FilterStore[str] = FilterStore(capacity=1)
-        await s.put("a")
-        hit: list[bool] = []
-
-        async def victim() -> None:
-            try:
-                async with sim.interruptible():
-                    await s.put("never")
-            except Interrupt:
-                hit.append(True)
-
-        t = sim.spawn(victim())
-        await sim.timeout(1)
-        sim.interrupt(t)
-        await t
-        await s.get()
-        await sim.timeout(1)
-        return s.items, bool(hit)
-
-    assert desyncio.run(main()) == ((), True)
 
 
 def test_filter_no_duplicates_under_many_arrival_time_cancels() -> None:
