@@ -359,3 +359,33 @@ The same review promoted two other findings to MUST: a test for a waiter cancell
 The owner asked whether there is a quick start and examples. There were neither. The README has only one plain-asyncio snippet, and the guides illustrate one feature per snippet. The owner approved all of the lead's proposal:
 - **DOC-03:** `docs/quickstart.md` with install from git, a first model with a walk-through, and "where next".
 - **EX-01:** four complete example models in `examples/` (bank, machine shop, inventory, clinic), smoke-tested by `tests/test_examples.py` and type-checked by the gate (`mypy src tests examples`).
+
+## D056 — Module 6 is the event API core; blocks and entities live in the platform (owner)
+The platform team sent "Event API requirements, draft v0.1" (2026-11-10). desyncio has no blocks or entities (Source, Queue, Service, Delay, Branch, Sink), and the owner decided they "probably" live in the platform, on top of `sim.emit`. So:
+- desyncio's schema v1 is `Event`, `RunStarted`, `RunFinished` and `ResourceChanged` only. The eight entity/service event types of the draft's R4 are the platform's custom events. EVT-05 (block emission) is dropped from desyncio.
+- Module 6 is EVT-01..04, EVT-06..08 and RES-04 (rows in `docs/features.md`). If blocks ever move into desyncio, that is a new module with its own spec (AGENTS §1 scope change).
+- The draft was reviewed twice: by the lead and by an independent reviewer that verified its findings with probe scripts. D057–D060 record the outcome.
+
+## D057 — Event API: owner decisions on run lifecycle, subscription and names
+- **End of run:** `RunFinished` is the last event, and the bus is closed **before** teardown. Teardown cancels leftover tasks in `asyncio.all_tasks()` order, which is a set ordered by object address, so events from teardown releases would not be reproducible (probe: three identical runs, three orders). The last `ResourceChanged` may therefore show units still in use; the guide says so.
+- **Reasons:** `main_returned | until | error` (`error` includes `SimulationDeadlock`). There is no stop API, so no `stopped`; a `sim.stop()` is not part of module 6.
+- **Pre-run subscription:** `desyncio.run(..., subscribers=[...])`, forwarded by `replicate`. `sim.subscribe` needs a running loop, so without this nobody can see `RunStarted`, and with `until` code after the model never runs.
+- **Resource names:** `name=` on the four resource classes, with an automatic default and duplicate detection. Building a resource outside a run stays legal, so the per-run part (the default `resource-N` and the duplicate check) happens when the resource is first used in a run, before any state change (D060).
+
+## D058 — Event handler errors follow the trace-sink model (lead; the owner left it open)
+The draft says a handler exception propagates at the emit point. Probes showed that this cannot meet its own goal ("fails loudly"): in a task nobody awaits the exception sat unseen and the run finished normally; a model's `try/except` swallowed it; on a resource's grant path it leaked the unit. So handler errors work as D016 does for trace sinks: the first exception is contained, no further events are delivered (later subscribers do not get that event either), the loop stops after the current iteration, and `desyncio.run` raises that exception. `KeyboardInterrupt`/`SystemExit` follow the tracer's existing rule. This differs from `monitor=` (D023 v2, log and continue): a subscriber is usually the whole record of a run.
+
+## D059 — The observer guard reuses asyncio's debug mode (lead; the owner asked to consider reuse)
+`desyncio.run(..., debug=None)` is forwarded to `asyncio.Runner(debug=...)`, so it means what it means in `asyncio.run` (and `PYTHONASYNCIODEBUG=1` works too). The guard is active when `loop.get_debug()` is true; there is no second switch. In debug mode, during dispatch, these raise `ObserverError`: creating a task (`sim.spawn`, `asyncio.create_task`), scheduling a callback (`call_soon`/`call_later`/`call_at`), `sim.interrupt`, `sim.random`/`sim.np_random` (a draw from a handler changes the model's next value; probe-verified), and `sim.emit`. `subscribe` and `Subscription.close` stay allowed (R1). The guard cannot see direct mutation (`store.shutdown()`, `task.cancel()`); the guide says so. `sim.timeout` and `async with resource:` only create objects in a sync handler and need no guard.
+
+## D060 — Event API: spec fixes decided by the lead
+- **Bus state** lives on the loop's `_state` (D017), not in a context variable (a task with a fresh `Context` would lose it). On a loop that is not a `VirtualTimeLoop`, an emit point does nothing.
+- **`seq`** ticks at every emit point, also when no event is built and when nobody subscribes, so it never depends on subscriptions. "Zero cost when off" therefore means one check and one integer add, and no event object.
+- **Custom events:** `sim.emit(MyEvent, **fields)`; the sim fills `t` and `seq` and builds the event only if a subscriber wants that kind (a per-class cache, rebuilt on subscribe/close). `Event` fields are keyword-only. Trade-off accepted: mypy cannot check `**fields`; the dataclass constructor checks names at run time.
+- **Payload rule (primitives only, frozen, slotted)** is enforced by test for the built-in events and documented for user subclasses.
+- **`EVENT_SCHEMA_VERSION`** is one int, bumped on any change to a built-in event's fields. `to_dict()["kind"]` is the class name; same-named user classes collide and the guide says so.
+- **`async def` handlers** are rejected with `inspect.iscoroutinefunction`, which is best effort (a lambda returning a coroutine passes).
+- **`ResourceChanged`:** exactly one per existing `_changed()` call in `Resource`, `PriorityResource`, `PreemptiveResource` and `ScheduledResource` (so a preemption swap and a shift change are one event each), emitted after the monitor call. `queue_len` is `queue_length`, which counts granted-but-not-resumed requests.
+- **Names, per-run part:** on a resource's first use in a run it registers with the bus: an unnamed one gets `resource-N` in registration order, a duplicate name raises `ValueError` before any state change.
+- **Benchmark:** EVT-07 has its own `Resource`-based M/M/1 and no comparison libraries; LOOP-12 stays deferred (D018). The draft's 20% is informative only (a prototype measured +19% to +28%).
+- **Stale references in the draft:** AGENTS has no §3.2/§3.4/§8 (the principles are §2.2 and §2.4); the time unit is settled (D004); `resources.py` is `resource.py` plus `scheduled.py`; `tests/models/mm1.py` uses `asyncio.Lock`, so event tests need a new `Resource`-based model.

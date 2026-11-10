@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 28. **Module 5 (quick start and examples) is DONE.** Nothing is in flight; no agents are running. PR #5 (`integration` → `main`) is open and covers batches 19–28. Next: the owner decides what comes next._
+_Last updated: 2026-11-10. **Module 6 (event API) is planned, not started.** Rows and batches 29–33 are in `docs/features.md`; decisions D056–D060. Nothing is in flight; no agents are running. Waiting for the owner's "go" for batch 29._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -92,8 +92,15 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D055. DOC-03 `docs/quickstart.md` (d1ec9af, 1 fix round). EX-01 `examples/` with bank, machine shop, inventory and clinic models, smoke-tested and type-checked by the gate (98614ba, 1 fix round).
 - `integration` passes the gate: 692 tests on 3.13 and 3.14 (about 15 s each), ruff, `mypy src tests examples`.
 
+## Module 6: event API — PLANNED (batches 29–33)
+- Requested by the platform built on desyncio ("Event API requirements, draft v0.1"). The draft is not in the repo; D056–D060 and the Module 6 rows in `docs/features.md` are the spec.
+- Blocks and entities live in the platform (D056): desyncio ships `Event`, `RunStarted`, `RunFinished`, `ResourceChanged`, the bus, `sim.emit` for custom events, and the debug-mode observer guard.
+- Batches: 29 EVT-01 + RES-04 · 30 EVT-02 · 31 EVT-04 + EVT-06 · 32 EVT-03 + EVT-07 · 33 EVT-08. Run them back to back after "go" (D049).
+- Tell reviewers of EVT-02 and EVT-04 to probe: handler error on the grant path (no leaked unit), no delivery after `RunFinished`, `seq` independent of subscriptions.
+- **Known gap outside module 6:** teardown cancels leftover tasks in set (address) order, so the *trace* of a run with leftover tasks is not reproducible. Proposed clean-up: cancel leftovers in creation order before `runner.close()`. Not scheduled.
+
 ## Next batches
-1. **Module 6 is undefined.** Candidates: LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
+1. **Batch 29** (EVT-01, RES-04) on the owner's "go". After module 6, candidates: the teardown-order clean-up above; LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.
@@ -105,6 +112,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
+- **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. Is a `sim.stop()` wanted (D057 says not in module 6)?
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
