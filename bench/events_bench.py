@@ -115,6 +115,10 @@ def main() -> int:
     args = parser.parse_args()
     customers: int = args.customers
     reps: int = args.reps
+    if customers < 1:
+        parser.error("--customers must be at least 1")
+    if reps < 1:
+        parser.error("--reps must be at least 1")
 
     print(
         f"Python {platform.python_version()} on {platform.machine()} "
