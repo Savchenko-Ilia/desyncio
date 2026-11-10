@@ -1354,3 +1354,18 @@ Branch: feat/EVT-02 + fix/EVT-02-1  ·  Merged: 5fa61f2
 **Gotchas.** A handler failing in main's last step while main also raises: `run` raises the handler error and main's exception is dropped (no `__context__`); a `RunFinished` handler error carries main's exception as `__context__`. Documented in `run`. Emit cost, 1e6 calls (informative): `sim.emit` 0.55 s with no subscriber, 1.24 s with one no-op subscriber; `emit_event` 0.28 s / 0.88 s.
 
 **Follow-ups (SHOULD).** Test the "dropped, no `__context__`" half of that docstring. `test_run_subscribers_shape` could fold into `test_subscribe_validation`.
+
+## EVT-04 — Resource emission (2026-11-10, batch 31)
+Branch: feat/EVT-04 + fix/EVT-04-1 + fix/EVT-04-2  ·  Merged: aa069cf
+
+**Approach.** Each existing `_changed()` call in `Resource`, `PriorityResource`, `PreemptiveResource` and `ScheduledResource` emits one `ResourceChanged(resource, in_use, capacity, queue_len)` via `bus.emit_event`, right after the monitor; a preemption swap and a shift capacity change stay one call each. Names come from `bus.register_resource_name`: the first three classes register at the top of `_acquire` (before the semaphore check, the sequence number and preemption) and cache the result in `_run_name`; `ScheduledResource` registers when built (its driver can change capacity before any acquire) and again at the top of `_acquire` (for use in a later run). A duplicate explicit name raises `ValueError` before any state change. `_check_name` became `check_resource_name`.
+
+**asyncio internals.** None new; release stays synchronous (D030), and the emit point is after the state has settled (D023 v2), so a raising handler (contained by the bus, D058) cannot leak a unit.
+
+**Trade-offs.** Release and cancel do not register: with `async with` they always follow an acquire in the same run. Holding a unit across runs with manual `__aenter__`/`__aexit__` is unsupported (the release reports the acquiring run's name; documented). Cost with nobody subscribed: about +0.4 µs per state change on a tight uncontended loop (about 2x; `emit_event` ~170 ns, the running-bus lookup ~110 ns, registration ~160 ns per acquire). The reviewer found no cheaper path inside resource.py; the place to cut it is bus.py (one combined helper). Accepted for now; EVT-07 measures the M/M/1 figure.
+
+**Review findings.** Round 1 MUST: a `ScheduledResource` reused in a later run kept its stale name (two resources named `resource-1` in one stream); fixed by registering in `_acquire` too, and two false comments corrected. A false `_register` docstring promoted to MUST (D011). Round 2 MUST: that second registration hid the construction-time one from every test; two tests added (an unacquired resource's shift change is named; a duplicate name raises at construction with no driver task). D065: one line of `tests/test_bus.py` changed because resources now emit.
+
+**Gotchas.** A failed registration leaves a `PriorityRequest` used; retry with a new request.
+
+**Follow-ups (SHOULD).** The two later-run ScheduledResource tests never acquire in run A, so a "register only on the first acquire ever" mutation survives; add `async with` in run A. `ScheduledResource.__init__` registers before `capacity_at`/`create_task`; if those raised, the name would stay taken for that run.
