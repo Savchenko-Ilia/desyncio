@@ -51,11 +51,9 @@ def _build(cls: type[Event]) -> Event:
 
 def test_schema_version_and_exports() -> None:
     assert EVENT_SCHEMA_VERSION == 1
-    # Both directions: every export is the version or a checked built-in, and
-    # every built-in is exported.
-    exported = set(events.__all__) - {"EVENT_SCHEMA_VERSION"}
-    assert exported == {cls.__name__ for cls in BUILTINS}
-    assert all(getattr(events, name) in BUILTINS for name in exported)
+    # Every built-in event is exported. __all__ may hold non-event names too
+    # (e.g. Subscription, ObserverError; D062).
+    assert {cls.__name__ for cls in BUILTINS} <= set(events.__all__)
 
 
 @pytest.mark.parametrize("cls", BUILTINS)
