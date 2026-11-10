@@ -7,6 +7,7 @@ import asyncio
 import gc
 import logging
 import sys
+import types
 import warnings
 from dataclasses import dataclass
 from typing import Any
@@ -212,6 +213,7 @@ def test_subscribe_validation(monkeypatch: pytest.MonkeyPatch) -> None:
             coro = main()
             with pytest.raises(exc):
                 run(coro, subscribers=[(handler, kinds)])
+            assert isinstance(coro, types.CoroutineType)
             assert coro.cr_frame is None  # closed by run
             del coro
         gc.collect()
