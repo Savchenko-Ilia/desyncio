@@ -120,12 +120,16 @@ def test_until_cut_with_holders_and_waiters_is_repeatable() -> None:
     runs = [run_events(until=40.0)[1] for _ in range(3)]
     assert dicts(runs[0]) == dicts(runs[1]) == dicts(runs[2])
     events = runs[0]
+    # This is the guard that teardown (cancelled tasks releasing the server)
+    # adds nothing to the stream: RunFinished must be the last event. The
+    # 3-run equality above does not guard it: teardown cancels tasks in an
+    # order that can depend on object addresses, so events leaking from it
+    # could differ between runs or happen to match. Do not remove this check.
     assert isinstance(events[-1], RunFinished) and events[-1].reason == "until"
     assert isinstance(events[0], RunStarted) and events[0].until == 40.0
     assert sum(isinstance(e, RunFinished) for e in events) == 1
     assert max(e.t for e in events) <= 40.0
-    # Cut while a customer held the server and others waited; the teardown
-    # (cancelled tasks releasing) added nothing after RunFinished.
+    # Cut while a customer held the server and others waited.
     changes = [e for e in events if isinstance(e, ResourceChanged)]
     assert changes[-1].in_use == 1
     assert changes[-1].queue_len >= 1  # waiters were left when the run was cut
