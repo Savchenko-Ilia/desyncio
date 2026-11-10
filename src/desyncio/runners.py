@@ -205,9 +205,14 @@ def run[T](
             before anything runs. They see every event of the run, from
             ``RunStarted`` to ``RunFinished``. If a handler raises, delivery
             stops, the loop stops after the current iteration, and ``run``
-            raises that exception after closing the loop (also when it was
-            a ``RunFinished`` handler; an exception ``main`` raised is then
-            its ``__context__``).
+            raises that exception after closing the loop. If ``main`` also
+            raises, the two cases differ. A handler that fails during
+            ``main``'s last step (``main`` then raises in that same step)
+            wins: ``run`` raises the handler's exception and ``main``'s is
+            dropped (it is not the ``__context__``: the loop stopped before
+            anything retrieved it). A ``RunFinished`` handler runs after
+            ``main``'s exception has reached ``run``, so ``run`` raises the
+            handler's exception with ``main``'s as its ``__context__``.
 
     Returns:
         ``main``'s result, or ``None`` if ``until`` was reached first (the
