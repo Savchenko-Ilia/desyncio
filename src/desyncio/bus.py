@@ -230,7 +230,9 @@ class Bus:
 
     Args:
         time: returns the current virtual time (stamps ``t``).
-        on_error: called once with the first exception a handler raises.
+        on_error: called with the exception a handler raised. Normally
+            once; again only if a handler raises after a nested emit inside
+            it already failed, so ``on_error`` must keep the first.
     """
 
     __slots__ = (
@@ -243,7 +245,6 @@ class Bus:
         "_time",
         "_unnamed",
         "_wanted",
-        "error",
     )
 
     def __init__(
@@ -258,8 +259,6 @@ class Bus:
         # Event class -> handlers that want it; cleared on (un)subscribe.
         self._wanted: dict[object, tuple[Handler, ...]] = {}
         self._closed = False
-        self.error: BaseException | None = None
-        """The first exception a handler raised, or ``None``."""
         self._names: dict[object, str] = {}  # resource -> its name in this run
         self._taken: set[str] = set()  # membership tests only, never iterated
         self._unnamed = 0
@@ -331,11 +330,9 @@ class Bus:
                 return
 
     def _fail(self, exc: BaseException) -> None:
-        if self.error is not None:
-            # A handler raised after a nested emit (from that handler) had
-            # already failed: the first error stands.
-            return
-        self.error = exc
+        # A handler can raise after a nested emit (from that handler) has
+        # already failed, so this may run twice. The loop keeps the first
+        # error (VirtualTimeLoop._on_observer_error); it is the one record.
         self.close()
         self._on_error(exc)
 
