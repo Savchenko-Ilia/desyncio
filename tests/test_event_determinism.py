@@ -127,7 +127,7 @@ def test_until_cut_with_holders_and_waiters_is_repeatable() -> None:
     # (cancelled tasks releasing) added nothing after RunFinished.
     changes = [e for e in events if isinstance(e, ResourceChanged)]
     assert changes[-1].in_use == 1
-    assert max(e.queue_len for e in changes) >= 1
+    assert changes[-1].queue_len >= 1  # waiters were left when the run was cut
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
