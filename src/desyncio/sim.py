@@ -268,9 +268,13 @@ class Sim:
         mode (``desyncio.run(..., debug=True)``) creating tasks, scheduling
         callbacks or timers, ``sim.interrupt``, ``sim.random``,
         ``sim.np_random`` and ``sim.emit`` inside a handler end the run with
-        ``ObserverError`` (raised at the call, except ``loop.call_soon``,
-        which only records it; see :mod:`desyncio.bus`); ``subscribe`` and
-        ``Subscription.close`` stay allowed. The
+        ``ObserverError`` (raised at the call, except ``loop.call_soon`` and
+        a primitive's own event, such as ``ResourceChanged``, emitted during
+        dispatch: those only record it, so the state change completes, D068;
+        see :mod:`desyncio.bus`); ``subscribe`` and ``Subscription.close``
+        stay allowed. Garbage collection during a handler can close a leaked
+        task that held a resource; its release then records an
+        ``ObserverError`` that blames the handler (D068 addendum). The
         guard cannot see direct mutation that schedules nothing, such as
         ``store.shutdown()`` or ``task.cancel()`` with no waiter to wake;
         see :mod:`desyncio.bus`.

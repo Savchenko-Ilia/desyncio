@@ -86,6 +86,12 @@ Python 3.13.18, three runs, median seconds and median "vs 1":
 For reference, the best-of comparison of configuration 3 against 1 gave +21%, +17% and +12% in the same
 three runs: best-of times are noisier here and are not quoted elsewhere.
 
+**A fourth 3.13 run** (by the EVT-07 reviewer, same machine and settings, medians) gave lower ratios:
+one no-op subscriber +12% and the recording subscriber +10% over no subscriber, with a configuration 3
+minus 1 gap of about 4 µs per customer. Its per-configuration times are not recorded here. It is quoted
+so that the three runs above do not read as the expected value: across four runs the no-op subscriber
+cost +12% to +27%.
+
 Python 3.14.6, one run (same machine). Read it with care: here the baseline was 20% faster than
 configuration 1, against 5% to 7% in the 3.13 runs, and the medians were 4% to 28% above the best times:
 
@@ -104,8 +110,10 @@ Summary of the 3.13 runs (medians):
 - **No subscriber vs semaphore baseline:** configuration 1 was +5% to +8% slower than the baseline. That is
   within the noise, and it is an upper bound on the emit points' cost (see above), not a measure of it.
 - **Unrelated subscriber vs no subscriber:** -10% to +6%, i.e. within the noise; no visible cost.
-- **One no-op subscriber vs no subscriber:** +20% to +27%.
-- **Recording subscriber vs no subscriber:** +18% to +33%.
+- **One no-op subscriber vs no subscriber:** +20% to +27% in runs A to C; +12% to +27% with the
+  fourth run.
+- **Recording subscriber vs no subscriber:** +18% to +33% in runs A to C; +10% to +33% with the
+  fourth run.
 
 The "events/s" column the script prints is emitted events divided by the whole run's median time, so it
 is the model's throughput, not the bus's own capacity.
@@ -115,8 +123,8 @@ is the model's throughput, not the bus's own capacity.
 The platform's draft v0.1 wanted at most 20% overhead for one no-op subscriber. The owner has since
 accepted up to **30%** (D069). Both are **informative, not a gate** (D060, D069).
 
-On this M/M/1, one no-op subscriber cost +20% to +27% over no subscriber (medians, three 3.13 runs):
-within the owner's ≤30%, but at or above the draft's 20%. Given the noise, a single run can land
+On this M/M/1, one no-op subscriber cost +12% to +27% over no subscriber (medians, four 3.13 runs; +20%
+to +27% in the three runs tabled above): within the owner's ≤30%, and on either side of the draft's 20%. Given the noise, a single run can land
 either side of 30%; run it on your own machine before quoting a number. The M/M/1 is close to a worst case
 for this ratio: the model does almost nothing besides the resource, and each customer produces about
 three events. A model with real work between resource operations pays proportionally less.
@@ -135,6 +143,6 @@ three events. A model with real work between resource operations pays proportion
   the dataclass constructor (keyword arguments, `t`, `seq`) and the handler is called inline. EVT-02
   measured `sim.emit` at 0.55 s vs 1.24 s per 1e6 calls with no subscriber vs one no-op subscriber, i.e.
   about 0.7 µs more per delivered event; times 2.9 events per customer that is about 2 µs per customer.
-  The gap measured here (configuration 3 minus 1, median µs per customer) is about 7 to 8 µs, larger
-  than that estimate; this benchmark does not show where the rest goes. A recording handler adds the
+  The gap measured here (configuration 3 minus 1, median µs per customer) is about 7 to 8 µs in runs
+  A to C and about 4 µs in the fourth run, larger than that estimate; this benchmark does not show where the rest goes. A recording handler adds the
   list append and the memory of keeping 58184 event objects.

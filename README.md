@@ -45,9 +45,10 @@ step by step.
 
 Everything below is importable from the top level: `from desyncio import Resource, run, sim`.
 
-- `run`: run a coroutine on a fresh virtual-time loop (`seed=`, `until=`, `speed=`, `trace=`)
+- `run`: run a coroutine on a fresh virtual-time loop (`seed=`, `until=`, `speed=`, `trace=`,
+  `subscribers=`, `debug=`)
 - `sim`: the facade used inside a run (`sim.now`, `sim.timeout`, `sim.spawn`, `sim.random`,
-  `sim.np_random`, `sim.interruptible`, `sim.interrupt`)
+  `sim.np_random`, `sim.interruptible`, `sim.interrupt`, `sim.subscribe`, `sim.emit`)
 - `Resource`: counted resource, first come first served
 - `PriorityResource`: served by `(priority, request order)`
 - `PreemptiveResource`: a priority resource whose holders can be preempted
@@ -66,10 +67,16 @@ Everything below is importable from the top level: `from desyncio import Resourc
 - `Schedule`: shifts placed on a `Calendar` (`capacity_at`, `changes`)
 - `ScheduledResource`: a resource whose capacity follows a `Schedule`; a shift end interrupts holders
 - `ShiftEnded`: the `Interrupt.cause` a holder receives when its shift ends
+- `Subscription`: what `sim.subscribe` returns; `close()` it or use it as a context manager
+- `ObserverError`: raised in debug mode when an event handler tries to change the run
 - `RealTimePacer`: pacing for scaled real-time runs
 - `RealIOError`: raised when a simulation tries real I/O
 - `SimulationDeadlock`: raised when nothing can ever run again
 - `__version__`: the package version
+
+The event types (`Event`, `RunStarted`, `RunFinished`, `ResourceChanged`, `EVENT_SCHEMA_VERSION`)
+live in the `desyncio.events` module, which `import desyncio` makes available:
+`from desyncio.events import Event` or `desyncio.events.Event`.
 
 ## Documentation
 
@@ -89,6 +96,11 @@ Everything below is importable from the top level: `from desyncio import Resourc
 
 - [Calendar guide](docs/calendar.md): sim time as real dates with `Calendar`, DST days, weekly
   `Schedule`s of `Shift`s, and a `ScheduledResource` whose holders are interrupted at shift end.
+  The examples are run by the test suite.
+
+- [Observing a simulation](docs/observing.md): the event stream. `sim.subscribe` and
+  `run(subscribers=)`, the built-in events, custom events with `sim.emit` (a block-style model),
+  handler errors, debug mode, and how events relate to `monitor=` and the trace hook.
   The examples are run by the test suite.
 
 ## License
