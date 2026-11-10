@@ -6,6 +6,7 @@ Plain sync tests: ``desyncio.run`` makes its own loop.
 import asyncio
 import gc
 import logging
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import Any
@@ -190,20 +191,31 @@ BAD_SUBSCRIPTIONS: list[tuple[Any, Any, type[Exception]]] = [
 ]
 
 
-@pytest.mark.parametrize(("handler", "kinds", "exc"), BAD_SUBSCRIPTIONS)
-def test_subscribe_validation(handler: Any, kinds: Any, exc: type[Exception]) -> None:
+def test_subscribe_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     async def main() -> None:
-        with pytest.raises(exc):
-            sim.subscribe(handler, kinds=kinds)
+        for handler, kinds, exc in BAD_SUBSCRIPTIONS:
+            with pytest.raises(exc):
+                sim.subscribe(handler, kinds=kinds)
 
     run(main())
-    # The same checks for run(subscribers=...), before anything runs and
-    # without a "coroutine was never awaited" warning.
+    # The same checks for run(subscribers=...), before anything runs: main is
+    # closed and no loop is built. The "coroutine was never awaited" and
+    # "unclosed event loop" warnings come from __del__, so they go to
+    # sys.unraisablehook, not to this frame; record them there.
+    unraisable: list[str] = []
+    monkeypatch.setattr(
+        sys, "unraisablehook", lambda u: unraisable.append(repr(u.exc_value))
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        with pytest.raises(exc):
-            run(main(), subscribers=[(handler, kinds)])
+        for handler, kinds, exc in BAD_SUBSCRIPTIONS:
+            coro = main()
+            with pytest.raises(exc):
+                run(coro, subscribers=[(handler, kinds)])
+            assert coro.cr_frame is None  # closed by run
+            del coro
         gc.collect()
+    assert unraisable == []
 
 
 @pytest.mark.parametrize("subscribers", [5, [(print,)], [(print, None, None)]])
