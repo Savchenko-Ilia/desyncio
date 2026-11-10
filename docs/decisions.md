@@ -436,3 +436,7 @@ The D067 probe, on `integration` with EVT-04: a debug-mode handler that drives a
 
 ## D069 — Event overhead up to 30% is acceptable (owner)
 EVT-07 measured one no-op subscriber for all events at about +18% to +21% on a `Resource`-based M/M/1 (+37% in one noisy run), and a recording subscriber at about +25% to +27%. The draft's ≤20% was informative. The owner: "30% is also ok." So the informative target for one no-op subscriber is ≤30%; it is still not a gate. No optimisation of the emit path (bus.py) is scheduled for module 6.
+
+## D070 — Batch 32 review promotions (lead)
+- **EVT-03 (FAIL, 1 MUST):** the `kinds`-filter seq test could not catch a filter that renumbers densely from 1, because `ResourceChanged` is one contiguous seq block in the model. Three SHOULDs promoted with it, all in the test file: assert waiters are still queued at the `until` cut; show the child's stderr when the subprocess fails; and a comment naming the real teardown guard ("the last event is `RunFinished`"), since 3-run equality in one process is not a reliable guard for address-dependent teardown order.
+- **EVT-07 (PASS, SHOULDs only):** promoted to MUST, because the README's numbers and claims must be true of the script (D011): warm every configuration, rotate the order, collect garbage between runs, quote medians; validate `--reps`/`--customers`; replace four claims the reviewer could not reproduce with measured ranges; compare against the owner's ≤30% (D069).
