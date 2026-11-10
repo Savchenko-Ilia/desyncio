@@ -1339,3 +1339,18 @@ Branch: feat/EVT-01 + fix/EVT-01-1  ·  Merged: 453562a
 **Gotchas.** Dropping `frozen=True` from a built-in fails at collection (TypeError), not as a test failure: loud enough.
 
 **Follow-ups (SHOULD).** Assert the derived list is non-empty (otherwise the test is vacuous if the module filter ever stops matching). An `Event` subclass imported into `events.py` from elsewhere would be skipped by the `__module__` filter.
+
+## EVT-02 — Event bus (2026-11-10, batch 30)
+Branch: feat/EVT-02 + fix/EVT-02-1  ·  Merged: 5fa61f2
+
+**Approach.** New `desyncio/bus.py` with `Bus` and `Subscription` (re-exported from `desyncio.events`). One bus per loop, on `_LoopState` (D017; the loop exposes it as a `bus` property). `sim.subscribe(handler, kinds=None)` and `sim.emit(Kind, **fields)`; `run(..., subscribers=[...])`, forwarded by `replicate` (the same handlers for every replication). Dispatch is inline and in subscription order, over a per-class cache of interested handlers (copy-on-write tuples, cleared on subscribe/close), so (un)subscribing during dispatch applies from the next event. `seq` ticks on every emit; with no interested handler nothing is built. Two helpers for primitives: `emit_event(Kind, **fields)` (no-op off a `VirtualTimeLoop`) and `register_resource_name(resource, name)` (idempotent per run; automatic `resource-N` skips taken names, D064).
+
+**asyncio internals.** `RunStarted` is queued with `loop.call_soon` before `Runner.run` creates the main task; `_ready` is FIFO, so it is delivered inside the loop before main's first step. `RunFinished` is delivered in `run()`'s `finally`, after the loop has stopped (for `until`, `_LimitReached` has already unwound it), so its handlers cannot use `sim`. Then the bus closes, before `runner.close()` cancels leftover tasks (D057). Handler errors and trace-sink errors share one path, `_on_observer_error`: first error wins, `loop.stop()` (only while running and not closing) ends the iteration, `run_forever` raises it; `pop_trace_error` became `pop_observer_error`.
+
+**Trade-offs.** `RunFinished` outside the running loop was the only way to deliver it for `until`. Catching `BaseException` in dispatch (KeyboardInterrupt contained, then re-raised by `run`) follows the tracer's rule. `kinds=()` raises `ValueError` (use `None`).
+
+**Review findings.** Round 1: one MUST, a validation test that could not fail (never-awaited warnings go to `sys.unraisablehook`, not `warnings`; now it checks `cr_frame is None` and hooks `unraisablehook`). Three SHOULDs promoted (D064): automatic names skip taken names; the unused `Bus.error` removed; subscribe-after-close tested. The re-review killed 20 mutants; the 4 survivors are equivalent. Probes: 48 handler-failure positions on the grant/release/handover paths of three resource classes leaked nothing; `until` with leftover tasks gave identical lists over 3 runs.
+
+**Gotchas.** A handler failing in main's last step while main also raises: `run` raises the handler error and main's exception is dropped (no `__context__`); a `RunFinished` handler error carries main's exception as `__context__`. Documented in `run`. Emit cost, 1e6 calls (informative): `sim.emit` 0.55 s with no subscriber, 1.24 s with one no-op subscriber; `emit_event` 0.28 s / 0.88 s.
+
+**Follow-ups (SHOULD).** Test the "dropped, no `__context__`" half of that docstring. `test_run_subscribers_shape` could fold into `test_subscribe_validation`.
