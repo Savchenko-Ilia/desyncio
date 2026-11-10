@@ -90,8 +90,9 @@ def test_same_events_in_a_fresh_interpreter() -> None:
             env={**os.environ, "PYTHONHASHSEED": hashseed},  # keeps PATH etc.
             capture_output=True,
             text=True,
-            check=True,
+            check=False,
         )
+        assert out.returncode == 0, out.stderr  # show the child's traceback
         assert out.stdout.strip() == expected
 
 
