@@ -113,9 +113,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
-- **Determinism scope:** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
+- **Determinism scope (owner: "later"; the guide already says "one runtime build"):** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
 - **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. `sim.stop()` is a post-module-6 candidate (D061: Hodos would use it for its run caps, not blocking).
-- **Determinism scope** (owner: "later").
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
