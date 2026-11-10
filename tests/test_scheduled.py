@@ -2,8 +2,9 @@
 
 import asyncio
 import itertools
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, time
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,6 +13,7 @@ import desyncio
 from desyncio import Interrupt, sim
 from desyncio.dates import Calendar
 from desyncio.loop import SimulationDeadlock, VirtualTimeLoop
+from desyncio.resource import PreemptiveResource, PriorityResource, Resource
 from desyncio.schedule import Schedule, Shift
 from desyncio.scheduled import ScheduledResource, ShiftEnded
 from desyncio.trace import ListSink
@@ -35,6 +37,28 @@ def day_shifts() -> Schedule:
 def test_outside_a_run_raises() -> None:
     with pytest.raises(RuntimeError):
         ScheduledResource(day_shifts())
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        Resource,
+        PriorityResource,
+        PreemptiveResource,
+        lambda **kw: ScheduledResource(day_shifts(), **kw),
+    ],
+    ids=["Resource", "PriorityResource", "PreemptiveResource", "ScheduledResource"],
+)
+def test_resource_name(make: Callable[..., Any]) -> None:
+    async def main() -> None:
+        assert make().name is None
+        assert make(name="desk").name == "desk"
+        with pytest.raises(TypeError, match="name"):
+            make(name=3)
+        with pytest.raises(ValueError, match="name"):
+            make(name="")
+
+    desyncio.run(main())
 
 
 def test_a_day_of_customers() -> None:

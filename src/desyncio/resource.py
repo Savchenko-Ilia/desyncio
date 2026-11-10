@@ -112,8 +112,23 @@ def _call_monitor(primitive: object, monitor: Callable[[Any], object] | None) ->
         report_monitor_error("Resource monitor raised", exc, "resource", primitive)
 
 
+def _check_name(name: str | None) -> str | None:
+    """Validate the optional resource ``name`` (shared by all four resources)."""
+    if name is not None:
+        if not isinstance(name, str):
+            raise TypeError(f"name must be a str, got {type(name).__name__}")
+        if not name:
+            raise ValueError("name must not be empty")
+    return name
+
+
 class Resource:
     """``capacity`` interchangeable units, handed out first-come first-served.
+
+    ``name`` (keyword-only, optional) labels the resource: a non-``str`` raises
+    ``TypeError``, an empty string ``ValueError``; the ``name`` property returns
+    it, or ``None``. It will appear in ``ResourceChanged.resource`` once events
+    exist. All four resource classes take it.
 
     ``monitor``, if given, is called as ``monitor(resource)`` synchronously
     after every state change: a request queueing, a request being granted,
@@ -139,6 +154,7 @@ class Resource:
         capacity: int = 1,
         *,
         monitor: Callable[["Resource"], object] | None = None,
+        name: str | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError(f"capacity must be an int, got {type(capacity).__name__}")
@@ -146,11 +162,17 @@ class Resource:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
+        self._name = _check_name(name)
         self._capacity = capacity
         self._monitor = monitor
         self._sem = asyncio.Semaphore(capacity)  # does all waiting and queueing
         self._count = 0
         self._queue_length = 0
+
+    @property
+    def name(self) -> str | None:
+        """The name given at construction, or ``None``."""
+        return self._name
 
     @property
     def capacity(self) -> int:
@@ -271,8 +293,9 @@ class PriorityResource:
     that very instant. A newcomer with a strictly better key legitimately
     goes first. Introspection (``capacity``, ``count``, ``queue_length``),
     cancellation and the ``monitor`` contract (D023 v2) are as for
-    ``Resource``: ``queue_length`` counts a request that has been handed a
-    unit but whose task has not resumed yet, and ``count`` includes it only
+    ``Resource`` (``name`` too: it will appear in ``ResourceChanged.resource``
+    once events exist): ``queue_length`` counts a request that has been handed
+    a unit but whose task has not resumed yet, and ``count`` includes it only
     once it has. Release is synchronous, so a cancel, timeout or interrupt
     arriving at the holder's exit cannot leak the unit. See the module
     docstring for how waiting is built (per-request futures, D030).
@@ -284,6 +307,7 @@ class PriorityResource:
         capacity: int = 1,
         *,
         monitor: Callable[["PriorityResource"], object] | None = None,
+        name: str | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError(f"capacity must be an int, got {type(capacity).__name__}")
@@ -291,6 +315,7 @@ class PriorityResource:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
+        self._name = _check_name(name)
         self._capacity = capacity
         self._monitor = monitor
         # Waiters in key order. The seq number is unique, so tuples compare on
@@ -301,6 +326,11 @@ class PriorityResource:
         self._seq = itertools.count()
         self._count = 0  # units held by tasks that have resumed
         self._granted = 0  # units handed to a waiter that has not resumed yet
+
+    @property
+    def name(self) -> str | None:
+        """The name given at construction, or ``None``."""
+        return self._name
 
     @property
     def capacity(self) -> int:
@@ -617,7 +647,8 @@ class PreemptiveResource(PriorityResource):
       one (a preemptor that has just taken a unit is itself a holder).
 
     ``count`` and ``queue_length`` keep their ``PriorityResource`` meaning.
-    The monitor contract (D023 v2) is unchanged. Create it inside the run.
+    The monitor contract (D023 v2) is unchanged, and ``name`` is as for
+    ``Resource``. Create it inside the run.
     """
 
     def __init__(
@@ -625,8 +656,9 @@ class PreemptiveResource(PriorityResource):
         capacity: int = 1,
         *,
         monitor: Callable[[PriorityResource], object] | None = None,
+        name: str | None = None,
     ) -> None:
-        super().__init__(capacity, monitor=monitor)
+        super().__init__(capacity, monitor=monitor, name=name)
         # Every ticket that currently has a unit (reservation or holder).
         self._unit_tickets: list[_Ticket] = []
         # Plain ``async with res:`` per task, innermost last.
