@@ -209,11 +209,14 @@ class Resource:
     def _register(self) -> None:
         """Register with the running run's bus before any state change (D060).
 
-        Called at the top of every acquire, the only way into a run: every
-        other change (a release, a cancelled waiter) belongs to an acquire made
-        earlier in the same run, since teardown ends every holder and waiter
-        before the run is over. So ``_run_name`` is always this run's name, and
-        the cost is one running-loop lookup and one dict lookup per acquire.
+        Called at the top of every acquire, the only way into a run. With
+        ``async with`` every other change (a release, a cancelled waiter)
+        belongs to an acquire made earlier in the same run, since teardown ends
+        every holder and waiter before the run is over, so ``_run_name`` is
+        this run's name. Holding a unit across runs (calling ``__aenter__`` in
+        one run and ``__aexit__`` in a later one by hand) is unsupported: that
+        release reports under the name from the run that acquired it. The cost
+        is one running-loop lookup and one dict lookup per acquire.
         """
         self._run_name = register_resource_name(self, self._name)
 
