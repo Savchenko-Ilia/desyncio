@@ -398,3 +398,9 @@ The owner asked the desyncio and Hodos lead sessions to discuss the plan. The Ho
 - Hodos pins a desyncio `integration` commit once EVT-01, EVT-02 and EVT-04 are merged (after batch 31), and moves to `main` when the owner merges.
 - **Early stop without `sim.stop()`:** Hodos caps a run at 200k events or 10 s of wall time by raising its own exception from the recorder. Under D058 that is the endorsed pattern, and EVT-02 now tests it: every event up to the failing one is delivered, there is no `RunFinished`, `run()` raises that exception, and teardown completes. A `sim.stop()` with reason `stopped` would be cleaner; it is a candidate for after module 6, not blocking.
 - **Later, not module 6:** thread-safe command injection in real-time mode (live runs), and decision points / "run until the next decision" for RL.
+
+## D062 — Hodos's priority list for module 6 (lead)
+The Hodos lead sent its needs in priority order (owner's request): EVT-01, RES-04, EVT-02, EVT-04, EVT-03 are on its critical path; EVT-06, EVT-07 and EVT-08 are welcome but not. It matches batches 29–32, so the order stays. Two small changes:
+- Subclassing `Event` is a documented, supported public contract, tested with a user subclass (EVT-01).
+- `Event`, `Subscription` and `ObserverError` are importable from `desyncio.events` before EVT-08 does the top-level exports: `Subscription` by EVT-02, `ObserverError` by EVT-06 (both now own `events.py`; they are in different batches from EVT-01 and from each other's batch partner).
+The lead sends Hodos the `integration` SHA after batch 30 and after batch 31. Hodos's later list (`sim.stop()`, a WASM/no-self-pipe loop mode and a browser pacer, cross-thread commands in real time, RL decision points, correctly rounded sampling) is recorded in the handoff, unscheduled.
