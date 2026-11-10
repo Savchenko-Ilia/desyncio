@@ -40,7 +40,9 @@ Rules:
 * Do not fill in ``t`` and ``seq`` yourself. The intended use is
   ``sim.emit(OrderShipped, order_id=7, carrier="x")``: the sim supplies ``t``
   and ``seq`` and builds the event only if somebody subscribed to that kind.
-  (``sim.emit`` is added by EVT-02; it does not exist yet.)
+
+:class:`Subscription` (what ``sim.subscribe`` returns) is defined in
+:mod:`desyncio.bus` and re-exported here.
 """
 
 from __future__ import annotations
@@ -48,12 +50,16 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, Literal
 
+# bus.py imports this module only inside functions, so there is no cycle.
+from desyncio.bus import Subscription
+
 __all__ = [
     "EVENT_SCHEMA_VERSION",
     "Event",
     "ResourceChanged",
     "RunFinished",
     "RunStarted",
+    "Subscription",
 ]
 
 #: Bumped on any change to the fields of a built-in event.

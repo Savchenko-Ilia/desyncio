@@ -6,6 +6,7 @@ from typing import Any, assert_type
 import pytest
 
 from desyncio import run, sim
+from desyncio.events import Event, RunStarted
 from desyncio.experiment import confidence_interval, replicate
 
 
@@ -28,6 +29,17 @@ def test_replicate_is_deterministic_and_seeds_are_distinct() -> None:
 
 def test_replicate_passes_until_through() -> None:
     assert replicate(_model, 2, until=0.5) == [None, None]
+
+
+def test_replicate_forwards_subscribers_to_every_run() -> None:
+    seen: list[tuple[str, int]] = []
+
+    def record(e: Event) -> None:
+        seen.append((type(e).__name__, getattr(e, "seed", -1)))
+
+    # A generator: replicate must read it once, not exhaust it in run 0.
+    replicate(_model, 2, seed=5, subscribers=(h for h in [(record, (RunStarted,))]))
+    assert seen == [("RunStarted", 5), ("RunStarted", 6)]
 
 
 def test_replicate_overload_types() -> None:

@@ -26,12 +26,15 @@ from random import Random
 from typing import TYPE_CHECKING, Any
 
 from desyncio._validate import to_float
+from desyncio.bus import Handler, Subscription
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_random_streams
 
 if TYPE_CHECKING:
     import numpy as np
+
+    from desyncio.events import Event
 
 _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
@@ -221,6 +224,53 @@ class Sim:
         """
         _loop()
         interrupt_task(task, cause)
+
+    def subscribe(
+        self, handler: Handler, *, kinds: "tuple[type[Event], ...] | None" = None
+    ) -> Subscription:
+        """Call ``handler(event)`` for every event of this run from now on.
+
+        ``handler`` is a plain function (an ``async def`` is refused); it is
+        called synchronously at each emit point, in subscription order (see
+        :mod:`desyncio.bus` for why). ``kinds`` restricts it to events that
+        are instances of one of these ``Event`` subclasses; ``None`` (the
+        default) means every event. Subscribing (or closing) while an event
+        is being delivered takes effect from the next event.
+
+        If ``handler`` raises, the exception never reaches the emitting
+        task: delivery stops for good, the loop stops after the current
+        iteration, and ``desyncio.run`` raises that exception (D058).
+
+        To see ``RunStarted``, subscribe with ``desyncio.run(...,
+        subscribers=[...])`` instead.
+
+        Returns:
+            a :class:`~desyncio.events.Subscription`; ``close()`` it, or use
+            it as a context manager, to stop receiving events.
+
+        Raises:
+            TypeError: ``handler`` is not callable or is an ``async def``
+                function (best effort), or ``kinds`` is not a tuple of
+                ``Event`` subclasses.
+            ValueError: ``kinds`` is an empty tuple.
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        return _loop().bus.subscribe(handler, kinds)
+
+    def emit(self, kind: "type[Event]", /, **fields: Any) -> None:
+        """Emit a custom event: ``sim.emit(OrderShipped, order_id=7)``.
+
+        The sim fills in ``t`` (``sim.now``) and ``seq``. ``seq`` advances on
+        every call, whether or not anyone listens; the event object is built
+        only if a subscriber wants ``kind``. Field names are therefore
+        checked (by the dataclass constructor) only when it is built.
+
+        Raises:
+            TypeError: ``kind`` is not an ``Event`` subclass; or, when the
+                event is built, ``fields`` do not match its fields.
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        _loop().bus.emit(kind, fields)
 
 
 sim = Sim()
