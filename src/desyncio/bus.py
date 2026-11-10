@@ -75,6 +75,62 @@ emitted during teardown would differ between identical runs. After closing,
 ``emit`` is a silent no-op (it still validates the kind), and ``subscribe``
 returns an already closed subscription, so teardown code never fails on them.
 
+The observer guard (debug mode, D059)
+-------------------------------------
+Handlers observe; they must not change the run. In asyncio debug mode
+(``desyncio.run(..., debug=True)``, ``PYTHONASYNCIODEBUG=1`` or
+``loop.set_debug(True)``) the calls through which a handler would change it
+raise :class:`ObserverError` while a handler runs: creating a task
+(``sim.spawn``, ``asyncio.create_task``, ``loop.create_task``), scheduling a
+callback (``loop.call_soon``, ``call_later``, ``call_at``,
+``call_at_priority``, so also ``asyncio.sleep`` and a future's
+``set_result`` when someone waits on it), ``sim.interrupt``, ``sim.random``,
+``sim.np_random`` and emitting (``sim.emit`` and primitives' events).
+``sim.subscribe`` and ``Subscription.close`` stay allowed.
+
+How it knows "a handler runs": :meth:`Bus._deliver` sets ``_dispatching``
+for exactly the duration of the handler calls (saved and restored, so
+nested emits and a raising handler leave it right). Delivery is synchronous,
+so anything that happens while the flag is set was called, directly or
+indirectly, by handler code: the loop's own scheduling never runs inside a
+handler. ``RunStarted`` is delivered *from* a ``call_soon`` callback and
+``RunFinished`` after the loop has stopped, but in both cases the flag is
+only set inside the handler call itself. ``call_soon_threadsafe`` is not
+guarded: other threads (a real-time pacer's ``resume``) and asyncio's own
+async-generator finalizer (which garbage collection can run in the middle
+of a handler) use it, and they are not handler code.
+
+The guard records the error with the bus (as if the handler had raised it)
+before raising, so a handler that catches ``ObserverError`` still ends the
+run (D058).
+
+``loop.call_soon`` is the exception to "raise": it records the error but
+does not raise, and the callback is scheduled as usual. asyncio's own code
+calls it on the handler's behalf in the middle of a state change: a
+handler's ``fut.set_result(...)`` (or ``event.set()``, ``queue.put_nowait``,
+``task.cancel()``) marks the future done and clears its callback list, then
+schedules the waiters' wake-ups with ``call_soon``. Raising there would lose
+those wake-ups, and a task whose wake-up is lost can no longer even be
+cancelled, so teardown would deadlock and ``run`` would raise
+``SimulationDeadlock`` instead (probe-verified). So the call completes, the
+loop stops after the current iteration, and ``run`` raises the
+``ObserverError``, whose notes show where the handler made the call. Every
+other guarded call raises before it changes anything.
+
+Outside debug mode nothing is checked and a violation's effect is
+undefined. The flag itself is always maintained (two attribute stores
+per delivered event); the checks sit in the existing ``if self._debug``
+branches of the loop (``VirtualTimeLoop._check_callback``, which asyncio
+calls only in debug mode, and ``create_task``) and behind one
+``_dispatching`` test in ``emit``.
+
+What the guard cannot see: direct mutation of model objects that does not
+go through those calls, e.g. ``store.shutdown()`` or ``task.cancel()`` when
+nobody is waiting yet (once a waiter is woken, ``call_soon`` sees it, as
+above), changing a resource's attributes, or drawing from a
+``random.Random`` stream that the handler got before the dispatch (or from
+``current_random_streams()``).
+
 Helpers for primitives
 ----------------------
 :func:`emit_event` and :func:`register_resource_name` are for desyncio's own
@@ -85,6 +141,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import traceback
 from collections.abc import Callable, Iterable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -94,7 +151,24 @@ from desyncio.loop import VirtualTimeLoop
 if TYPE_CHECKING:
     from desyncio.events import Event
 
-__all__ = ["Bus", "Subscription", "emit_event", "register_resource_name"]
+__all__ = [
+    "Bus",
+    "ObserverError",
+    "Subscription",
+    "emit_event",
+    "register_resource_name",
+]
+
+
+class ObserverError(RuntimeError):
+    """An event handler tried to change the run (debug mode only, D059).
+
+    Raised in asyncio debug mode by the calls listed in the module docstring
+    when an event handler makes them. A ``RuntimeError``, like asyncio's own
+    "wrong context" errors (``call_soon`` from another thread in debug mode).
+    It is a handler error: delivery stops and ``desyncio.run`` raises it.
+    """
+
 
 Handler = Callable[[Any], object]
 """A plain callable taking one event. Typed with ``Any`` so that a handler
@@ -232,11 +306,16 @@ class Bus:
         time: returns the current virtual time (stamps ``t``).
         on_error: called with the exception a handler raised. Normally
             once; again only if a handler raises after a nested emit inside
-            it already failed, so ``on_error`` must keep the first.
+            it already failed (or after catching an ``ObserverError``), so
+            ``on_error`` must keep the first.
+        debug: returns whether the observer guard is on (the loop's
+            ``get_debug``); ``None`` means never.
     """
 
     __slots__ = (
         "_closed",
+        "_debug",
+        "_dispatching",
         "_names",
         "_on_error",
         "_seq",
@@ -248,10 +327,16 @@ class Bus:
     )
 
     def __init__(
-        self, time: Callable[[], float], on_error: Callable[[BaseException], object]
+        self,
+        time: Callable[[], float],
+        on_error: Callable[[BaseException], object],
+        debug: Callable[[], bool] | None = None,
     ) -> None:
         self._time = time
         self._on_error = on_error
+        self._debug = debug
+        # True while handlers are being called; see "The observer guard".
+        self._dispatching = False
         self._seq = 0
         # Copy-on-write: a new tuple on every (un)subscribe, so a dispatch in
         # progress keeps iterating the snapshot it started with.
@@ -267,6 +352,33 @@ class Bus:
     def closed(self) -> bool:
         """True after :meth:`close` or after a handler error."""
         return self._closed
+
+    @property
+    def guarding(self) -> bool:
+        """True while a handler runs and the observer guard is on."""
+        return self._dispatching and self._debug is not None and self._debug()
+
+    def forbid(self, call: str, *, raised: bool = True) -> ObserverError:
+        """Record and return the ``ObserverError`` for ``call`` made by a handler.
+
+        With ``raised`` the caller raises it; recording it first (as a handler
+        error) means a handler that catches it still ends the run. Without,
+        the call goes on (see ``loop.call_soon`` in the module docstring) and
+        the current stack is attached as a note, since the error is raised
+        later, by ``run``, with no traceback into the handler.
+        """
+        error = ObserverError(
+            f"{call} was called from an event handler: observers must not "
+            "change the run (no new tasks, callbacks, timers, interrupts, "
+            "random draws or events); the guard is on because the loop is in "
+            "asyncio debug mode"
+        )
+        if not raised:
+            # Drop forbid, _check_callback and call_soon themselves.
+            stack = traceback.format_stack()[:-3]
+            error.add_note("called from:\n" + "".join(stack).rstrip())
+        self._fail(error)
+        return error
 
     def subscribe(self, handler: Handler, kinds: Kinds | None = None) -> Subscription:
         """Add a subscription at the end of the delivery order.
@@ -292,7 +404,10 @@ class Bus:
         Raises:
             TypeError: ``kind`` is not an ``Event`` subclass (always checked),
                 or the constructor rejects ``fields`` (only when built).
+            ObserverError: called from a handler in debug mode.
         """
+        if self._dispatching and self.guarding:
+            raise self.forbid("emit (sim.emit or a primitive's event)")
         try:
             handlers = self._wanted[kind]
         except (KeyError, TypeError):  # TypeError: unhashable, so not a class
@@ -317,17 +432,24 @@ class Bus:
         return handlers
 
     def _deliver(self, event: Event, handlers: tuple[Handler, ...]) -> None:
-        for handler in handlers:
-            # Closed by a failure, possibly in a nested emit from a handler.
-            if self._closed:
-                return
-            try:
+        # Saved and restored, not just set and cleared: a handler may emit
+        # (outside debug mode), and the inner dispatch must leave it True.
+        outer = self._dispatching
+        self._dispatching = True
+        try:
+            for handler in handlers:
+                # Closed by a failure, possibly in a nested emit from a handler.
+                if self._closed:
+                    return
                 handler(event)
-            except BaseException as exc:
-                # BaseException on purpose, as in Tracer.emit: nothing a
-                # handler raises (CancelledError included) may reach the task.
-                self._fail(exc)
-                return
+        except BaseException as exc:
+            # BaseException on purpose, as in Tracer.emit: nothing a handler
+            # raises (CancelledError included) may reach the task. The flag is
+            # cleared first: _fail is the bus's own code, not the handler's.
+            self._dispatching = outer
+            self._fail(exc)
+        finally:
+            self._dispatching = outer
 
     def _fail(self, exc: BaseException) -> None:
         # A handler can raise after a nested emit (from that handler) has

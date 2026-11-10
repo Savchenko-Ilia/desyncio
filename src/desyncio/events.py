@@ -41,7 +41,8 @@ Rules:
   ``sim.emit(OrderShipped, order_id=7, carrier="x")``: the sim supplies ``t``
   and ``seq`` and builds the event only if somebody subscribed to that kind.
 
-:class:`Subscription` (what ``sim.subscribe`` returns) is defined in
+:class:`Subscription` (what ``sim.subscribe`` returns) and
+:class:`ObserverError` (the debug-mode observer guard, D059) are defined in
 :mod:`desyncio.bus` and re-exported here.
 """
 
@@ -51,11 +52,12 @@ from dataclasses import dataclass, fields
 from typing import Any, Literal
 
 # bus.py imports this module only inside functions, so there is no cycle.
-from desyncio.bus import Subscription
+from desyncio.bus import ObserverError, Subscription
 
 __all__ = [
     "EVENT_SCHEMA_VERSION",
     "Event",
+    "ObserverError",
     "ResourceChanged",
     "RunFinished",
     "RunStarted",

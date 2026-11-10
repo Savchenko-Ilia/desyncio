@@ -334,7 +334,9 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         # isinstance checks), and events.py imports bus.py.
         from desyncio.bus import Bus
 
-        self._state = _LoopState(Bus(self.time, self._on_observer_error))
+        self._state = _LoopState(
+            Bus(self.time, self._on_observer_error, self.get_debug)
+        )
         if trace is not None:
             self._state.tracer = Tracer(trace, self.time, self._on_trace_error)
         self.pacer = pacer
@@ -448,7 +450,8 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         self._check_closed()  # type: ignore[attr-defined]
         if self._debug:  # type: ignore[attr-defined]
             self._check_thread()  # type: ignore[attr-defined]
-            self._check_callback(callback, api_name)  # type: ignore[attr-defined]
+            # Also the observer guard (D059); see _check_callback below.
+            self._check_callback(callback, api_name)
         timer = PriorityTimerHandle(
             when, priority, next(self._state.sequence), callback, args, self, context
         )
@@ -456,6 +459,41 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         heapq.heappush(self._scheduled, timer)  # type: ignore[attr-defined]
         timer.mark_scheduled()
         return timer
+
+    def _check_callback(self, callback: object, method: str) -> None:
+        """asyncio's debug-mode callback check, plus the observer guard (D059).
+
+        Stock ``call_soon`` and ``call_soon_threadsafe`` (and our
+        ``_schedule``, behind ``call_at``, ``call_later`` and
+        ``call_at_priority``) call this only inside their ``if self._debug:``
+        branch, so overriding it costs nothing outside debug mode and copies
+        no CPython code.
+
+        While an event handler runs:
+
+        * ``call_at`` / ``call_at_priority`` (``call_later`` ends in
+          ``call_at``) raise :class:`~desyncio.bus.ObserverError` before the
+          timer is created.
+        * ``call_soon`` records the ``ObserverError`` (the run ends after
+          the current iteration) but does **not** raise: asyncio calls it on
+          the handler's behalf from the middle of ``fut.set_result()`` (a
+          handler resolving a future someone awaits), and raising there
+          would lose the waiters' wake-ups and deadlock teardown.
+        * ``call_soon_threadsafe`` is not guarded: other threads and
+          asyncio's async-generator finalizer use it (see
+          :mod:`desyncio.bus`).
+        """
+        super()._check_callback(callback, method)  # type: ignore[misc]
+        bus = self._state.bus
+        if bus._dispatching:
+            if method == "call_soon":
+                bus.forbid(
+                    "loop.call_soon (directly, or by resolving a future or "
+                    "waking a task)",
+                    raised=False,
+                )
+            elif method != "call_soon_threadsafe":
+                raise bus.forbid(f"loop.{method}")
 
     def name_next_task(self, name: str) -> None:
         """Give the next task created without an explicit name this ``name``.
@@ -578,9 +616,17 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         *Tracing.* If the loop has a trace sink, the coroutine is wrapped in a
         :class:`~desyncio.trace._TracedCoroutine` (see :mod:`desyncio.trace`).
         Otherwise the user's coroutine goes to the Task untouched.
+
+        *Observer guard.* In debug mode a task created by an event handler
+        raises :class:`~desyncio.bus.ObserverError` (D059); the coroutine is
+        closed so it does not also warn "never awaited".
         """
         self._check_closed()  # type: ignore[attr-defined]
         state = self._state
+        if self._debug and state.bus._dispatching:  # type: ignore[attr-defined]
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise state.bus.forbid("create_task (sim.spawn, asyncio.create_task)")
         if name is None:
             if state.next_task_name is not None:
                 name, state.next_task_name = state.next_task_name, None

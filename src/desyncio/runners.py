@@ -5,9 +5,9 @@ This module is named ``runners`` (like ``asyncio.runners``, which holds
 ``desyncio.run``.
 
 ``desyncio.run(main(), until=None, seed=0, speed=None, pacer=None, trace=None,
-subscribers=None)`` is the simulation counterpart of ``asyncio.run``. Four things
-are worth understanding here (real-time pacing is covered in
-:mod:`desyncio.realtime`).
+subscribers=None, debug=None)`` is the simulation counterpart of
+``asyncio.run``. Four things are worth understanding here (real-time
+pacing is covered in :mod:`desyncio.realtime`).
 
 Task lifetimes and shutdown
 ---------------------------
@@ -154,6 +154,7 @@ def run[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> T: ...
 @overload
 def run[T](
@@ -165,6 +166,7 @@ def run[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> T | None: ...
 def run[T](
     main: Coroutine[Any, Any, T],
@@ -175,6 +177,7 @@ def run[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> T | None:
     """Run ``main`` on a fresh virtual-time loop and return its result.
 
@@ -213,6 +216,20 @@ def run[T](
             anything retrieved it). A ``RunFinished`` handler runs after
             ``main``'s exception has reached ``run``, so ``run`` raises the
             handler's exception with ``main``'s as its ``__context__``.
+        debug: asyncio debug mode, passed to ``asyncio.Runner(debug=...)``
+            with the same meaning as in ``asyncio.run``: ``None`` (default)
+            keeps asyncio's default, so ``PYTHONASYNCIODEBUG=1`` and
+            ``python -X dev`` switch it on. In debug mode the observer guard
+            is on (D059): an event handler that creates a task, schedules a
+            callback or timer, calls ``sim.interrupt``, ``sim.random``,
+            ``sim.np_random`` or ``sim.emit`` gets ``ObserverError``, which
+            ends the run like any handler error (``loop.call_soon``, also
+            reached by resolving a future someone awaits, records it without
+            raising; see :mod:`desyncio.bus`). The guard cannot see direct
+            mutation that schedules nothing (``store.shutdown()`` or
+            ``task.cancel()`` with no waiter to wake, a random stream
+            fetched before the event). It does not change a run in
+            which no handler breaks the rule.
 
     Returns:
         ``main``'s result, or ``None`` if ``until`` was reached first (the
@@ -221,13 +238,15 @@ def run[T](
 
     Raises:
         TypeError: ``main`` is not a coroutine, ``until`` / ``seed`` /
-            ``speed`` / ``pacer`` / ``subscribers`` has the wrong type, or
-            both ``speed`` and ``pacer`` are given.
+            ``speed`` / ``pacer`` / ``subscribers`` / ``debug`` has the wrong
+            type, or both ``speed`` and ``pacer`` are given.
         ValueError: ``until`` is NaN, infinite or negative; ``seed`` is
             negative; ``speed`` is not > 0; a subscriber's ``kinds`` is empty.
         RuntimeError: called from inside a running event loop.
         SimulationDeadlock: every task is blocked and no timer is pending.
         SimulationCleanupError: a cancellation handler needed time to pass.
+        ObserverError: in debug mode, an event handler tried to change the
+            run (see ``debug``).
         Exception: whatever ``main`` raises. The loop is closed first.
     """
     if not asyncio.iscoroutine(main):
@@ -255,6 +274,8 @@ def run[T](
                 f"pacer must be a RealTimePacer, got {type(pacer).__name__}"
             )
         pairs = check_subscribers(subscribers)
+        if debug is not None and not isinstance(debug, bool):
+            raise TypeError(f"debug must be a bool or None, got {type(debug).__name__}")
         clock = _BoundedClock(limit)
         # Build the loop here, not lazily inside Runner.run: binding the pacer
         # can fail (it is bound to another live loop), and Runner.run would
@@ -278,7 +299,7 @@ def run[T](
     started = {"seed": seed, "until": None if until is None else limit}
     loop.call_soon(bus.emit, RunStarted, started, context=context)
 
-    runner = asyncio.Runner(loop_factory=lambda: loop)
+    runner = asyncio.Runner(debug=debug, loop_factory=lambda: loop)
     reason: Literal["main_returned", "until", "error"] = "error"
     try:
         try:
