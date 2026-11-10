@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import pytest
 
+from desyncio import events
 from desyncio.events import (
     EVENT_SCHEMA_VERSION,
     Event,
@@ -16,7 +17,15 @@ from desyncio.events import (
     RunStarted,
 )
 
-BUILTINS = [Event, RunStarted, RunFinished, ResourceChanged]
+# Every Event class defined in desyncio.events (Event itself included), derived
+# from the module so a new built-in cannot be missed by the checks below.
+BUILTINS = [
+    obj
+    for obj in vars(events).values()
+    if isinstance(obj, type)
+    and issubclass(obj, Event)
+    and obj.__module__ == events.__name__
+]
 PRIMITIVES = {int, float, str, bool, type(None)}
 SAMPLE: dict[Any, Any] = {int: 1, float: 1.0, str: "x", bool: True, type(None): None}
 
@@ -40,8 +49,13 @@ def _build(cls: type[Event]) -> Event:
     return cls(**kwargs)
 
 
-def test_schema_version() -> None:
+def test_schema_version_and_exports() -> None:
     assert EVENT_SCHEMA_VERSION == 1
+    # Both directions: every export is the version or a checked built-in, and
+    # every built-in is exported.
+    exported = set(events.__all__) - {"EVENT_SCHEMA_VERSION"}
+    assert exported == {cls.__name__ for cls in BUILTINS}
+    assert all(getattr(events, name) in BUILTINS for name in exported)
 
 
 @pytest.mark.parametrize("cls", BUILTINS)
@@ -50,6 +64,8 @@ def test_builtin_events_are_primitive_frozen_slotted(cls: type[Event]) -> None:
         assert _leaf_types(tp) <= PRIMITIVES, f"{cls.__name__}.{name}: {tp}"
     inst = _build(cls)
     assert not hasattr(inst, "__dict__")
+    # Assigning the base field is enough: a non-frozen dataclass subclass of a
+    # frozen one raises TypeError at class creation.
     with pytest.raises(dataclasses.FrozenInstanceError):
         inst.t = 9.0  # type: ignore[misc]
 
