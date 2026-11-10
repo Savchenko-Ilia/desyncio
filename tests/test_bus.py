@@ -80,12 +80,16 @@ def test_run_lifecycle(
 
     def once() -> list[Any]:
         log: list[Any] = []
+        teardown: list[bool] = []
 
         async def leftover() -> None:
             try:
                 await asyncio.sleep(100)
             finally:
                 sim.emit(Ping, n=99)  # teardown: the bus is closed, no-op
+                # ... and subscribe returns a closed subscription. An error
+                # here would only be logged by teardown, so record the result.
+                teardown.append(sim.subscribe(log.append).closed)
 
         async def main() -> None:
             log.append("main-step")
@@ -105,6 +109,7 @@ def test_run_lifecycle(
                 run(main(), until=until, seed=7, subscribers=[record])
         else:
             assert run(main(), until=until, seed=7, subscribers=[record]) is None
+        assert teardown == [True]
         return log
 
     log = once()
