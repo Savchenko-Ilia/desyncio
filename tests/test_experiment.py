@@ -42,6 +42,17 @@ def test_replicate_forwards_subscribers_to_every_run() -> None:
     assert seen == [("RunStarted", 5), ("RunStarted", 6)]
 
 
+@pytest.mark.parametrize("until", [None, 5.0])
+def test_replicate_forwards_debug(until: float | None) -> None:
+    async def main() -> bool:
+        return asyncio.get_running_loop().get_debug()
+
+    assert replicate(main, 2, until=until, debug=True) == [True, True]
+    assert replicate(main, 2, until=until, debug=False) == [False, False]
+    with pytest.raises(TypeError, match="debug must be a bool or None"):
+        replicate(main, 1, until=until, debug=1)  # type: ignore[call-overload]
+
+
 def test_replicate_overload_types() -> None:
     # Checked by mypy (the gate runs mypy on tests): with ``until`` a run may
     # return None, so the list type must say so; without it, it must not.

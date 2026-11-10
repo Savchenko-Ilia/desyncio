@@ -75,6 +75,76 @@ emitted during teardown would differ between identical runs. After closing,
 ``emit`` is a silent no-op (it still validates the kind), and ``subscribe``
 returns an already closed subscription, so teardown code never fails on them.
 
+The observer guard (debug mode, D059)
+-------------------------------------
+Handlers observe; they must not change the run. In asyncio debug mode
+(``desyncio.run(..., debug=True)``, ``PYTHONASYNCIODEBUG=1`` or
+``loop.set_debug(True)``) the calls through which a handler would change it
+raise :class:`ObserverError` while a handler runs: creating a task
+(``sim.spawn``, ``asyncio.create_task``, ``loop.create_task``), scheduling a
+callback or timer (``loop.call_soon``, ``call_later``, ``call_at``,
+``call_at_priority``; ``call_soon`` is also reached indirectly, e.g. by a
+future's ``set_result`` when a task waits on it), ``sim.interrupt``,
+``sim.random``, ``sim.np_random`` and emitting (``sim.emit`` and primitives' events).
+``sim.subscribe`` and ``Subscription.close`` stay allowed.
+
+How it knows "a handler runs": :meth:`Bus._deliver` sets ``_dispatching``
+for exactly the duration of the handler calls (saved and restored, so
+nested emits and a raising handler leave it right). Delivery is synchronous,
+so anything that happens while the flag is set was called, directly or
+indirectly, by handler code: the loop's own scheduling never runs inside a
+handler. ``RunStarted`` is delivered *from* a ``call_soon`` callback and
+``RunFinished`` after the loop has stopped, but in both cases the flag is
+only set inside the handler call itself. ``call_soon_threadsafe`` is not
+guarded: other threads (a real-time pacer's ``resume``) and asyncio's own
+async-generator finalizer (which garbage collection can run in the middle
+of a handler) use it, and they are not handler code.
+
+The guard records the error with the bus (as if the handler had raised it)
+before raising, so a handler that catches ``ObserverError`` still ends the
+run (D058).
+
+``loop.call_soon`` is the exception to "raise": it records the error but
+does not raise, and the callback is scheduled as usual. asyncio's own code
+calls it on the handler's behalf in the middle of a state change: a
+handler's ``fut.set_result(...)`` (or ``event.set()``, ``queue.put_nowait``,
+``task.cancel()``) marks the future done and clears its callback list, then
+schedules the waiters' wake-ups with ``call_soon``. Raising there would lose
+those wake-ups, and a task whose wake-up is lost can no longer even be
+cancelled, so teardown would deadlock and ``run`` would raise
+``SimulationDeadlock`` instead (probe-verified). So the call completes, the
+loop stops after the current iteration, and ``run`` raises the
+``ObserverError``, whose notes show where the handler made the call.
+
+A primitive's event (:func:`emit_event`, e.g. ``ResourceChanged``) is
+recorded the same way, for the same reason: it is emitted at the end of a
+state change, and a handler that reaches it (only by driving a resource's
+``__aenter__``/``__aexit__`` by hand) would otherwise get the exception
+out of the middle of an acquire, after the unit was taken or the request
+counted as queued, and leak it (as D058 rules out for handler errors). The
+event is not delivered: recording closed the bus. ``sim.emit`` from a
+handler still raises, before anything is emitted. Every other guarded call
+raises before it changes anything.
+
+Outside debug mode nothing is checked and a violation's effect is
+undefined. The flag itself is always maintained (two attribute stores
+per delivered event). The callback checks sit in asyncio's existing
+``if self._debug`` branches: ``VirtualTimeLoop._check_callback`` is called
+by asyncio (and by our ``_schedule``) only in debug mode, so it adds
+nothing outside it. The other checks are new but cheap: ``create_task``,
+``sim.random``, ``sim.np_random`` and ``sim.interrupt`` each test
+``loop._debug`` first (one attribute load when off), and ``emit`` tests
+``_dispatching`` (one attribute load when no handler runs).
+
+What the guard cannot see: mutation of model objects that schedules
+nothing, because it goes through none of the calls above. Examples:
+``task.cancel()`` of a task that is already in the ready queue (a task
+waiting on a future *is* caught: cancelling it cancels the future, which
+schedules the wake-up with ``call_soon``), ``store.shutdown()`` with no
+getter or putter waiting, changing a resource's attributes, or drawing
+from a ``random.Random`` stream that the handler got before the dispatch
+(or from ``current_random_streams()``).
+
 Helpers for primitives
 ----------------------
 :func:`emit_event` and :func:`register_resource_name` are for desyncio's own
@@ -85,6 +155,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import traceback
 from collections.abc import Callable, Iterable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -94,7 +165,24 @@ from desyncio.loop import VirtualTimeLoop
 if TYPE_CHECKING:
     from desyncio.events import Event
 
-__all__ = ["Bus", "Subscription", "emit_event", "register_resource_name"]
+__all__ = [
+    "Bus",
+    "ObserverError",
+    "Subscription",
+    "emit_event",
+    "register_resource_name",
+]
+
+
+class ObserverError(RuntimeError):
+    """An event handler tried to change the run (debug mode only, D059).
+
+    Raised in asyncio debug mode by the calls listed in the module docstring
+    when an event handler makes them. A ``RuntimeError``, like asyncio's own
+    "wrong context" errors (``call_soon`` from another thread in debug mode).
+    It is a handler error: delivery stops and ``desyncio.run`` raises it.
+    """
+
 
 Handler = Callable[[Any], object]
 """A plain callable taking one event. Typed with ``Any`` so that a handler
@@ -232,11 +320,16 @@ class Bus:
         time: returns the current virtual time (stamps ``t``).
         on_error: called with the exception a handler raised. Normally
             once; again only if a handler raises after a nested emit inside
-            it already failed, so ``on_error`` must keep the first.
+            it already failed (or after catching an ``ObserverError``), so
+            ``on_error`` must keep the first.
+        debug: returns whether the observer guard is on (the loop's
+            ``get_debug``); ``None`` means never.
     """
 
     __slots__ = (
         "_closed",
+        "_debug",
+        "_dispatching",
         "_names",
         "_on_error",
         "_seq",
@@ -248,10 +341,16 @@ class Bus:
     )
 
     def __init__(
-        self, time: Callable[[], float], on_error: Callable[[BaseException], object]
+        self,
+        time: Callable[[], float],
+        on_error: Callable[[BaseException], object],
+        debug: Callable[[], bool] | None = None,
     ) -> None:
         self._time = time
         self._on_error = on_error
+        self._debug = debug
+        # True while handlers are being called; see "The observer guard".
+        self._dispatching = False
         self._seq = 0
         # Copy-on-write: a new tuple on every (un)subscribe, so a dispatch in
         # progress keeps iterating the snapshot it started with.
@@ -267,6 +366,34 @@ class Bus:
     def closed(self) -> bool:
         """True after :meth:`close` or after a handler error."""
         return self._closed
+
+    @property
+    def guarding(self) -> bool:
+        """True while a handler runs and the observer guard is on."""
+        return self._dispatching and self._debug is not None and self._debug()
+
+    def forbid(self, call: str, *, raised: bool = True) -> ObserverError:
+        """Record and return the ``ObserverError`` for ``call`` made by a handler.
+
+        With ``raised`` the caller raises it; recording it first (as a handler
+        error) means a handler that catches it still ends the run. Without,
+        the call goes on (see ``loop.call_soon`` in the module docstring) and
+        the current stack is attached as a note, since the error is raised
+        later, by ``run``, with no traceback into the handler.
+        """
+        error = ObserverError(
+            f"{call} was called from an event handler: observers must not "
+            "change the run (no new tasks, callbacks, timers, interrupts, "
+            "random draws or events); the guard is on because the loop is in "
+            "asyncio debug mode"
+        )
+        if not raised:
+            # Drop forbid and its two callers (_check_callback and call_soon,
+            # or emit and emit_event).
+            stack = traceback.format_stack()[:-3]
+            error.add_note("called from:\n" + "".join(stack).rstrip())
+        self._fail(error)
+        return error
 
     def subscribe(self, handler: Handler, kinds: Kinds | None = None) -> Subscription:
         """Add a subscription at the end of the delivery order.
@@ -285,14 +412,27 @@ class Bus:
         self._subs = tuple(s for s in self._subs if s is not sub)
         self._wanted.clear()
 
-    def emit(self, kind: type[Event], fields: dict[str, Any]) -> None:
+    def emit(
+        self, kind: type[Event], fields: dict[str, Any], *, primitive: bool = False
+    ) -> None:
         """Tick ``seq``; build ``kind(t=..., seq=..., **fields)`` and deliver it
         only if a subscriber wants ``kind``.
+
+        ``primitive`` (set by :func:`emit_event`): in a handler in debug mode,
+        record the ``ObserverError`` instead of raising it (see "The observer
+        guard" in the module docstring); the bus is then closed, so the event
+        is not delivered.
 
         Raises:
             TypeError: ``kind`` is not an ``Event`` subclass (always checked),
                 or the constructor rejects ``fields`` (only when built).
+            ObserverError: called from a handler in debug mode, unless
+                ``primitive``.
         """
+        if self._dispatching and self.guarding:
+            if not primitive:
+                raise self.forbid("sim.emit")
+            self.forbid("emit_event (a primitive's event)", raised=False)
         try:
             handlers = self._wanted[kind]
         except (KeyError, TypeError):  # TypeError: unhashable, so not a class
@@ -317,17 +457,24 @@ class Bus:
         return handlers
 
     def _deliver(self, event: Event, handlers: tuple[Handler, ...]) -> None:
-        for handler in handlers:
-            # Closed by a failure, possibly in a nested emit from a handler.
-            if self._closed:
-                return
-            try:
+        # Saved and restored, not just set and cleared: a handler may emit
+        # (outside debug mode), and the inner dispatch must leave it True.
+        outer = self._dispatching
+        self._dispatching = True
+        try:
+            for handler in handlers:
+                # Closed by a failure, possibly in a nested emit from a handler.
+                if self._closed:
+                    return
                 handler(event)
-            except BaseException as exc:
-                # BaseException on purpose, as in Tracer.emit: nothing a
-                # handler raises (CancelledError included) may reach the task.
-                self._fail(exc)
-                return
+        except BaseException as exc:
+            # BaseException on purpose, as in Tracer.emit: nothing a handler
+            # raises (CancelledError included) may reach the task. The flag is
+            # cleared first: _fail is the bus's own code, not the handler's.
+            self._dispatching = outer
+            self._fail(exc)
+        finally:
+            self._dispatching = outer
 
     def _fail(self, exc: BaseException) -> None:
         # A handler can raise after a nested emit (from that handler) has
@@ -389,13 +536,16 @@ def _running_bus() -> Bus | None:
 def emit_event(kind: type[Event], /, **fields: Any) -> None:
     """Emit from the running loop; do nothing without a running ``VirtualTimeLoop``.
 
-    For primitives, which also work on plain asyncio (D060). Cost when nobody
-    wants ``kind``: the call itself (building ``fields``), the running-loop
-    lookup and ``isinstance``, then the bus's dict lookup and integer add.
+    For primitives, which also work on plain asyncio (D060). Called from an
+    event handler in debug mode it records the ``ObserverError`` instead of
+    raising it, so the primitive's state change completes (see "The observer
+    guard" in the module docstring). Cost when nobody wants ``kind``: the
+    call itself (building ``fields``), the running-loop lookup and
+    ``isinstance``, then the bus's dict lookup and integer add.
     """
     bus = _running_bus()
     if bus is not None:
-        bus.emit(kind, fields)
+        bus.emit(kind, fields, primitive=True)
 
 
 def register_resource_name(resource: object, name: str | None) -> str | None:
