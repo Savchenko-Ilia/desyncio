@@ -91,6 +91,8 @@ from types import TracebackType
 from typing import Any, Self
 
 from desyncio._monitor import report_monitor_error
+from desyncio.bus import emit_event, register_resource_name
+from desyncio.events import ResourceChanged
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
 
 
@@ -112,7 +114,7 @@ def _call_monitor(primitive: object, monitor: Callable[[Any], object] | None) ->
         report_monitor_error("Resource monitor raised", exc, "resource", primitive)
 
 
-def _check_name(name: str | None) -> str | None:
+def check_resource_name(name: str | None) -> str | None:
     """Validate the optional resource ``name`` (shared by all four resources)."""
     if name is not None:
         if not isinstance(name, str):
@@ -127,8 +129,17 @@ class Resource:
 
     ``name`` (keyword-only, optional) labels the resource: a non-``str`` raises
     ``TypeError``, an empty string ``ValueError``; the ``name`` property returns
-    it, or ``None``. It will appear in ``ResourceChanged.resource`` once events
-    exist. All four resource classes take it.
+    it, or ``None``. All four resource classes take it.
+
+    Events (EVT-04, D060): after every monitor call (whether or not a monitor
+    is given) the resource emits one ``ResourceChanged(resource, in_use,
+    capacity, queue_len)`` on the run's event bus; ``in_use`` is ``count`` and
+    ``queue_len`` is ``queue_length``. ``resource`` is the name in this run: on
+    each acquire the resource registers with the running run (idempotent per
+    run), so an unnamed one gets ``resource-N`` in order of first use, and a
+    name another resource already uses in this run raises ``ValueError``
+    before anything changes. A resource reused in a later run registers again
+    there. On a loop that is not a ``VirtualTimeLoop`` nothing is emitted.
 
     ``monitor``, if given, is called as ``monitor(resource)`` synchronously
     after every state change: a request queueing, a request being granted,
@@ -162,7 +173,9 @@ class Resource:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
-        self._name = _check_name(name)
+        self._name = check_resource_name(name)
+        # This run's name (EVT-04): set by ``_register`` on every acquire.
+        self._run_name = self._name
         self._capacity = capacity
         self._monitor = monitor
         self._sem = asyncio.Semaphore(capacity)  # does all waiting and queueing
@@ -193,11 +206,31 @@ class Resource:
         """
         return self._queue_length
 
+    def _register(self) -> None:
+        """Register with the running run's bus before any state change (D060).
+
+        Called at the top of every acquire, the only way into a run: every
+        other change (a release, a cancelled waiter) belongs to an acquire made
+        earlier in the same run, since teardown ends every holder and waiter
+        before the run is over. So ``_run_name`` is always this run's name, and
+        the cost is one running-loop lookup and one dict lookup per acquire.
+        """
+        self._run_name = register_resource_name(self, self._name)
+
     def _changed(self) -> None:
-        """Call the monitor; called only once the state is fully settled."""
+        """Call the monitor, then emit ``ResourceChanged``; called only once the
+        state is fully settled."""
         _call_monitor(self, self._monitor)
+        emit_event(
+            ResourceChanged,
+            resource=self._run_name,
+            in_use=self._count,
+            capacity=self._capacity,
+            queue_len=self._queue_length,
+        )
 
     async def _acquire(self) -> None:
+        self._register()  # may raise ValueError: nothing has changed yet
         # Semaphore.acquire has no await before its fast path, so this check
         # agrees with what acquire() will decide a moment later.
         must_wait = self._sem.locked()
@@ -293,12 +326,12 @@ class PriorityResource:
     that very instant. A newcomer with a strictly better key legitimately
     goes first. Introspection (``capacity``, ``count``, ``queue_length``),
     cancellation and the ``monitor`` contract (D023 v2) are as for
-    ``Resource`` (``name`` too: it will appear in ``ResourceChanged.resource``
-    once events exist): ``queue_length`` counts a request that has been handed
-    a unit but whose task has not resumed yet, and ``count`` includes it only
-    once it has. Release is synchronous, so a cancel, timeout or interrupt
-    arriving at the holder's exit cannot leak the unit. See the module
-    docstring for how waiting is built (per-request futures, D030).
+    ``Resource`` (``name`` and ``ResourceChanged`` events too): ``queue_length``
+    counts a request that has been handed a unit but whose task has not
+    resumed yet, and ``count`` includes it only once it has. Release is
+    synchronous, so a cancel, timeout or interrupt arriving at the holder's
+    exit cannot leak the unit. See the module docstring for how waiting is
+    built (per-request futures, D030).
     Create it inside the run (its futures belong to the running loop).
     """
 
@@ -315,7 +348,9 @@ class PriorityResource:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
-        self._name = _check_name(name)
+        self._name = check_resource_name(name)
+        # This run's name (EVT-04): set by ``_register`` on every acquire.
+        self._run_name = self._name
         self._capacity = capacity
         self._monitor = monitor
         # Waiters in key order. The seq number is unique, so tuples compare on
@@ -361,9 +396,20 @@ class PriorityResource:
             raise ValueError("priority must not be NaN")
         return PriorityRequest(self, priority)
 
+    def _register(self) -> None:
+        """As ``Resource._register``; also before a preemption (``_arriving``)."""
+        self._run_name = register_resource_name(self, self._name)
+
     def _changed(self) -> None:
-        """Call the monitor once state is settled (same contract as Resource)."""
+        """Call the monitor, then emit ``ResourceChanged`` (as for Resource)."""
         _call_monitor(self, self._monitor)
+        emit_event(
+            ResourceChanged,
+            resource=self._run_name,
+            in_use=self._count,
+            capacity=self._capacity,
+            queue_len=self.queue_length,
+        )
 
     def _free(self) -> int:
         return self._capacity - self._count - self._granted
@@ -409,6 +455,7 @@ class PriorityResource:
             fut.set_result(None)  # the waiter resumes at its next turn
 
     async def _acquire(self, priority: float, ticket: "_Ticket | None" = None) -> None:
+        self._register()  # may raise ValueError: nothing has changed yet
         key = (priority, next(self._seq))
         if ticket is not None:
             ticket.seq = key[1]
@@ -647,8 +694,9 @@ class PreemptiveResource(PriorityResource):
       one (a preemptor that has just taken a unit is itself a holder).
 
     ``count`` and ``queue_length`` keep their ``PriorityResource`` meaning.
-    The monitor contract (D023 v2) is unchanged, and ``name`` is as for
-    ``Resource``. Create it inside the run.
+    The monitor contract (D023 v2) is unchanged, and ``name`` and events are
+    as for ``Resource``: a preemption swap is one state change, so one event.
+    Create it inside the run.
     """
 
     def __init__(

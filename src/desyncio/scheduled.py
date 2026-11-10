@@ -118,7 +118,9 @@ changing is not detected as a deadlock, the clock just advances.
 
 Monitor (D023 v2): ``monitor(resource)`` runs synchronously after every state
 change (queueing, grant, leaving the queue, release, capacity change). Errors
-go to the loop's exception handler.
+go to the loop's exception handler. Right after each monitor call one
+``ResourceChanged`` is emitted (EVT-04, D060), so a capacity change, with all
+the units it takes back and the waiters it grants, is one event.
 """
 
 import asyncio
@@ -130,9 +132,11 @@ from types import TracebackType
 from typing import Any, Self
 
 from desyncio._monitor import report_monitor_error
+from desyncio.bus import emit_event, register_resource_name
+from desyncio.events import ResourceChanged
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
-from desyncio.resource import _check_name
+from desyncio.resource import check_resource_name
 from desyncio.schedule import Schedule
 from desyncio.sim import _loop, sim
 
@@ -166,8 +170,10 @@ class ScheduledResource:
         schedule: the ``Schedule`` that gives the capacity over sim time.
         monitor: optional ``monitor(resource)`` called after every state change.
         name: optional label (keyword-only); ``TypeError`` if not a ``str``,
-            ``ValueError`` if empty; read back as ``name``. It will appear in
-            ``ResourceChanged.resource`` once events exist.
+            ``ValueError`` if empty; read back as ``name``. Events carry it as
+            ``ResourceChanged.resource``; the resource registers it with the
+            run when built, so a name already used in this run raises
+            ``ValueError`` there and an unnamed one gets ``resource-N``.
 
     Create it inside a run (``RuntimeError`` otherwise): it starts the driver
     task. Use it as ``async with res:``; the body is interruptible, and a shift
@@ -187,8 +193,12 @@ class ScheduledResource:
             )
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
-        self._name = _check_name(name)
+        self._name = check_resource_name(name)
         now = sim.now  # RuntimeError outside a run
+        # Bound to this run from here on (the driver starts now), so this is its
+        # first use: register before anything can change (EVT-04, D060). A
+        # duplicate name raises ValueError here, before the driver exists.
+        self._run_name = register_resource_name(self, self._name)
         self._schedule = schedule
         self._monitor = monitor
         self._capacity = schedule.capacity_at(now)
@@ -223,14 +233,21 @@ class ScheduledResource:
         return len(self._waiters) + len(self._units) - self._count
 
     def _changed(self) -> None:
-        if self._monitor is None:
-            return
-        try:
-            self._monitor(self)
-        except Exception as exc:  # KeyboardInterrupt/SystemExit propagate
-            report_monitor_error(
-                "ScheduledResource monitor raised", exc, "resource", self
-            )
+        """Call the monitor, then emit one ``ResourceChanged`` (D060)."""
+        if self._monitor is not None:
+            try:
+                self._monitor(self)
+            except Exception as exc:  # KeyboardInterrupt/SystemExit propagate
+                report_monitor_error(
+                    "ScheduledResource monitor raised", exc, "resource", self
+                )
+        emit_event(
+            ResourceChanged,
+            resource=self._run_name,
+            in_use=self._count,
+            capacity=self._capacity,
+            queue_len=self.queue_length,
+        )
 
     # --- the driver ----------------------------------------------------------
 
