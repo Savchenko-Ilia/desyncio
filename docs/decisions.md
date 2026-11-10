@@ -389,3 +389,12 @@ The draft says a handler exception propagates at the emit point. Probes showed t
 - **Names, per-run part:** on a resource's first use in a run it registers with the bus: an unnamed one gets `resource-N` in registration order, a duplicate name raises `ValueError` before any state change.
 - **Benchmark:** EVT-07 has its own `Resource`-based M/M/1 and no comparison libraries; LOOP-12 stays deferred (D018). The draft's 20% is informative only (a prototype measured +19% to +28%).
 - **Stale references in the draft:** AGENTS has no §3.2/§3.4/§8 (the principles are §2.2 and §2.4); the time unit is settled (D004); `resources.py` is `resource.py` plus `scheduled.py`; `tests/models/mm1.py` uses `asyncio.Lock`, so event tests need a new `Resource`-based model.
+
+## D061 — Event API checked with the Hodos lead session (lead)
+The owner asked the desyncio and Hodos lead sessions to discuss the plan. The Hodos lead read D056–D060 and answered (2026-11-10):
+- Blocks in Hodos on `sim.emit` + `Resource` work for its MVP; the owner confirmed this on the Hodos side, so D056 is no longer "probably". Hodos owns entity ids, server-slot indices and balking (via `queue_length`). It needs nothing else from desyncio for the MVP, and no `Store`/`Container` events.
+- `sim.emit(Kind, **fields)` is accepted; Hodos wraps its eight kinds in typed helpers.
+- Cutting the stream at `RunFinished` is fine; Hodos treats open intervals as ending at `RunFinished.t`.
+- Hodos pins a desyncio `integration` commit once EVT-01, EVT-02 and EVT-04 are merged (after batch 31), and moves to `main` when the owner merges.
+- **Early stop without `sim.stop()`:** Hodos caps a run at 200k events or 10 s of wall time by raising its own exception from the recorder. Under D058 that is the endorsed pattern, and EVT-02 now tests it: every event up to the failing one is delivered, there is no `RunFinished`, `run()` raises that exception, and teardown completes. A `sim.stop()` with reason `stopped` would be cleaner; it is a candidate for after module 6, not blocking.
+- **Later, not module 6:** thread-safe command injection in real-time mode (live runs), and decision points / "run until the next decision" for RL.
