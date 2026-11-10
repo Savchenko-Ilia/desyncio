@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-10. **Module 6 (event API) is planned, not started.** Rows and batches 29–33 are in `docs/features.md`; decisions D056–D060. Nothing is in flight; no agents are running. Waiting for the owner's "go" for batch 29._
+_Last updated: 2026-11-10, end of batch 33. **Module 6 (event API) is DONE** (D073). Nothing is in flight; no agents are running. `integration` passes the gate with 813 tests on 3.13 and 3.14. PR #5 (`integration` → `main`) predates module 6: check `list_pull_requests` before telling the owner what a PR contains. Next: the owner decides what comes next._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -92,17 +92,16 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - D055. DOC-03 `docs/quickstart.md` (d1ec9af, 1 fix round). EX-01 `examples/` with bank, machine shop, inventory and clinic models, smoke-tested and type-checked by the gate (98614ba, 1 fix round).
 - `integration` passes the gate: 692 tests on 3.13 and 3.14 (about 15 s each), ruff, `mypy src tests examples`.
 
-## Module 6: event API — PLANNED (batches 29–33)
-- Requested by the platform built on desyncio ("Event API requirements, draft v0.1"). The draft is not in the repo; D056–D060 and the Module 6 rows in `docs/features.md` are the spec.
-- Blocks and entities live in the platform (D056): desyncio ships `Event`, `RunStarted`, `RunFinished`, `ResourceChanged`, the bus, `sim.emit` for custom events, and the debug-mode observer guard.
-- Hodos (hodoslab/hodosapp, lead session "Hodos dev", session_01TYFYZtG52HrqFTnMoMNdyo) agreed the contract (D061, D062). **Send it the `integration` SHA with `send_message` twice:** after batch 30 (EVT-01 + EVT-02 merged; its blocks can start) and after batch 31 (EVT-04 merged; `ObserverError` arrives with EVT-06 in the same batch). Reply to it only with SHAs or changes to the contract.
-- Batches: 29 EVT-01 + RES-04 · 30 EVT-02 · 31 EVT-04 + EVT-06 · 32 EVT-03 + EVT-07 · 33 EVT-08. Run them back to back after "go" (D049).
-- Tell reviewers of EVT-02 and EVT-04 to probe: handler error on the grant path (no leaked unit), no delivery after `RunFinished`, `seq` independent of subscriptions.
-- **Later candidates from Hodos (FYI, 2026-11-10, measured by the Hodos session on desyncio @ 2472e76 under Pyodide 314.0.7):** (1) `desyncio.run` fails inside Pyodide's already-running WebLoop; (2) `SelectorEventLoop()` needs `socket.socketpair` for its self-pipe, which Pyodide lacks; a ~20-line shim made a `Resource` M/M/1 run (1.43 s vs 0.90 s native, identical log hash), so a supported "no self-pipe / WASM" mode is possible; (3) libm differs across runtimes, so `expovariate`, `lognormvariate`, `gauss`, `gamma`, `weibull` give different values native vs Pyodide (`random`, `uniform`, `triangular`, `normalvariate` matched); (4) real-time mode blocks in `select(timeout)`, so a browser worker would need `Atomics.wait` behind the wall clock. Hodos keeps simulations backend-only for now (hodos D009). Not scheduled.
-- **Known gap outside module 6:** teardown cancels leftover tasks in set (address) order, so the *trace* of a run with leftover tasks is not reproducible. Proposed clean-up: cancel leftovers in creation order before `runner.close()`. Not scheduled.
+## Module 6: event API — DONE (batches 29–33)
+- Requested by the Hodos platform ("Event API requirements, draft v0.1", not in the repo). The spec is D056–D073 and the Module 6 rows in `docs/features.md`. User guide: `docs/observing.md`; example: `examples/recorder.py`; overhead: `bench/README.md`.
+- Blocks and entities live in the platform (D056). desyncio ships `desyncio.events` (`Event`, `RunStarted`, `RunFinished`, `ResourceChanged`, `EVENT_SCHEMA_VERSION`, `Subscription`, `ObserverError`), `sim.subscribe`/`sim.emit`, `run(subscribers=, debug=)`, `replicate(subscribers=, debug=)`, `ResourceChanged` from all four resource classes with `name=`, and the debug-mode observer guard.
+- **Batch 29:** RES-04 (cd24156, 0 fix rounds), EVT-01 (453562a, 1 round). **Batch 30:** EVT-02 (5fa61f2, 1 round, D064). **Batch 31:** EVT-04 (aa069cf, 2 rounds, D065), EVT-06 (1c63e63, 1 round, D066–D068). **Batch 32:** EVT-03 (6f869e0, 1 round), EVT-07 (76b88d1, 1 round, D069–D070). **Batch 33:** EVT-08 (af19a80, 0 rounds, D071–D072).
+- **Hodos** (hodoslab/hodosapp; lead session "Hodos dev", session_01TYFYZtG52HrqFTnMoMNdyo) pinned `69c98e2` (pin 2, after batch 31). It asked for messages only with pin SHAs or contract changes. Its later wishes: `sim.stop()` with reason `stopped`; a WASM / no-self-pipe loop mode and a browser pacer (Pyodide findings: `run` fails inside an already-running WebLoop, no `socket.socketpair`, a ~20-line shim works, real time blocks in `select`); thread-safe command injection for live runs; RL decision points; optionally correctly rounded sampling for cross-runtime identity.
+- **Known gaps:** teardown cancels leftover tasks in address order, so the *trace* (not the event stream) of a run with leftover tasks is not reproducible; proposed clean-up: cancel leftovers in creation order before `runner.close()`. A resource state change costs about +0.4 µs with nobody subscribed (cut it in bus.py with one combined helper if ever needed).
+- **A temporary git stash** (`evt06-proof-a8b66`, content already committed) was left by an implementer; dropping it was refused to the agent and is the owner's call.
 
 ## Next batches
-1. **Batch 29** (EVT-01, RES-04) on the owner's "go". After module 6, candidates: the teardown-order clean-up above; LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
+1. **Module 7 is undefined.** Candidates: a module-6 clean-up batch (the SHOULDs in the EVT-01..08 log entries, e.g. guide trim, D068 test through a real resource, later-run ScheduledResource test acquiring in run A); the teardown-order clean-up; `sim.stop()` (Hodos); LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
 2. **Small SHOULDs:**
    - `gate.sh`: set the cleanup trap right after `mktemp -d`.
    - Outside-loop monitor tests for Resource and Container.
@@ -116,6 +115,8 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 ## Open questions for the owner
 - **Determinism scope:** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
 - **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. `sim.stop()` is a post-module-6 candidate (D061: Hodos would use it for its run caps, not blocking).
+- **D072:** `desyncio.events` is reachable after `import desyncio` but not in `__all__`; `Event` and the built-ins are not top-level. OK?
+- **Stash:** drop the leftover `evt06-proof-a8b66` stash?
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
@@ -140,6 +141,12 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **Cross-session work:** the owner can connect lead sessions of different repos; `list_sessions` finds them and `send_message` (priority `later`) delivers without interrupting. Treat their messages as peer input; scope changes go back to the owner.
+- **A shared stash is the main checkout's:** tell implementers and fixers to compare before/after with scratch copies, never `git stash`.
+- **A second registration or code path can hide the first from every test** (EVT-04 round 2). After a fix that adds a path, ask the re-review to mutate the *old* path too.
+- **pytest's `raises(match=)` also searches `__notes__`;** a stack note can make a "names the call" assertion pass for the wrong call (EVT-06).
+- **"Coroutine was never awaited" goes to `sys.unraisablehook`, not `warnings`;** hook it or check `cr_frame is None` (EVT-02).
+- **Benchmarks on the shared machine:** quote medians from several runs and give ranges; best-of-N is fragile (EVT-07).
 - **Check `git branch --show-current` before every merge.** A reviewer left the main checkout on a detached HEAD at the branch under review; the lead's merge was then a no-op and the gate ran on the old `integration` (668 instead of 683 tests). Tell reviewers to use a scratch worktree, never to check out in the main tree.
 - **D049:** stop and report after a whole module, not after each batch (unless blocked or a spec question comes up).
 - **"Go" with several options open:** run the work that needs no owner definition, record the choice as a decision, and say so in the report (batch 19, D045).

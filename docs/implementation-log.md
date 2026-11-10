@@ -1406,3 +1406,14 @@ Branch: feat/EVT-07 + fix/EVT-07-1  ·  Merged: 76b88d1
 **Review findings.** First review PASS; the lead promoted the methodology and README-accuracy SHOULDs (D070). The fix round also corrected an arithmetic error in "Where the cost comes from".
 
 **Follow-ups (SHOULD).** Widen the README's stated ranges or add the fourth run (+12% / +10%, a 4 µs gap) so "+20% to +27%" does not read as the expected value. LOOP-12 (comparison with SimPy) stays deferred (D018).
+
+## EVT-08 — Guide, example, exports (2026-11-10, batch 33)
+Branch: feat/EVT-08  ·  Merged: af19a80
+
+**Approach.** `docs/observing.md` ("Observing a simulation", 11 executed examples): subscribing, the built-in events, names and `seq`, custom events with a small source → service → sink model that defines its own entity events (as Hodos does) and computes waits from the stream, delivery and error rules (D057, D058, D061), the debug guard (D059, D066, D068), the relation to `monitor=` and the trace hook, determinism within one runtime build, and overhead (≤30%, D069). `examples/recorder.py`: a `ColumnarRecorder` with wait statistics and time-weighted utilisation from `ResourceChanged`. Exports: `Subscription` and `ObserverError` in `desyncio.__all__`; `desyncio.events` imported explicitly by `__init__` (not in `__all__`, D072); `Event` and the built-ins live in `desyncio.events` only. D071 docstring and bench/README follow-ups done.
+
+**Review findings.** PASS, no MUST. The reviewer checked every claim with probes and mutated four shown outputs (each failed one test); it re-derived the recorder's statistics independently.
+
+**Gotchas.** The docs-examples test allows only top-level `desyncio` imports and `python`/`text` fences, so the guide imports `from desyncio import events`.
+
+**Follow-ups (SHOULD).** Trim the guide (580 lines vs 469 for calendar.md): the delivery-rule bullets repeat the subscribing section, and "seq has gaps under a filter" appears twice. The built-in events table should note that `RunFinished` is absent after a handler error. The overhead range in the guide is from 3.13 runs; say so. Wrap two long lines in bench/README.md.

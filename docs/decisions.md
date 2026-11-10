@@ -443,3 +443,9 @@ EVT-07 measured one no-op subscriber for all events at about +18% to +21% on a `
 
 ## D071 — EVT-08 also picks up three documentation follow-ups (lead)
 EVT-08 is the last feature of module 6 and the one that writes user-facing docs, so it also takes three small doc follow-ups from earlier reviews: `run`'s and `sim.subscribe`'s docstrings name only `call_soon` as recorded, not primitives' events (D068); the GC caveat (D068 addendum); and `bench/README.md`'s ranges (add the reviewer's fourth run). Its owned files gain `src/desyncio/runners.py`, `src/desyncio/sim.py` (docstrings only) and `bench/README.md`.
+
+## D072 — `desyncio.events` is reachable but not in `__all__` (lead)
+EVT-08 imports the `events` submodule in `desyncio/__init__.py`, so `import desyncio; desyncio.events.Event` works (the platform's usage), and adds `Subscription` and `ObserverError` to `__all__`. The module itself is not in `__all__` (so `from desyncio import *` does not bind it), and `Event`, the built-in events and `EVENT_SCHEMA_VERSION` stay in `desyncio.events`, keeping the top level small. The EVT-08 row could be read as asking for `events` in `__all__`; the lead accepts the implementer's reading. Easy to change if the owner prefers.
+
+## D073 — Module 6 (event API) is done (lead)
+All of EVT-01..04, EVT-06..08 and RES-04 are merged on `integration` (batches 29–33); EVT-05 was dropped by D056. `integration` passes the gate with 813 tests on 3.13 and 3.14. Hodos pinned 69c98e2 (after batch 31); later commits add only tests, the benchmark, the guide and exports.
