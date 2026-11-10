@@ -32,11 +32,11 @@ Dicts = list[dict[str, Any]]
 def run_events(
     seed: int = SEED,
     *,
-    kinds: type[Event] | None = None,
+    kinds: tuple[type[Event], ...] | None = None,
     until: float | None = None,
 ) -> tuple[Mm1Results | None, list[Event]]:
     events: list[Event] = []
-    subs = [(events.append, (kinds,) if kinds else None)]
+    subs = [(events.append, kinds)]
     result = desyncio.run(mm1_resource(N), seed=seed, until=until, subscribers=subs)
     return result, events
 
@@ -98,14 +98,21 @@ def test_same_events_in_a_fresh_interpreter() -> None:
 def test_observing_changes_neither_results_nor_seq() -> None:
     bare = desyncio.run(mm1_resource(N), seed=SEED)
     with_all, everything = run_events()
-    with_kind, only_changes = run_events(kinds=ResourceChanged)
-    assert bare == with_all == with_kind
+    with_kind, only_changes = run_events(kinds=(ResourceChanged,))
+    with_ends, only_ends = run_events(kinds=(RunStarted, RunFinished))
+    assert bare == with_all == with_kind == with_ends
     # seq ticks whether or not anyone listens, so a filter sees the same seq
     # values the unfiltered run gave those events.
     wanted = [e for e in everything if isinstance(e, ResourceChanged)]
     assert only_changes
     assert dicts(only_changes) == dicts(wanted)
     assert only_changes[0].seq >= 1  # 0 was RunStarted, filtered out but counted
+    # ResourceChanged is one contiguous seq block here, so a filter that
+    # renumbered delivered events densely would still pass the checks above.
+    # Two kinds with a gap between them cannot be renumbered unnoticed.
+    assert [type(e) for e in only_ends] == [RunStarted, RunFinished]
+    assert [e.seq for e in only_ends] == [0, len(everything) - 1]
+    assert dicts(only_ends) == dicts([everything[0], everything[-1]])
 
 
 def test_until_cut_with_holders_and_waiters_is_repeatable() -> None:
