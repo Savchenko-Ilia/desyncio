@@ -166,6 +166,40 @@ def test_forbidden_call_not_checked_outside_debug_mode(name: str) -> None:
     assert log[2] == "after emit"
 
 
+def test_refused_task_coroutine_is_closed() -> None:
+    """A task refused by the guard closes its coroutine: no "never awaited"."""
+    frames: list[object] = []
+
+    def handler(event: Ping) -> None:
+        coro = _child()
+        try:
+            sim.spawn(coro)
+        except ObserverError:
+            assert isinstance(coro, types.CoroutineType)
+            frames.append(coro.cr_frame)
+
+    async def main() -> None:
+        sim.emit(Ping, n=1)
+
+    with pytest.raises(ObserverError):
+        run(main(), debug=True, subscribers=[(handler, (Ping,))])
+    assert frames == [None]
+
+
+def test_asyncio_debug_callback_check_still_runs() -> None:
+    """The override keeps asyncio's own debug check on call_soon."""
+
+    async def main() -> None:
+        coro = _child()
+        try:
+            asyncio.get_running_loop().call_soon(coro)  # type: ignore[arg-type]
+        finally:
+            coro.close()
+
+    with pytest.raises(TypeError, match="coroutines cannot be used with call_soon"):
+        run(main(), debug=True)
+
+
 def test_call_soon_threadsafe_is_not_guarded() -> None:
     """D066: asyncio's async-generator finalizer, which garbage collection can
     run inside a handler, calls call_soon_threadsafe (as do other threads);
