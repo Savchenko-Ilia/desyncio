@@ -6,6 +6,7 @@ a task, schedule a callback, interrupt, draw a random number, emit) gets
 """
 
 import asyncio
+import gc
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -153,6 +154,38 @@ def test_forbidden_call_not_checked_outside_debug_mode(name: str) -> None:
     run(_model(FORBIDDEN[name], log), debug=False)
     assert log[0] == "returned"
     assert log[2] == "after emit"
+
+
+def test_call_soon_threadsafe_is_not_guarded() -> None:
+    """D066: asyncio's async-generator finalizer, which garbage collection can
+    run inside a handler, calls call_soon_threadsafe (as do other threads);
+    it is not handler code and must not trip the guard."""
+    closed: list[str] = []
+    held: list[object] = []
+
+    async def agen() -> Any:
+        try:
+            yield 1
+            yield 2  # pragma: no cover
+        finally:
+            closed.append("finally")
+
+    def handler(event: Ping) -> None:
+        held.clear()
+        gc.collect()  # finalizer: call_soon_threadsafe(create_task, aclose())
+        asyncio.get_running_loop().call_soon_threadsafe(_noop)
+
+    async def main() -> str:
+        gen = agen()
+        await anext(gen)
+        held.append(gen)
+        del gen
+        sim.emit(Ping, n=1)
+        await sim.timeout(1)
+        return "done"
+
+    assert run(main(), debug=True, subscribers=[(handler, (Ping,))]) == "done"
+    assert closed == ["finally"]
 
 
 def test_swallowed_observer_error_still_ends_the_run() -> None:
