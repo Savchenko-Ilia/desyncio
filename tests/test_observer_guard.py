@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from desyncio import events as events_module
-from desyncio.bus import ObserverError
+from desyncio.bus import ObserverError, emit_event
 from desyncio.events import Event, RunFinished, RunStarted
 from desyncio.interrupt import Interrupt
 from desyncio.loop import VirtualTimeLoop
@@ -50,7 +50,8 @@ def _noop() -> None:
 
 # One representative per guarded code path: sim.spawn for create_task
 # (asyncio.create_task and TaskGroup end in the same loop.create_task),
-# call_later for _schedule via call_at, sim.emit for Bus.emit.
+# call_later for _schedule via call_at. sim.emit and emit_event (the
+# primitives' path) differ: the second records instead of raising.
 FORBIDDEN: dict[str, Callable[[Env], object]] = {
     "sim.spawn": lambda env: sim.spawn(_child()),
     "loop.call_soon": lambda env: env.loop.call_soon(_noop),
@@ -60,7 +61,10 @@ FORBIDDEN: dict[str, Callable[[Env], object]] = {
     "sim.random": lambda env: sim.random("s"),
     "sim.np_random": lambda env: sim.np_random("s"),
     "sim.emit": lambda env: sim.emit(Pong),
+    "emit_event": lambda env: emit_event(Pong),
 }
+# Recorded, not raised: the call completes and run raises afterwards.
+RECORDED = {"loop.call_soon", "emit_event"}
 # The name the error message must contain for each call.
 NAMED = {
     "sim.spawn": "create_task",
@@ -70,7 +74,8 @@ NAMED = {
     "sim.interrupt": "sim.interrupt",
     "sim.random": "sim.random",
     "sim.np_random": "sim.np_random",
-    "sim.emit": "emit (",
+    "sim.emit": "sim.emit was called",
+    "emit_event": "emit_event (",
 }
 
 
@@ -130,16 +135,18 @@ def _model(call: Callable[[Env], object], log: list[str]) -> Any:
 @pytest.mark.parametrize("name", list(FORBIDDEN))
 def test_forbidden_call_raises_in_debug_mode(name: str) -> None:
     """The call raises ObserverError naming it inside the handler, before it
-    changes anything; run ends and raises that error. call_soon only records
-    the error: the callback is scheduled and run raises afterwards."""
+    changes anything; run ends and raises that error. call_soon and
+    emit_event only record the error: the call completes, run raises
+    afterwards, and the note shows the handler's frame."""
     log: list[str] = []
     with pytest.raises(ObserverError) as info:
         run(_model(FORBIDDEN[name], log), debug=True)
     message = str(info.value)  # not the notes: they hold the handler's source
     assert NAMED[name] in message
     assert "observers must not change the run" in message
-    if name == "loop.call_soon":
-        assert log[:2] == ["returned", "changed"]
+    if name in RECORDED:
+        assert log[0] == "returned"
+        assert "call(env)" in "".join(info.value.__notes__)
     else:
         assert log[:2] == [f"raised: {message}", "unchanged"]
     # The emitting task finished its step; the loop stopped after it, so the

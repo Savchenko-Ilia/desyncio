@@ -114,8 +114,17 @@ those wake-ups, and a task whose wake-up is lost can no longer even be
 cancelled, so teardown would deadlock and ``run`` would raise
 ``SimulationDeadlock`` instead (probe-verified). So the call completes, the
 loop stops after the current iteration, and ``run`` raises the
-``ObserverError``, whose notes show where the handler made the call. Every
-other guarded call raises before it changes anything.
+``ObserverError``, whose notes show where the handler made the call.
+
+A primitive's event (:func:`emit_event`, e.g. ``ResourceChanged``) is
+recorded the same way, for the same reason: it is emitted at the end of a
+state change, and a handler that reaches it (only by driving a resource's
+``__aenter__``/``__aexit__`` by hand) would otherwise get the exception
+out of the middle of an acquire, after the unit was taken or the request
+counted as queued, and leak it (as D058 rules out for handler errors). The
+event is not delivered: recording closed the bus. ``sim.emit`` from a
+handler still raises, before anything is emitted. Every other guarded call
+raises before it changes anything.
 
 Outside debug mode nothing is checked and a violation's effect is
 undefined. The flag itself is always maintained (two attribute stores
@@ -379,7 +388,8 @@ class Bus:
             "asyncio debug mode"
         )
         if not raised:
-            # Drop forbid, _check_callback and call_soon themselves.
+            # Drop forbid and its two callers (_check_callback and call_soon,
+            # or emit and emit_event).
             stack = traceback.format_stack()[:-3]
             error.add_note("called from:\n" + "".join(stack).rstrip())
         self._fail(error)
@@ -402,17 +412,27 @@ class Bus:
         self._subs = tuple(s for s in self._subs if s is not sub)
         self._wanted.clear()
 
-    def emit(self, kind: type[Event], fields: dict[str, Any]) -> None:
+    def emit(
+        self, kind: type[Event], fields: dict[str, Any], *, primitive: bool = False
+    ) -> None:
         """Tick ``seq``; build ``kind(t=..., seq=..., **fields)`` and deliver it
         only if a subscriber wants ``kind``.
+
+        ``primitive`` (set by :func:`emit_event`): in a handler in debug mode,
+        record the ``ObserverError`` instead of raising it (see "The observer
+        guard" in the module docstring); the bus is then closed, so the event
+        is not delivered.
 
         Raises:
             TypeError: ``kind`` is not an ``Event`` subclass (always checked),
                 or the constructor rejects ``fields`` (only when built).
-            ObserverError: called from a handler in debug mode.
+            ObserverError: called from a handler in debug mode, unless
+                ``primitive``.
         """
         if self._dispatching and self.guarding:
-            raise self.forbid("emit (sim.emit or a primitive's event)")
+            if not primitive:
+                raise self.forbid("sim.emit")
+            self.forbid("emit_event (a primitive's event)", raised=False)
         try:
             handlers = self._wanted[kind]
         except (KeyError, TypeError):  # TypeError: unhashable, so not a class
@@ -516,13 +536,16 @@ def _running_bus() -> Bus | None:
 def emit_event(kind: type[Event], /, **fields: Any) -> None:
     """Emit from the running loop; do nothing without a running ``VirtualTimeLoop``.
 
-    For primitives, which also work on plain asyncio (D060). Cost when nobody
-    wants ``kind``: the call itself (building ``fields``), the running-loop
-    lookup and ``isinstance``, then the bus's dict lookup and integer add.
+    For primitives, which also work on plain asyncio (D060). Called from an
+    event handler in debug mode it records the ``ObserverError`` instead of
+    raising it, so the primitive's state change completes (see "The observer
+    guard" in the module docstring). Cost when nobody wants ``kind``: the
+    call itself (building ``fields``), the running-loop lookup and
+    ``isinstance``, then the bus's dict lookup and integer add.
     """
     bus = _running_bus()
     if bus is not None:
-        bus.emit(kind, fields)
+        bus.emit(kind, fields, primitive=True)
 
 
 def register_resource_name(resource: object, name: str | None) -> str | None:
