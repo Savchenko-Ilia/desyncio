@@ -98,6 +98,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - Hodos (hodoslab/hodosapp) agreed the contract (D061) and will pin `integration` after batch 31; tell its lead session when batch 31 is merged.
 - Batches: 29 EVT-01 + RES-04 · 30 EVT-02 · 31 EVT-04 + EVT-06 · 32 EVT-03 + EVT-07 · 33 EVT-08. Run them back to back after "go" (D049).
 - Tell reviewers of EVT-02 and EVT-04 to probe: handler error on the grant path (no leaked unit), no delivery after `RunFinished`, `seq` independent of subscriptions.
+- **Later candidates from Hodos (FYI, 2026-11-10, measured by the Hodos session on desyncio @ 2472e76 under Pyodide 314.0.7):** (1) `desyncio.run` fails inside Pyodide's already-running WebLoop; (2) `SelectorEventLoop()` needs `socket.socketpair` for its self-pipe, which Pyodide lacks; a ~20-line shim made a `Resource` M/M/1 run (1.43 s vs 0.90 s native, identical log hash), so a supported "no self-pipe / WASM" mode is possible; (3) libm differs across runtimes, so `expovariate`, `lognormvariate`, `gauss`, `gamma`, `weibull` give different values native vs Pyodide (`random`, `uniform`, `triangular`, `normalvariate` matched); (4) real-time mode blocks in `select(timeout)`, so a browser worker would need `Atomics.wait` behind the wall clock. Hodos keeps simulations backend-only for now (hodos D009). Not scheduled.
 - **Known gap outside module 6:** teardown cancels leftover tasks in set (address) order, so the *trace* of a run with leftover tasks is not reproducible. Proposed clean-up: cancel leftovers in creation order before `runner.close()`. Not scheduled.
 
 ## Next batches
@@ -113,6 +114,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
+- **Determinism scope:** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
 - **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. `sim.stop()` is a post-module-6 candidate (D061: Hodos would use it for its run caps, not blocking).
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
