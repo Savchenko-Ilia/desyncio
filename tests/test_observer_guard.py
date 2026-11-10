@@ -147,7 +147,17 @@ def test_forbidden_call_raises_in_debug_mode(name: str) -> None:
     assert log[2:] == ["after emit"]
 
 
-@pytest.mark.parametrize("name", ["loop.call_soon", "sim.random", "sim.interrupt"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sim.spawn",
+        "loop.call_soon",
+        "loop.call_later",
+        "sim.interrupt",
+        "sim.random",
+        "sim.np_random",
+    ],
+)
 def test_forbidden_call_not_checked_outside_debug_mode(name: str) -> None:
     """Outside debug mode nothing is checked (the effect is undefined)."""
     log: list[str] = []
