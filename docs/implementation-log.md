@@ -1309,3 +1309,111 @@ Branch: feat/EX-01 (+ fix/EX-01-1)  ·  Merged: 98614ba
 **Gotchas.** `bank.py` takes about 1.5 s, most of it importing scipy for `confidence_interval`.
 
 **Follow-ups.** None.
+
+## RES-04 — Resource names (2026-11-10, batch 29)
+Branch: feat/RES-04  ·  Merged: cd24156
+
+**Approach.** A keyword-only `name: str | None = None` on `Resource`, `PriorityResource`, `PreemptiveResource` (passed through `super().__init__`) and `ScheduledResource`, with a read-only `name` property. One helper, `_check_name` in `resource.py`, raises `TypeError` for a non-`str` and `ValueError` for `""`; `scheduled.py` imports it. It runs before any side effect: in `ScheduledResource` before `sim.now` and before the driver task starts, so a bad name leaves no stray task.
+
+**asyncio internals.** None; the name is only stored. Registration, the `resource-N` default and the duplicate check come with EVT-04 (D060).
+
+**Trade-offs.** The one parametrised test (4 cases) lives in `tests/test_scheduled.py`, not `tests/test_resource.py` as the row listed: building a `ScheduledResource` needs a run and the `day_shifts` helper from that file, and one test over all four classes is the smallest suite. The lead accepted the deviation.
+
+**Review findings.** PASS, no MUST. The reviewer's mutations (no forwarding in `PreemptiveResource`, no validation in `ScheduledResource`/`PriorityResource`, no empty check) were all caught.
+
+**Gotchas.** `name=True` raises `TypeError` (bool is not a str); a whitespace-only name is accepted (the spec only rejects empty).
+
+**Follow-ups (SHOULD).** The test does not assert that `name` is read-only (it is: no setter). `_check_name` is a private name imported across modules; EVT-04 touches both files and may move it.
+
+## EVT-01 — Event types (2026-11-10, batch 29)
+Branch: feat/EVT-01 + fix/EVT-01-1  ·  Merged: 453562a
+
+**Approach.** New `desyncio.events`: `Event(t, seq)` and the built-ins `RunStarted(seed, until)`, `RunFinished(reason)`, `ResourceChanged(resource, in_use, capacity, queue_len)`, all `@dataclass(frozen=True, slots=True, kw_only=True)`. `to_dict()` walks `dataclasses.fields(self)`, so it covers user subclasses, and adds `"kind"` (the class name). `EVENT_SCHEMA_VERSION = 1`. The module docstring is the public contract for subclassing (D062): the decorator and why each flag, primitives only, `kind` collisions, `sim.emit(Kind, **fields)` as the intended use.
+
+**asyncio internals.** None. Python dataclass details: `kw_only` exempts fields from the "no required field after a default" rule, so subclasses can add required fields; each subclass must repeat `slots=True` or it gets a `__dict__` again (probe-verified); a non-frozen subclass of a frozen dataclass raises `TypeError` at class creation.
+
+**Trade-offs.** `RunFinished.reason` is a `Literal`, not validated at construction: the sim is the only producer, and a `__post_init__` would complicate the subclass contract. The reviewer agreed.
+
+**Review findings.** Round 1 MUST: the introspection test walked a hard-coded list, so a new built-in with a `list` field passed. Now the list is derived from the module, and every `Event` subclass there must be in `__all__`. The lead had the fixer make that check one-directional (D063), because EVT-02 and EVT-06 add non-event names to `__all__`.
+
+**Gotchas.** Dropping `frozen=True` from a built-in fails at collection (TypeError), not as a test failure: loud enough.
+
+**Follow-ups (SHOULD).** Assert the derived list is non-empty (otherwise the test is vacuous if the module filter ever stops matching). An `Event` subclass imported into `events.py` from elsewhere would be skipped by the `__module__` filter.
+
+## EVT-02 — Event bus (2026-11-10, batch 30)
+Branch: feat/EVT-02 + fix/EVT-02-1  ·  Merged: 5fa61f2
+
+**Approach.** New `desyncio/bus.py` with `Bus` and `Subscription` (re-exported from `desyncio.events`). One bus per loop, on `_LoopState` (D017; the loop exposes it as a `bus` property). `sim.subscribe(handler, kinds=None)` and `sim.emit(Kind, **fields)`; `run(..., subscribers=[...])`, forwarded by `replicate` (the same handlers for every replication). Dispatch is inline and in subscription order, over a per-class cache of interested handlers (copy-on-write tuples, cleared on subscribe/close), so (un)subscribing during dispatch applies from the next event. `seq` ticks on every emit; with no interested handler nothing is built. Two helpers for primitives: `emit_event(Kind, **fields)` (no-op off a `VirtualTimeLoop`) and `register_resource_name(resource, name)` (idempotent per run; automatic `resource-N` skips taken names, D064).
+
+**asyncio internals.** `RunStarted` is queued with `loop.call_soon` before `Runner.run` creates the main task; `_ready` is FIFO, so it is delivered inside the loop before main's first step. `RunFinished` is delivered in `run()`'s `finally`, after the loop has stopped (for `until`, `_LimitReached` has already unwound it), so its handlers cannot use `sim`. Then the bus closes, before `runner.close()` cancels leftover tasks (D057). Handler errors and trace-sink errors share one path, `_on_observer_error`: first error wins, `loop.stop()` (only while running and not closing) ends the iteration, `run_forever` raises it; `pop_trace_error` became `pop_observer_error`.
+
+**Trade-offs.** `RunFinished` outside the running loop was the only way to deliver it for `until`. Catching `BaseException` in dispatch (KeyboardInterrupt contained, then re-raised by `run`) follows the tracer's rule. `kinds=()` raises `ValueError` (use `None`).
+
+**Review findings.** Round 1: one MUST, a validation test that could not fail (never-awaited warnings go to `sys.unraisablehook`, not `warnings`; now it checks `cr_frame is None` and hooks `unraisablehook`). Three SHOULDs promoted (D064): automatic names skip taken names; the unused `Bus.error` removed; subscribe-after-close tested. The re-review killed 20 mutants; the 4 survivors are equivalent. Probes: 48 handler-failure positions on the grant/release/handover paths of three resource classes leaked nothing; `until` with leftover tasks gave identical lists over 3 runs.
+
+**Gotchas.** A handler failing in main's last step while main also raises: `run` raises the handler error and main's exception is dropped (no `__context__`); a `RunFinished` handler error carries main's exception as `__context__`. Documented in `run`. Emit cost, 1e6 calls (informative): `sim.emit` 0.55 s with no subscriber, 1.24 s with one no-op subscriber; `emit_event` 0.28 s / 0.88 s.
+
+**Follow-ups (SHOULD).** Test the "dropped, no `__context__`" half of that docstring. `test_run_subscribers_shape` could fold into `test_subscribe_validation`.
+
+## EVT-04 — Resource emission (2026-11-10, batch 31)
+Branch: feat/EVT-04 + fix/EVT-04-1 + fix/EVT-04-2  ·  Merged: aa069cf
+
+**Approach.** Each existing `_changed()` call in `Resource`, `PriorityResource`, `PreemptiveResource` and `ScheduledResource` emits one `ResourceChanged(resource, in_use, capacity, queue_len)` via `bus.emit_event`, right after the monitor; a preemption swap and a shift capacity change stay one call each. Names come from `bus.register_resource_name`: the first three classes register at the top of `_acquire` (before the semaphore check, the sequence number and preemption) and cache the result in `_run_name`; `ScheduledResource` registers when built (its driver can change capacity before any acquire) and again at the top of `_acquire` (for use in a later run). A duplicate explicit name raises `ValueError` before any state change. `_check_name` became `check_resource_name`.
+
+**asyncio internals.** None new; release stays synchronous (D030), and the emit point is after the state has settled (D023 v2), so a raising handler (contained by the bus, D058) cannot leak a unit.
+
+**Trade-offs.** Release and cancel do not register: with `async with` they always follow an acquire in the same run. Holding a unit across runs with manual `__aenter__`/`__aexit__` is unsupported (the release reports the acquiring run's name; documented). Cost with nobody subscribed: about +0.4 µs per state change on a tight uncontended loop (about 2x; `emit_event` ~170 ns, the running-bus lookup ~110 ns, registration ~160 ns per acquire). The reviewer found no cheaper path inside resource.py; the place to cut it is bus.py (one combined helper). Accepted for now; EVT-07 measures the M/M/1 figure.
+
+**Review findings.** Round 1 MUST: a `ScheduledResource` reused in a later run kept its stale name (two resources named `resource-1` in one stream); fixed by registering in `_acquire` too, and two false comments corrected. A false `_register` docstring promoted to MUST (D011). Round 2 MUST: that second registration hid the construction-time one from every test; two tests added (an unacquired resource's shift change is named; a duplicate name raises at construction with no driver task). D065: one line of `tests/test_bus.py` changed because resources now emit.
+
+**Gotchas.** A failed registration leaves a `PriorityRequest` used; retry with a new request.
+
+**Follow-ups (SHOULD).** The two later-run ScheduledResource tests never acquire in run A, so a "register only on the first acquire ever" mutation survives; add `async with` in run A. `ScheduledResource.__init__` registers before `capacity_at`/`create_task`; if those raised, the name would stay taken for that run.
+
+## EVT-06 — Observer guard (2026-11-10, batch 31)
+Branch: feat/EVT-06 + fix/EVT-06-1  ·  Merged: 1c63e63
+
+**Approach.** `run(debug=)` (bool or None) goes to `asyncio.Runner(debug=)`, and `replicate` forwards it (D066). The guard is on iff `loop.get_debug()`. `Bus._deliver` sets `Bus._dispatching` around the handler calls (saved and restored in `finally`, so nested emits and raising handlers are safe). Checks: `VirtualTimeLoop._check_callback` (asyncio calls it only in its existing debug branch) — `call_soon` records, `call_at`/`call_later`/`call_at_priority` raise before the timer exists; `create_task` raises and closes the coroutine; `sim.random`/`np_random`/`interrupt` raise; `sim.emit` raises; `emit_event` (primitives) records (D068). `call_soon_threadsafe` is unguarded (D066). `Bus.forbid` records before raising, so a handler cannot swallow `ObserverError` (a `RuntimeError` subclass, importable from `desyncio.events`).
+
+**asyncio internals.** Raising inside asyncio's C `Future._schedule_callbacks` (a handler resolving a future) loses the waiter's wakeup and deadlocks teardown, hence record-not-raise for `call_soon`. The same reasoning applies inside a resource's `_changed()` (D068). asyncio's async-generator finalizer runs `call_soon_threadsafe` when GC drops a suspended generator mid-handler, hence that exemption.
+
+**Trade-offs.** Cost with debug off is within noise (one attribute test per emit, two stores per delivery, one `_debug` test in `create_task`, `sim.random`, `np_random`, `interrupt`). The guard cannot see mutation that schedules nothing (e.g. `store` internals, cancelling a task already in `_ready`).
+
+**Review findings.** Round 1: three test MUSTs (the "names the call" check was beaten by the `call_soon` stack note because pytest's `match` searches `__notes__`; the `call_soon_threadsafe` exemption untested; "no check outside debug mode" missed `create_task`); D067 promoted two small tests and four docstring fixes; the D067 probe found the resource-consistency bug that became D068. Re-review: 33 mutants, 32 killed, 1 equivalent; no false positives in debug-mode models with resources emitting.
+
+**Gotchas.** GC during a handler can trigger the guard for a leaked task's release (D068 addendum).
+
+**Follow-ups (SHOULD).** `run`'s and `sim.subscribe`'s docstrings name only `call_soon` as recorded; add primitives' events. Test D068 through a real resource (a hand-driven `__aenter__` on a busy `Resource` suspends and `queue_length` rises).
+
+## EVT-03 — Event determinism (2026-11-10, batch 32)
+Branch: feat/EVT-03 + fix/EVT-03-1  ·  Merged: 6f869e0
+
+**Approach.** Tests only. A new `tests/models/mm1_resource.py` (public API: a named `Resource`, named streams, `sim.spawn`; 300 customers) and six tests in `tests/test_event_determinism.py`: same seed → identical `to_dict()` lists in two runs (RunStarted first, RunFinished last, seq 0..n-1); a different seed differs; a fresh interpreter (`sys.executable -c`, PYTHONHASHSEED 0 and 4242, explicit `sys.path`) gives the same sha256 of the JSON list; results and seqs are identical with no subscriber, a `kinds` filter and all events; an `until` cut with holders and waiters left over is repeatable and ends with `RunFinished("until")`; same-`t` events follow creation order, checked against an explicit order.
+
+**asyncio internals.** Teardown cancels leftover tasks in an address-dependent order, so within one process repeated runs can still differ (the reviewer saw it); the deterministic guard that teardown emits nothing is the "last event is `RunFinished`" assertion, and the test says so.
+
+**Review findings.** Round 1 MUST: the filter test could not catch dense renumbering from 1 (`ResourceChanged` is one contiguous block); now also filters on `(RunStarted, RunFinished)`. Three promoted SHOULDs (D070). The re-review killed 13 mutants.
+
+**Follow-ups (SHOULD).** A model reading the wall clock is caught only by the bare-vs-observed comparison.
+
+## EVT-07 — Overhead benchmark (2026-11-10, batch 32)
+Branch: feat/EVT-07 + fix/EVT-07-1  ·  Merged: 76b88d1
+
+**Approach.** `bench/events_bench.py`, run by hand: a self-contained `Resource` M/M/1 (20,000 customers, about 58,000 events per run) timed with no subscriber, a subscriber for an unrelated kind, one no-op subscriber for all events, a recording subscriber, and an `asyncio.Semaphore` baseline that cannot emit (an upper bound: it also differs from `Resource` in other ways). Every configuration is warmed up, the order rotates per round, `gc.collect()` runs before each timed run (GC stays on while timing, so a configuration pays for its own allocations), and medians are quoted. The script asserts that model results are identical in all configurations; `--check-fail` perturbs one configuration to show that check failing. Results and method in `bench/README.md`.
+
+**Results.** Python 3.13, three runs: one no-op subscriber +20% to +27% over no subscriber (medians); the reviewer's fourth run gave +12%. Within the owner's informative ≤30% (D069); not a gate. No subscriber is within a few percent to +15% of the Semaphore upper bound. Noise on the shared machine is large (a configuration's median 3% to 32% above its best).
+
+**Review findings.** First review PASS; the lead promoted the methodology and README-accuracy SHOULDs (D070). The fix round also corrected an arithmetic error in "Where the cost comes from".
+
+**Follow-ups (SHOULD).** Widen the README's stated ranges or add the fourth run (+12% / +10%, a 4 µs gap) so "+20% to +27%" does not read as the expected value. LOOP-12 (comparison with SimPy) stays deferred (D018).
+
+## EVT-08 — Guide, example, exports (2026-11-10, batch 33)
+Branch: feat/EVT-08  ·  Merged: af19a80
+
+**Approach.** `docs/observing.md` ("Observing a simulation", 11 executed examples): subscribing, the built-in events, names and `seq`, custom events with a small source → service → sink model that defines its own entity events (as Hodos does) and computes waits from the stream, delivery and error rules (D057, D058, D061), the debug guard (D059, D066, D068), the relation to `monitor=` and the trace hook, determinism within one runtime build, and overhead (≤30%, D069). `examples/recorder.py`: a `ColumnarRecorder` with wait statistics and time-weighted utilisation from `ResourceChanged`. Exports: `Subscription` and `ObserverError` in `desyncio.__all__`; `desyncio.events` imported explicitly by `__init__` (not in `__all__`, D072); `Event` and the built-ins live in `desyncio.events` only. D071 docstring and bench/README follow-ups done.
+
+**Review findings.** PASS, no MUST. The reviewer checked every claim with probes and mutated four shown outputs (each failed one test); it re-derived the recorder's statistics independently.
+
+**Gotchas.** The docs-examples test allows only top-level `desyncio` imports and `python`/`text` fences, so the guide imports `from desyncio import events`.
+
+**Follow-ups (SHOULD).** Trim the guide (580 lines vs 469 for calendar.md): the delivery-rule bullets repeat the subscribing section, and "seq has gaps under a filter" appears twice. The built-in events table should note that `RunFinished` is absent after a handler error. The overhead range in the guide is from 3.13 runs; say so. Wrap two long lines in bench/README.md.

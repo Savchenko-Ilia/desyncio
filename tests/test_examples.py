@@ -26,6 +26,11 @@ KEY_LINES = {
         "Thu 04 Jun 2026      62        0          0",  # the closed day: nobody treated
         "week total          348      202          5",
     ],
+    "recorder.py": [
+        "events recorded: 11330 (last seq 11329)",
+        "mean wait: 1.67 min, max 15.73 min",
+        "clerk utilisation: 0.770",
+    ],
 }
 
 

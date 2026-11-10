@@ -37,6 +37,9 @@ EXPORTS: dict[str, str | None] = {
     "Schedule": "schedule",
     "ScheduledResource": "scheduled",
     "ShiftEnded": "scheduled",
+    # Defined in desyncio.bus; re-exported by desyncio.events, their public home (D062).
+    "Subscription": "events",
+    "ObserverError": "events",
 }
 
 SUBMODULES = sorted(
@@ -76,6 +79,19 @@ def _run_python(code: str) -> subprocess.CompletedProcess[str]:
 def test_import_desyncio_succeeds_in_a_fresh_interpreter() -> None:
     """An import cycle fails here by name, not as a collection error."""
     result = _run_python("import desyncio")
+    assert result.returncode == 0, result.stderr
+
+
+def test_events_module_is_reachable_after_import_desyncio() -> None:
+    """`desyncio.events` is public (EVT-08): `import desyncio` alone binds it, and
+    the event classes themselves stay in that module, not at the top level."""
+    result = _run_python(
+        "import desyncio, types; "
+        "assert isinstance(desyncio.events, types.ModuleType); "
+        "assert desyncio.events.Event.__module__ == 'desyncio.events'; "
+        "assert 'events' in desyncio.__dict__; "
+        "assert not hasattr(desyncio, 'Event')"
+    )
     assert result.returncode == 0, result.stderr
 
 

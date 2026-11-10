@@ -26,12 +26,15 @@ from random import Random
 from typing import TYPE_CHECKING, Any
 
 from desyncio._validate import to_float
+from desyncio.bus import Handler, Subscription
 from desyncio.interrupt import Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
 from desyncio.runners import current_random_streams
 
 if TYPE_CHECKING:
     import numpy as np
+
+    from desyncio.events import Event
 
 _NOT_RUNNING = (
     "desyncio.sim can only be used inside desyncio.run(...), on a "
@@ -48,6 +51,17 @@ def _loop() -> VirtualTimeLoop:
     if not isinstance(loop, VirtualTimeLoop):
         raise RuntimeError(_NOT_RUNNING)
     return loop
+
+
+def _forbid_in_handler(loop: VirtualTimeLoop, call: str) -> None:
+    """Observer guard (D059): raise if an event handler makes ``call``.
+
+    Callers test ``loop._debug`` first, so outside debug mode the guard
+    costs one attribute load.
+    """
+    bus = loop.bus
+    if bus._dispatching:
+        raise bus.forbid(call)
 
 
 def _check_delay(dt: object) -> float:
@@ -119,6 +133,8 @@ class Sim:
         Raises:
             TypeError: ``coro`` is not a coroutine object.
             RuntimeError: outside ``desyncio.run(...)``.
+            ObserverError: called from an event handler in debug mode (D059;
+                checked by ``loop.create_task``).
         """
         try:
             loop = _loop()
@@ -143,8 +159,12 @@ class Sim:
         Raises:
             RuntimeError: outside ``desyncio.run(...)``, or in a task created
                 with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            ObserverError: called from an event handler in debug mode (a
+                draw there would change the model's next value; D059).
         """
-        _loop()
+        loop = _loop()
+        if loop._debug:  # type: ignore[attr-defined]
+            _forbid_in_handler(loop, "sim.random")
         try:
             streams = current_random_streams()
         except RuntimeError:
@@ -168,8 +188,11 @@ class Sim:
         Raises:
             RuntimeError: outside ``desyncio.run(...)``, or in a task created
                 with a fresh ``contextvars.Context`` (it lacks the run's streams).
+            ObserverError: called from an event handler in debug mode (D059).
         """
-        _loop()
+        loop = _loop()
+        if loop._debug:  # type: ignore[attr-defined]
+            _forbid_in_handler(loop, "sim.np_random")
         try:
             streams = current_random_streams()
         except RuntimeError:
@@ -218,9 +241,75 @@ class Sim:
             RuntimeError: ``task`` is finished, is the calling task itself, or
                 is not inside an ``interruptible()`` block; or outside
                 ``desyncio.run(...)``.
+            ObserverError: called from an event handler in debug mode (D059).
         """
-        _loop()
+        loop = _loop()
+        if loop._debug:  # type: ignore[attr-defined]
+            _forbid_in_handler(loop, "sim.interrupt")
         interrupt_task(task, cause)
+
+    def subscribe(
+        self, handler: Handler, *, kinds: "tuple[type[Event], ...] | None" = None
+    ) -> Subscription:
+        """Call ``handler(event)`` for every event of this run from now on.
+
+        ``handler`` is a plain function (an ``async def`` is refused); it is
+        called synchronously at each emit point, in subscription order (see
+        :mod:`desyncio.bus` for why). ``kinds`` restricts it to events that
+        are instances of one of these ``Event`` subclasses; ``None`` (the
+        default) means every event. Subscribing (or closing) while an event
+        is being delivered takes effect from the next event.
+
+        If ``handler`` raises, the exception never reaches the emitting
+        task: delivery stops for good, the loop stops after the current
+        iteration, and ``desyncio.run`` raises that exception (D058).
+
+        A handler observes and must not change the run. In asyncio debug
+        mode (``desyncio.run(..., debug=True)``) creating tasks, scheduling
+        callbacks or timers, ``sim.interrupt``, ``sim.random``,
+        ``sim.np_random`` and ``sim.emit`` inside a handler end the run with
+        ``ObserverError`` (raised at the call, except ``loop.call_soon`` and
+        a primitive's own event, such as ``ResourceChanged``, emitted during
+        dispatch: those only record it, so the state change completes, D068;
+        see :mod:`desyncio.bus`); ``subscribe`` and ``Subscription.close``
+        stay allowed. Garbage collection during a handler can close a leaked
+        task that held a resource; its release then records an
+        ``ObserverError`` that blames the handler (D068 addendum). The
+        guard cannot see direct mutation that schedules nothing, such as
+        ``store.shutdown()`` or ``task.cancel()`` with no waiter to wake;
+        see :mod:`desyncio.bus`.
+
+        To see ``RunStarted``, subscribe with ``desyncio.run(...,
+        subscribers=[...])`` instead.
+
+        Returns:
+            a :class:`~desyncio.events.Subscription`; ``close()`` it, or use
+            it as a context manager, to stop receiving events.
+
+        Raises:
+            TypeError: ``handler`` is not callable or is an ``async def``
+                function (best effort), or ``kinds`` is not a tuple of
+                ``Event`` subclasses.
+            ValueError: ``kinds`` is an empty tuple.
+            RuntimeError: outside ``desyncio.run(...)``.
+        """
+        return _loop().bus.subscribe(handler, kinds)
+
+    def emit(self, kind: "type[Event]", /, **fields: Any) -> None:
+        """Emit a custom event: ``sim.emit(OrderShipped, order_id=7)``.
+
+        The sim fills in ``t`` (``sim.now``) and ``seq``. ``seq`` advances on
+        every call, whether or not anyone listens; the event object is built
+        only if a subscriber wants ``kind``. Field names are therefore
+        checked (by the dataclass constructor) only when it is built.
+
+        Raises:
+            TypeError: ``kind`` is not an ``Event`` subclass; or, when the
+                event is built, ``fields`` do not match its fields.
+            RuntimeError: outside ``desyncio.run(...)``.
+            ObserverError: called from an event handler in debug mode (D059).
+        """
+        _loop().bus.emit(kind, fields)
 
 
 sim = Sim()
