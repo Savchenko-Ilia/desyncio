@@ -6,6 +6,7 @@ Informative only, never a gate (D060). See ``bench/README.md`` for method and re
 
 import argparse
 import asyncio
+import gc
 import platform
 import statistics
 import sys
@@ -80,13 +81,23 @@ CONFIGS = [
 ]
 
 
-def time_once(cfg: Config, customers: int) -> tuple[float, Result, int]:
-    """Run once; return (wall seconds, model result, events recorded)."""
+def time_once(
+    cfg: Config, customers: int, seed: int = SEED
+) -> tuple[float, Result, int]:
+    """Run once; return (wall seconds, model result, events recorded).
+
+    ``gc.collect()`` runs before the timer starts, so garbage left by the
+    previous run (e.g. the recording subscriber's event objects) is not
+    collected on this run's clock. The collector stays *enabled* while timing:
+    collections caused by a configuration's own allocations (building and
+    keeping event objects) are part of what that configuration costs.
+    """
     recorded: list[Event] = []
     main = make_model(customers, cfg.use_resource)
     subscribers = cfg.subscribers(recorded)
+    gc.collect()
     start = time.perf_counter()
-    result = desyncio.run(main(), seed=SEED, subscribers=subscribers)
+    result = desyncio.run(main(), seed=seed, subscribers=subscribers)
     elapsed = time.perf_counter() - start
     return elapsed, result, len(recorded)
 
@@ -114,16 +125,21 @@ def main() -> int:
         f"{customers} customers, {reps} reps per configuration\n"
     )
 
-    # Warm-up (imports, caches), not timed.
-    time_once(CONFIGS[1], min(customers, 500))
+    # Warm-up (imports, caches, the bus's per-class cache), not timed: one
+    # untimed run of every configuration, so none of them is timed cold.
+    for cfg in CONFIGS:
+        time_once(cfg, min(customers, 2_000))
 
     # Interleave configurations round by round so that drift in machine load
-    # affects all of them alike.
+    # affects all of them alike, and rotate the order each round so that no
+    # configuration always runs first (or always right after the allocation-
+    # heavy recording subscriber).
     times: dict[str, list[float]] = {c.name: [] for c in CONFIGS}
     results: dict[str, Result] = {}
     events_emitted = 0
-    for _ in range(reps):
-        for cfg in CONFIGS:
+    for rnd in range(reps):
+        shift = rnd % len(CONFIGS)
+        for cfg in CONFIGS[shift:] + CONFIGS[:shift]:
             elapsed, result, recorded = time_once(cfg, customers)
             times[cfg.name].append(elapsed)
             if cfg.name in results and results[cfg.name] != result:
@@ -150,11 +166,14 @@ def main() -> int:
         f"{events_emitted}\n"
     )
 
+    # The "vs" columns compare medians: a best-of time rewards one lucky run,
+    # and on a shared machine luck is not evenly spread across configurations.
+    med_ref = statistics.median(times[CONFIGS[1].name])
+    med_base = statistics.median(times[CONFIGS[0].name])
     best_ref = min(times[CONFIGS[1].name])
-    best_base = min(times[CONFIGS[0].name])
     header = (
         f"{'configuration':<34} {'best s':>7} {'median s':>8} {'us/cust':>8} "
-        f"{'Mev/s':>6} {'vs 1':>7} {'vs sem':>7}"
+        f"{'Mev/s':>6} {'vs 1':>7} {'vs sem':>7} {'best vs 1':>9}"
     )
     print(header)
     print("-" * len(header))
@@ -164,16 +183,19 @@ def main() -> int:
         # Events/second: events a subscriber would receive per second of run
         # (not meaningful for configurations that cannot emit).
         evps = (
-            f"{events_emitted / best / 1e6:6.2f}" if cfg.use_resource else f"{'-':>6}"
+            f"{events_emitted / median / 1e6:6.2f}" if cfg.use_resource else f"{'-':>6}"
         )
         print(
-            f"{cfg.name:<34} {best:7.3f} {median:8.3f} {best / customers * 1e6:8.2f} "
-            f"{evps} {(best / best_ref - 1) * 100:+6.1f}% "
-            f"{(best / best_base - 1) * 100:+6.1f}%"
+            f"{cfg.name:<34} {best:7.3f} {median:8.3f} "
+            f"{median / customers * 1e6:8.2f} "
+            f"{evps} {(median / med_ref - 1) * 100:+6.1f}% "
+            f"{(median / med_base - 1) * 100:+6.1f}% "
+            f"{(best / best_ref - 1) * 100:+8.1f}%"
         )
     print(
-        "\nbest/median of the repetitions; 'vs 1' and 'vs sem' compare best times; "
-        "Mev/s = emitted events per second of the run."
+        "\nbest/median of the repetitions; 'vs 1' and 'vs sem' compare MEDIAN "
+        "times ('best vs 1' compares best times, for reference); us/cust and "
+        "Mev/s use the median; Mev/s = emitted events per second of the run."
     )
     return 0
 
