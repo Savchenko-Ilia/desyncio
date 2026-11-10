@@ -1395,3 +1395,14 @@ Branch: feat/EVT-03 + fix/EVT-03-1  ·  Merged: 6f869e0
 **Review findings.** Round 1 MUST: the filter test could not catch dense renumbering from 1 (`ResourceChanged` is one contiguous block); now also filters on `(RunStarted, RunFinished)`. Three promoted SHOULDs (D070). The re-review killed 13 mutants.
 
 **Follow-ups (SHOULD).** A model reading the wall clock is caught only by the bare-vs-observed comparison.
+
+## EVT-07 — Overhead benchmark (2026-11-10, batch 32)
+Branch: feat/EVT-07 + fix/EVT-07-1  ·  Merged: 76b88d1
+
+**Approach.** `bench/events_bench.py`, run by hand: a self-contained `Resource` M/M/1 (20,000 customers, about 58,000 events per run) timed with no subscriber, a subscriber for an unrelated kind, one no-op subscriber for all events, a recording subscriber, and an `asyncio.Semaphore` baseline that cannot emit (an upper bound: it also differs from `Resource` in other ways). Every configuration is warmed up, the order rotates per round, `gc.collect()` runs before each timed run (GC stays on while timing, so a configuration pays for its own allocations), and medians are quoted. The script asserts that model results are identical in all configurations; `--check-fail` perturbs one configuration to show that check failing. Results and method in `bench/README.md`.
+
+**Results.** Python 3.13, three runs: one no-op subscriber +20% to +27% over no subscriber (medians); the reviewer's fourth run gave +12%. Within the owner's informative ≤30% (D069); not a gate. No subscriber is within a few percent to +15% of the Semaphore upper bound. Noise on the shared machine is large (a configuration's median 3% to 32% above its best).
+
+**Review findings.** First review PASS; the lead promoted the methodology and README-accuracy SHOULDs (D070). The fix round also corrected an arithmetic error in "Where the cost comes from".
+
+**Follow-ups (SHOULD).** Widen the README's stated ranges or add the fourth run (+12% / +10%, a 4 µs gap) so "+20% to +27%" does not read as the expected value. LOOP-12 (comparison with SimPy) stays deferred (D018).
