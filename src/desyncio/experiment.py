@@ -4,9 +4,10 @@ numpy and scipy are imported lazily inside the functions, so importing this
 module (and ``desyncio``) does not import them.
 """
 
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Sequence
 from typing import Any, overload
 
+from desyncio.bus import Subscriber
 from desyncio.realtime import RealTimePacer
 from desyncio.runners import run
 from desyncio.trace import TraceSink
@@ -24,6 +25,7 @@ def replicate[T](
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
+    subscribers: Iterable[Subscriber] | None = None,
 ) -> list[T]: ...
 @overload
 def replicate[T](
@@ -35,6 +37,7 @@ def replicate[T](
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
+    subscribers: Iterable[Subscriber] | None = None,
 ) -> list[T | None]: ...
 def replicate[T](
     model: Callable[[], Coroutine[Any, Any, T]],
@@ -45,6 +48,7 @@ def replicate[T](
     speed: float | None = None,
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
+    subscribers: Iterable[Subscriber] | None = None,
 ) -> list[T] | list[T | None]:
     """Run ``model`` ``n`` times and return the results in order.
 
@@ -59,6 +63,11 @@ def replicate[T](
     state across them: a pacer that ends one run paused starts the next run
     paused (CLN-03, D039).
 
+    ``subscribers`` (see ``desyncio.run``) are subscribed to every run: the
+    same handler objects receive the events of run 0, then of run 1, and so
+    on, each run from its ``RunStarted`` to its ``RunFinished``. The iterable
+    is read once, before the first run.
+
     Raises:
         TypeError: ``n`` is not an int (``bool`` is rejected).
         ValueError: ``n < 1``.
@@ -67,13 +76,30 @@ def replicate[T](
         raise TypeError(f"n must be an int, not {type(n).__name__}")
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
+    # A generator would be exhausted after the first run; run() validates.
+    subs = None if subscribers is None else list(subscribers)
     if until is None:
         return [
-            run(model(), seed=seed + i, speed=speed, pacer=pacer, trace=trace)
+            run(
+                model(),
+                seed=seed + i,
+                speed=speed,
+                pacer=pacer,
+                trace=trace,
+                subscribers=subs,
+            )
             for i in range(n)
         ]
     return [
-        run(model(), until=until, seed=seed + i, speed=speed, pacer=pacer, trace=trace)
+        run(
+            model(),
+            until=until,
+            seed=seed + i,
+            speed=speed,
+            pacer=pacer,
+            trace=trace,
+            subscribers=subs,
+        )
         for i in range(n)
     ]
 

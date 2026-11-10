@@ -53,7 +53,7 @@ import math
 import selectors
 from collections.abc import Callable, Coroutine, Mapping
 from contextvars import Context
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from desyncio.clock import VirtualClock
 from desyncio.guards import RealIOGuardMixin
@@ -63,6 +63,9 @@ from desyncio.scheduling import (
     PriorityTimerHandle,
 )
 from desyncio.trace import Tracer, TraceSink, _TracedCoroutine
+
+if TYPE_CHECKING:
+    from desyncio.bus import Bus
 
 
 class SimulationDeadlock(RuntimeError):
@@ -245,30 +248,37 @@ class _LoopState:
         tracer: the :class:`~desyncio.trace.Tracer` that newly created tasks
             are wrapped with, or ``None`` (tracing off, or switched off for
             new tasks by ``stop_tracing_new_tasks``).
-        closing: set by ``stop_tracing_new_tasks``; a sink error from then
-            on no longer stops the loop.
+        closing: set by ``stop_tracing_new_tasks``; an observer error from
+            then on no longer stops the loop.
         trace_error: the first exception the trace sink raised, or ``None``.
-        trace_error_pending: ``trace_error`` has not been raised yet.
+        bus: the :class:`~desyncio.bus.Bus` of ``sim.subscribe``/``sim.emit``.
+        observer_error: the first exception from the trace sink *or* an event
+            handler, whichever came first, or ``None``.
+        observer_error_pending: ``observer_error`` has not been raised yet.
     """
 
     __slots__ = (
+        "bus",
         "closing",
         "next_task_name",
+        "observer_error",
+        "observer_error_pending",
         "sequence",
         "task_names",
         "trace_error",
-        "trace_error_pending",
         "tracer",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, bus: "Bus") -> None:
         self.sequence = itertools.count()
         self.task_names = itertools.count(1)
         self.next_task_name: str | None = None
         self.tracer: Tracer | None = None
         self.closing = False
         self.trace_error: BaseException | None = None
-        self.trace_error_pending = False
+        self.bus = bus
+        self.observer_error: BaseException | None = None
+        self.observer_error_pending = False
 
 
 class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
@@ -320,7 +330,11 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         # _LoopState for why (instance-dict size and _run_once speed). Task
         # naming (D015) uses one counter per loop, so names do not depend on
         # how many tasks other loops (or plain asyncio) created before.
-        self._state = _LoopState()
+        # Imported here, not at the top: bus.py imports this module (for
+        # isinstance checks), and events.py imports bus.py.
+        from desyncio.bus import Bus
+
+        self._state = _LoopState(Bus(self.time, self._on_observer_error))
         if trace is not None:
             self._state.tracer = Tracer(trace, self.time, self._on_trace_error)
         self.pacer = pacer
@@ -463,7 +477,9 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
 
         It also marks the start of shutdown: a sink error after this call no
         longer stops the loop (stopping would abandon the cleanup and leave
-        tasks pending); it is only recorded, for :meth:`pop_trace_error`.
+        tasks pending); it is only recorded, for :meth:`pop_observer_error`.
+        (``desyncio.run`` has closed the event bus before this, so no event
+        handler runs during shutdown.)
         """
         self._state.tracer = None
         self._state.closing = True
@@ -473,45 +489,70 @@ class VirtualTimeLoop(RealIOGuardMixin, asyncio.SelectorEventLoop):
         """The first exception the trace sink raised, or ``None``."""
         return self._state.trace_error
 
-    def pop_trace_error(self) -> BaseException | None:
-        """Return the sink's exception if it has not been raised yet, once.
+    @property
+    def bus(self) -> "Bus":
+        """The event bus of this loop (``sim.subscribe``, ``sim.emit``).
 
-        ``desyncio.run`` calls this after closing the loop, to raise a sink
-        error that happened during cleanup.
+        A property, not an attribute: the bus lives on ``_state`` (D017).
+        """
+        return self._state.bus
+
+    def pop_observer_error(self) -> BaseException | None:
+        """Return the first observer error if it has not been raised yet, once.
+
+        An observer is the trace sink or an event handler. ``desyncio.run``
+        calls this after closing the loop, to raise an error that happened
+        while the loop was not running (a ``RunFinished`` handler) or during
+        cleanup (a trace sink).
         """
         state = self._state
-        if not state.trace_error_pending:
+        if not state.observer_error_pending:
             return None
-        state.trace_error_pending = False
-        return state.trace_error
+        state.observer_error_pending = False
+        return state.observer_error
 
     def _on_trace_error(self, exc: BaseException) -> None:
-        """The tracer's ``on_error``: record the sink's exception, stop the loop.
+        """The tracer's ``on_error``: record the sink's exception, then as
+        :meth:`_on_observer_error`."""
+        self._state.trace_error = exc
+        self._on_observer_error(exc)
 
-        Called from inside a task's step, so it must not raise. ``stop()``
-        only sets a flag: the current ``_run_once`` iteration finishes (every
-        callback already in ``_ready`` runs, as it would have anyway) and
-        then ``run_forever`` returns, and our override raises ``exc``. This
-        is the same "unwind at an iteration boundary" idea as ``until``
-        (``runners._LimitReached``), which unwinds from the clock jump.
+    def _on_observer_error(self, exc: BaseException) -> None:
+        """Record a trace-sink or event-handler exception; stop the loop.
+
+        Called from inside a task's step (or a callback), so it must not
+        raise. ``stop()`` only sets a flag: the current ``_run_once``
+        iteration finishes (every callback already in ``_ready`` runs, as it
+        would have anyway) and then ``run_forever`` returns, and our override
+        raises ``exc``. This is the same "unwind at an iteration boundary"
+        idea as ``until`` (``runners._LimitReached``), which unwinds from the
+        clock jump.
+
+        The first error wins: if the sink and a handler both fail in one run,
+        ``run`` raises whichever failed first and the second is dropped (each
+        observer still switches itself off). ``stop()`` is only called while
+        the loop runs and before shutdown: a ``RunFinished`` handler runs
+        after the loop has stopped, and a stray stop flag would cut the
+        cleanup short.
         """
         state = self._state
-        state.trace_error = exc
-        state.trace_error_pending = True
-        if not state.closing:
+        if state.observer_error is None:
+            state.observer_error = exc
+            state.observer_error_pending = True
+        if not state.closing and self.is_running():
             self.stop()
 
     def run_forever(self) -> None:
-        """Run the loop; raise the trace sink's exception if it stopped it.
+        """Run the loop; raise the observer's exception if one stopped it.
 
         ``run_until_complete`` (and so ``asyncio.Runner.run``) call this, so
-        the sink's exception also comes out of those, instead of "Event loop
-        stopped before Future completed".
+        the exception of a failed trace sink or event handler also comes out
+        of those, instead of "Event loop stopped before Future completed".
         """
         super().run_forever()
         state = self._state
-        if state.trace_error_pending and not state.closing:
-            error = self.pop_trace_error()
+        if state.observer_error_pending and not state.closing:
+            error = self.pop_observer_error()
             assert error is not None
             raise error
 
