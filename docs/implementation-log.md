@@ -1384,3 +1384,14 @@ Branch: feat/EVT-06 + fix/EVT-06-1  ·  Merged: 1c63e63
 **Gotchas.** GC during a handler can trigger the guard for a leaked task's release (D068 addendum).
 
 **Follow-ups (SHOULD).** `run`'s and `sim.subscribe`'s docstrings name only `call_soon` as recorded; add primitives' events. Test D068 through a real resource (a hand-driven `__aenter__` on a busy `Resource` suspends and `queue_length` rises).
+
+## EVT-03 — Event determinism (2026-11-10, batch 32)
+Branch: feat/EVT-03 + fix/EVT-03-1  ·  Merged: 6f869e0
+
+**Approach.** Tests only. A new `tests/models/mm1_resource.py` (public API: a named `Resource`, named streams, `sim.spawn`; 300 customers) and six tests in `tests/test_event_determinism.py`: same seed → identical `to_dict()` lists in two runs (RunStarted first, RunFinished last, seq 0..n-1); a different seed differs; a fresh interpreter (`sys.executable -c`, PYTHONHASHSEED 0 and 4242, explicit `sys.path`) gives the same sha256 of the JSON list; results and seqs are identical with no subscriber, a `kinds` filter and all events; an `until` cut with holders and waiters left over is repeatable and ends with `RunFinished("until")`; same-`t` events follow creation order, checked against an explicit order.
+
+**asyncio internals.** Teardown cancels leftover tasks in an address-dependent order, so within one process repeated runs can still differ (the reviewer saw it); the deterministic guard that teardown emits nothing is the "last event is `RunFinished`" assertion, and the test says so.
+
+**Review findings.** Round 1 MUST: the filter test could not catch dense renumbering from 1 (`ResourceChanged` is one contiguous block); now also filters on `(RunStarted, RunFinished)`. Three promoted SHOULDs (D070). The re-review killed 13 mutants.
+
+**Follow-ups (SHOULD).** A model reading the wall clock is caught only by the bare-vs-observed comparison.
