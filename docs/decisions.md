@@ -408,3 +408,9 @@ The lead sends Hodos the `integration` SHA after batch 30 and after batch 31. Ho
 ## D063 — Batch 29 calls (lead)
 - **RES-04 test placement:** the one parametrised test over the four resource classes lives in `tests/test_scheduled.py`, not `tests/test_resource.py` as the row listed, because building a `ScheduledResource` needs a run and that file's helpers. Accepted: it is the smaller suite.
 - **EVT-01 exports check is one-directional:** every `Event` subclass defined in `desyncio.events` must be in `__all__`, but `__all__` may hold other names. The fixer's first version required equality, which would have failed as soon as EVT-02 and EVT-06 add `Subscription` and `ObserverError` (D062), in files they don't own. Redirected within fix round 1.
+
+## D064 — EVT-02 review: three SHOULDs promoted, automatic resource names skip taken ones (lead)
+The EVT-02 reviewer found one MUST (a validation test that could not fail, because "never awaited" warnings go to `sys.unraisablehook`, not `warnings`). The lead promoted three SHOULDs to MUST for fix round 1:
+- **Automatic names skip taken names.** D060 left open what happens when an unnamed resource's `resource-N` is already used as an explicit name. The branch raised for the *unnamed* resource and still advanced the counter. Now an automatic name takes the next `resource-N` that is free in the run, so an unnamed resource never raises; an explicit name that is already taken still raises `ValueError`, and a failed registration changes no state. Hodos names its resources after its blocks, so this only matters for mixed models, but an error blaming a resource that has no name is wrong.
+- **`Bus.error`** was documented, never read and never tested (a last-wins mutation survived): remove it or test it.
+- **`subscribe` after the bus closes** returns a closed subscription, as documented, but nothing tested it: add an assertion.
