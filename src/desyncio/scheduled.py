@@ -132,6 +132,7 @@ from typing import Any, Self
 from desyncio._monitor import report_monitor_error
 from desyncio.interrupt import Interrupt, Interruptible, interrupt_task
 from desyncio.loop import VirtualTimeLoop
+from desyncio.resource import _check_name
 from desyncio.schedule import Schedule
 from desyncio.sim import _loop, sim
 
@@ -164,6 +165,9 @@ class ScheduledResource:
     Args:
         schedule: the ``Schedule`` that gives the capacity over sim time.
         monitor: optional ``monitor(resource)`` called after every state change.
+        name: optional label (keyword-only); ``TypeError`` if not a ``str``,
+            ``ValueError`` if empty; read back as ``name``. It will appear in
+            ``ResourceChanged.resource`` once events exist.
 
     Create it inside a run (``RuntimeError`` otherwise): it starts the driver
     task. Use it as ``async with res:``; the body is interruptible, and a shift
@@ -175,6 +179,7 @@ class ScheduledResource:
         schedule: Schedule,
         *,
         monitor: Callable[["ScheduledResource"], object] | None = None,
+        name: str | None = None,
     ) -> None:
         if not isinstance(schedule, Schedule):
             raise TypeError(
@@ -182,6 +187,7 @@ class ScheduledResource:
             )
         if monitor is not None and not callable(monitor):
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
+        self._name = _check_name(name)
         now = sim.now  # RuntimeError outside a run
         self._schedule = schedule
         self._monitor = monitor
@@ -195,6 +201,11 @@ class ScheduledResource:
             self._drive(loop, now), name="ScheduledResource driver"
         )
         self._driver.add_done_callback(self._driver_done)
+
+    @property
+    def name(self) -> str | None:
+        """The name given at construction, or ``None``."""
+        return self._name
 
     @property
     def capacity(self) -> int:
