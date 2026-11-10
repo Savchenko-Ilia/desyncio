@@ -1369,3 +1369,18 @@ Branch: feat/EVT-04 + fix/EVT-04-1 + fix/EVT-04-2  ·  Merged: aa069cf
 **Gotchas.** A failed registration leaves a `PriorityRequest` used; retry with a new request.
 
 **Follow-ups (SHOULD).** The two later-run ScheduledResource tests never acquire in run A, so a "register only on the first acquire ever" mutation survives; add `async with` in run A. `ScheduledResource.__init__` registers before `capacity_at`/`create_task`; if those raised, the name would stay taken for that run.
+
+## EVT-06 — Observer guard (2026-11-10, batch 31)
+Branch: feat/EVT-06 + fix/EVT-06-1  ·  Merged: 1c63e63
+
+**Approach.** `run(debug=)` (bool or None) goes to `asyncio.Runner(debug=)`, and `replicate` forwards it (D066). The guard is on iff `loop.get_debug()`. `Bus._deliver` sets `Bus._dispatching` around the handler calls (saved and restored in `finally`, so nested emits and raising handlers are safe). Checks: `VirtualTimeLoop._check_callback` (asyncio calls it only in its existing debug branch) — `call_soon` records, `call_at`/`call_later`/`call_at_priority` raise before the timer exists; `create_task` raises and closes the coroutine; `sim.random`/`np_random`/`interrupt` raise; `sim.emit` raises; `emit_event` (primitives) records (D068). `call_soon_threadsafe` is unguarded (D066). `Bus.forbid` records before raising, so a handler cannot swallow `ObserverError` (a `RuntimeError` subclass, importable from `desyncio.events`).
+
+**asyncio internals.** Raising inside asyncio's C `Future._schedule_callbacks` (a handler resolving a future) loses the waiter's wakeup and deadlocks teardown, hence record-not-raise for `call_soon`. The same reasoning applies inside a resource's `_changed()` (D068). asyncio's async-generator finalizer runs `call_soon_threadsafe` when GC drops a suspended generator mid-handler, hence that exemption.
+
+**Trade-offs.** Cost with debug off is within noise (one attribute test per emit, two stores per delivery, one `_debug` test in `create_task`, `sim.random`, `np_random`, `interrupt`). The guard cannot see mutation that schedules nothing (e.g. `store` internals, cancelling a task already in `_ready`).
+
+**Review findings.** Round 1: three test MUSTs (the "names the call" check was beaten by the `call_soon` stack note because pytest's `match` searches `__notes__`; the `call_soon_threadsafe` exemption untested; "no check outside debug mode" missed `create_task`); D067 promoted two small tests and four docstring fixes; the D067 probe found the resource-consistency bug that became D068. Re-review: 33 mutants, 32 killed, 1 equivalent; no false positives in debug-mode models with resources emitting.
+
+**Gotchas.** GC during a handler can trigger the guard for a leaked task's release (D068 addendum).
+
+**Follow-ups (SHOULD).** `run`'s and `sim.subscribe`'s docstrings name only `call_soon` as recorded; add primitives' events. Test D068 through a real resource (a hand-driven `__aenter__` on a busy `Resource` suspends and `queue_length` rises).
