@@ -297,7 +297,9 @@ def test_handler_error_inside_resource_leaks_nothing() -> None:
         await asyncio.gather(sim.spawn(holder()), sim.spawn(waiter()))
 
     with pytest.raises(Boom):
-        run(main(), subscribers=[(bad, (Ping,)), late.append])
+        # ``late`` is filtered because the resource emits ResourceChanged too
+        # (EVT-04, D065); the point is only that it missed Ping.
+        run(main(), subscribers=[(bad, (Ping,)), (late.append, (RunStarted, Ping))])
     assert len(model) == 1 and isinstance(model[0], ModelError)
     assert res.count == 0 and res.queue_length == 0
     assert _kinds(late) == ["RunStarted"]  # the later subscriber missed Ping
