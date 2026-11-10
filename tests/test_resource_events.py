@@ -31,8 +31,8 @@ ALL = pytest.mark.parametrize(
     [Resource, PriorityResource, PreemptiveResource, one_unit],
     ids=["Resource", "PriorityResource", "PreemptiveResource", "ScheduledResource"],
 )
-# ScheduledResource needs a run to be built, so it can't be reused across runs
-# or used on a plain asyncio loop.
+# ScheduledResource needs a run to be built, so it can't be used on a plain
+# asyncio loop; its reuse in a later run has its own tests below.
 REUSABLE = pytest.mark.parametrize(
     "make",
     [Resource, PriorityResource, PreemptiveResource],
@@ -207,6 +207,51 @@ def test_reuse_across_runs_registers_in_each_run(make: Callable[..., Any]) -> No
         *["resource-1"] * 2,
         "desk",
     ]
+
+
+def test_scheduled_resource_reused_in_a_later_run_registers_again() -> None:
+    # Built in run A, so it was resource-1 there; in run B it must register
+    # on first use and get a name of its own.
+    built: list[ScheduledResource] = []
+    names: list[str] = []
+
+    async def run_a() -> None:
+        built.append(one_unit())
+
+    async def run_b() -> None:
+        async with Resource():
+            pass
+        async with built[0]:
+            pass
+
+    desyncio.run(run_a())
+    desyncio.run(
+        run_b(), subscribers=[(lambda e: names.append(e.resource), (ResourceChanged,))]
+    )
+    assert names == ["resource-1", "resource-1", "resource-2", "resource-2"]
+
+
+def test_scheduled_resource_duplicate_name_in_a_later_run_raises() -> None:
+    built: list[ScheduledResource] = []
+    calls: list[object] = []
+    events: list[ResourceChanged] = []
+
+    async def run_a() -> None:
+        built.append(one_unit(name="desk", monitor=calls.append))
+
+    async def run_b() -> None:
+        (res,) = built
+        async with Resource(name="desk"):
+            pass
+        with pytest.raises(ValueError, match="desk"):
+            async with res:
+                pass
+        assert (res.count, res.queue_length) == (0, 0)
+
+    desyncio.run(run_a())
+    desyncio.run(run_b(), subscribers=[(events.append, (ResourceChanged,))])
+    assert calls == []
+    assert [e.resource for e in events] == ["desk", "desk"]
 
 
 @REUSABLE

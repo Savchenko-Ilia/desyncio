@@ -172,8 +172,9 @@ class ScheduledResource:
         name: optional label (keyword-only); ``TypeError`` if not a ``str``,
             ``ValueError`` if empty; read back as ``name``. Events carry it as
             ``ResourceChanged.resource``; the resource registers it with the
-            run when built, so a name already used in this run raises
-            ``ValueError`` there and an unnamed one gets ``resource-N``.
+            run when built and again on each acquire (for use in a later run),
+            so a name already used in that run raises ``ValueError`` there,
+            before any state change, and an unnamed one gets ``resource-N``.
 
     Create it inside a run (``RuntimeError`` otherwise): it starts the driver
     task. Use it as ``async with res:``; the body is interruptible, and a shift
@@ -195,9 +196,11 @@ class ScheduledResource:
             raise TypeError(f"monitor must be callable, got {type(monitor).__name__}")
         self._name = check_resource_name(name)
         now = sim.now  # RuntimeError outside a run
-        # Bound to this run from here on (the driver starts now), so this is its
-        # first use: register before anything can change (EVT-04, D060). A
-        # duplicate name raises ValueError here, before the driver exists.
+        # Its driver runs in this run, so register now, before anything can
+        # change (EVT-04, D060): a duplicate name raises ValueError here, before
+        # the driver exists. ``_acquire`` registers again, because the object
+        # can still be used in a later run (its driver is gone by then, so the
+        # capacity stays where it was), and it needs that run's name there.
         self._run_name = register_resource_name(self, self._name)
         self._schedule = schedule
         self._monitor = monitor
@@ -324,6 +327,9 @@ class ScheduledResource:
             hold.fut.set_result(None)  # the waiter resumes at its next turn
 
     async def _acquire(self, task: "asyncio.Task[Any]") -> _Hold:
+        # This run's name (a no-op in the run that built it). May raise
+        # ValueError in a later run: nothing has changed yet (EVT-04, D060).
+        self._run_name = register_resource_name(self, self._name)
         hold = _Hold(task)
         # No barging: a free unit is taken at once only if nobody is queued.
         if len(self._units) < self._capacity and not self._waiters:
