@@ -164,7 +164,7 @@ def test_names_explicit_and_automatic() -> None:
     ]
 
 
-@ALL
+@REUSABLE
 def test_duplicate_name_raises_before_any_change(make: Callable[..., Any]) -> None:
     events: list[ResourceChanged] = []
     calls: list[object] = []
@@ -172,17 +172,50 @@ def test_duplicate_name_raises_before_any_change(make: Callable[..., Any]) -> No
     async def main() -> None:
         async with Resource(name="desk"):
             pass
-        dup = None
+        dup = make(name="desk", monitor=calls.append)
         with pytest.raises(ValueError, match="desk"):
-            dup = make(name="desk", monitor=calls.append)
             async with dup:
                 pass
-        if dup is not None:  # ScheduledResource raises when built instead
-            assert (dup.count, dup.queue_length) == (0, 0)
+        assert (dup.count, dup.queue_length) == (0, 0)
 
     desyncio.run(main(), subscribers=[(events.append, (ResourceChanged,))])
     assert calls == []
     assert [e.resource for e in events] == ["desk", "desk"]
+
+
+def test_scheduled_resource_duplicate_name_raises_when_built() -> None:
+    # It registers in its constructor, before its driver task exists.
+    events: list[ResourceChanged] = []
+    calls: list[object] = []
+
+    async def main() -> None:
+        async with Resource(name="desk"):
+            pass
+        tasks = asyncio.all_tasks()
+        with pytest.raises(ValueError, match="desk"):
+            one_unit(name="desk", monitor=calls.append)
+        assert asyncio.all_tasks() == tasks
+
+    desyncio.run(main(), subscribers=[(events.append, (ResourceChanged,))])
+    assert calls == []
+    assert [e.resource for e in events] == ["desk", "desk"]
+
+
+def test_unacquired_scheduled_resource_is_named_when_built() -> None:
+    # The driver changes capacity at 01:00 with no acquire ever made, so the
+    # name must come from construction-time registration.
+    events: list[ResourceChanged] = []
+    schedule = Schedule(
+        Calendar(MONDAY),
+        [Shift(ALL_DAYS, time(0), time(1), 1), Shift(ALL_DAYS, time(1), time(2), 2)],
+    )
+
+    async def main() -> None:
+        ScheduledResource(schedule)
+        await sim.timeout(1.5 * H)
+
+    desyncio.run(main(), subscribers=[(events.append, (ResourceChanged,))])
+    assert [(e.resource, *fields(e)) for e in events] == [("resource-1", H, 0, 2, 0)]
 
 
 @REUSABLE
