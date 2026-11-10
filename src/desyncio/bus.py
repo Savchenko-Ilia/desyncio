@@ -82,10 +82,10 @@ Handlers observe; they must not change the run. In asyncio debug mode
 ``loop.set_debug(True)``) the calls through which a handler would change it
 raise :class:`ObserverError` while a handler runs: creating a task
 (``sim.spawn``, ``asyncio.create_task``, ``loop.create_task``), scheduling a
-callback (``loop.call_soon``, ``call_later``, ``call_at``,
-``call_at_priority``, so also ``asyncio.sleep`` and a future's
-``set_result`` when someone waits on it), ``sim.interrupt``, ``sim.random``,
-``sim.np_random`` and emitting (``sim.emit`` and primitives' events).
+callback or timer (``loop.call_soon``, ``call_later``, ``call_at``,
+``call_at_priority``; ``call_soon`` is also reached indirectly, e.g. by a
+future's ``set_result`` when a task waits on it), ``sim.interrupt``,
+``sim.random``, ``sim.np_random`` and emitting (``sim.emit`` and primitives' events).
 ``sim.subscribe`` and ``Subscription.close`` stay allowed.
 
 How it knows "a handler runs": :meth:`Bus._deliver` sets ``_dispatching``
@@ -119,17 +119,22 @@ other guarded call raises before it changes anything.
 
 Outside debug mode nothing is checked and a violation's effect is
 undefined. The flag itself is always maintained (two attribute stores
-per delivered event); the checks sit in the existing ``if self._debug``
-branches of the loop (``VirtualTimeLoop._check_callback``, which asyncio
-calls only in debug mode, and ``create_task``) and behind one
-``_dispatching`` test in ``emit``.
+per delivered event). The callback checks sit in asyncio's existing
+``if self._debug`` branches: ``VirtualTimeLoop._check_callback`` is called
+by asyncio (and by our ``_schedule``) only in debug mode, so it adds
+nothing outside it. The other checks are new but cheap: ``create_task``,
+``sim.random``, ``sim.np_random`` and ``sim.interrupt`` each test
+``loop._debug`` first (one attribute load when off), and ``emit`` tests
+``_dispatching`` (one attribute load when no handler runs).
 
-What the guard cannot see: direct mutation of model objects that does not
-go through those calls, e.g. ``store.shutdown()`` or ``task.cancel()`` when
-nobody is waiting yet (once a waiter is woken, ``call_soon`` sees it, as
-above), changing a resource's attributes, or drawing from a
-``random.Random`` stream that the handler got before the dispatch (or from
-``current_random_streams()``).
+What the guard cannot see: mutation of model objects that schedules
+nothing, because it goes through none of the calls above. Examples:
+``task.cancel()`` of a task that is already in the ready queue (a task
+waiting on a future *is* caught: cancelling it cancels the future, which
+schedules the wake-up with ``call_soon``), ``store.shutdown()`` with no
+getter or putter waiting, changing a resource's attributes, or drawing
+from a ``random.Random`` stream that the handler got before the dispatch
+(or from ``current_random_streams()``).
 
 Helpers for primitives
 ----------------------

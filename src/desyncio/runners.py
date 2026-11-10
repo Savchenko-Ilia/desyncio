@@ -225,7 +225,10 @@ def run[T](
             ``sim.np_random`` or ``sim.emit`` gets ``ObserverError``, which
             ends the run like any handler error (``loop.call_soon``, also
             reached by resolving a future someone awaits, records it without
-            raising; see :mod:`desyncio.bus`). The guard cannot see direct
+            raising; see :mod:`desyncio.bus`). ``call_soon_threadsafe`` is
+            not guarded: other threads (a real-time pacer's resume) and
+            asyncio's async-generator finalizer, which garbage collection
+            can run inside a handler, use it. The guard cannot see direct
             mutation that schedules nothing (``store.shutdown()`` or
             ``task.cancel()`` with no waiter to wake, a random stream
             fetched before the event). It does not change a run in
