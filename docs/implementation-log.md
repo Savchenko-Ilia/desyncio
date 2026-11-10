@@ -1309,3 +1309,18 @@ Branch: feat/EX-01 (+ fix/EX-01-1)  ·  Merged: 98614ba
 **Gotchas.** `bank.py` takes about 1.5 s, most of it importing scipy for `confidence_interval`.
 
 **Follow-ups.** None.
+
+## RES-04 — Resource names (2026-11-10, batch 29)
+Branch: feat/RES-04  ·  Merged: cd24156
+
+**Approach.** A keyword-only `name: str | None = None` on `Resource`, `PriorityResource`, `PreemptiveResource` (passed through `super().__init__`) and `ScheduledResource`, with a read-only `name` property. One helper, `_check_name` in `resource.py`, raises `TypeError` for a non-`str` and `ValueError` for `""`; `scheduled.py` imports it. It runs before any side effect: in `ScheduledResource` before `sim.now` and before the driver task starts, so a bad name leaves no stray task.
+
+**asyncio internals.** None; the name is only stored. Registration, the `resource-N` default and the duplicate check come with EVT-04 (D060).
+
+**Trade-offs.** The one parametrised test (4 cases) lives in `tests/test_scheduled.py`, not `tests/test_resource.py` as the row listed: building a `ScheduledResource` needs a run and the `day_shifts` helper from that file, and one test over all four classes is the smallest suite. The lead accepted the deviation.
+
+**Review findings.** PASS, no MUST. The reviewer's mutations (no forwarding in `PreemptiveResource`, no validation in `ScheduledResource`/`PriorityResource`, no empty check) were all caught.
+
+**Gotchas.** `name=True` raises `TypeError` (bool is not a str); a whitespace-only name is accepted (the spec only rejects empty).
+
+**Follow-ups (SHOULD).** The test does not assert that `name` is read-only (it is: no setter). `_check_name` is a private name imported across modules; EVT-04 touches both files and may move it.
