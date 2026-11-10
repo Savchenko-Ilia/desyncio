@@ -223,10 +223,18 @@ def run[T](
             is on (D059): an event handler that creates a task, schedules a
             callback or timer, calls ``sim.interrupt``, ``sim.random``,
             ``sim.np_random`` or ``sim.emit`` gets ``ObserverError``, which
-            ends the run like any handler error (``loop.call_soon``, also
-            reached by resolving a future someone awaits, records it without
-            raising; see :mod:`desyncio.bus`). ``call_soon_threadsafe`` is
-            not guarded: other threads (a real-time pacer's resume) and
+            ends the run like any handler error. Two calls record it
+            without raising, so that the state change they are part of
+            completes: ``loop.call_soon`` (also reached by resolving a
+            future someone awaits) and a primitive's own event, such as
+            ``ResourceChanged``, emitted during dispatch (D068; see
+            :mod:`desyncio.bus`). One false alarm is possible: garbage
+            collection during a handler can close a leaked task that held
+            a resource, and its release then records an ``ObserverError``
+            that blames the handler (D068 addendum; it needs a task lost
+            while pending, which asyncio already reports).
+            ``call_soon_threadsafe`` is not guarded: other threads (a
+            real-time pacer's resume) and
             asyncio's async-generator finalizer, which garbage collection
             can run inside a handler, use it. The guard cannot see direct
             mutation that schedules nothing (``store.shutdown()`` or

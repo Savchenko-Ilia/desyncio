@@ -8,11 +8,22 @@ Public API:
 - Interrupts: ``Interrupt``
 - Statistics: ``TimeSeries``, ``Tally``, ``replicate``, ``confidence_interval``
 - Calendar: ``Calendar``, ``Shift``, ``Schedule``, ``ScheduledResource``, ``ShiftEnded``
+- Events: ``Subscription`` (returned by ``sim.subscribe``), ``ObserverError``
+  (the debug-mode observer guard)
 - Errors: ``RealIOError``, ``SimulationDeadlock``
+
+The event types (``Event``, ``RunStarted``, ``RunFinished``, ``ResourceChanged``,
+``EVENT_SCHEMA_VERSION``) stay in the :mod:`desyncio.events` submodule, which
+``import desyncio`` makes available as ``desyncio.events``: write
+``from desyncio.events import Event`` or ``desyncio.events.Event``. See
+``docs/observing.md``.
 """
 
+# The submodule itself is public (EVT-08); the "as" marks it as a re-export.
+from desyncio import events as events
 from desyncio.container import Container
 from desyncio.dates import Calendar
+from desyncio.events import ObserverError, Subscription
 from desyncio.experiment import confidence_interval, replicate
 from desyncio.guards import RealIOError
 from desyncio.interrupt import Interrupt
@@ -34,6 +45,7 @@ __all__ = [
     "Container",
     "FilterStore",
     "Interrupt",
+    "ObserverError",
     "Preempted",
     "PreemptiveResource",
     "PriorityResource",
@@ -47,6 +59,7 @@ __all__ = [
     "ShiftEnded",
     "SimulationDeadlock",
     "Store",
+    "Subscription",
     "Tally",
     "TimeSeries",
     "__version__",
