@@ -26,6 +26,7 @@ def replicate[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> list[T]: ...
 @overload
 def replicate[T](
@@ -38,6 +39,7 @@ def replicate[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> list[T | None]: ...
 def replicate[T](
     model: Callable[[], Coroutine[Any, Any, T]],
@@ -49,12 +51,15 @@ def replicate[T](
     pacer: RealTimePacer | None = None,
     trace: TraceSink | None = None,
     subscribers: Iterable[Subscriber] | None = None,
+    debug: bool | None = None,
 ) -> list[T] | list[T | None]:
     """Run ``model`` ``n`` times and return the results in order.
 
     Run ``i`` is ``desyncio.run(model(), seed=seed + i, ...)``, so each run gets
     a fresh coroutine and its own seed, and the same arguments give the same
-    list. ``until``, ``speed``, ``pacer`` and ``trace`` are passed to every run.
+    list. ``until``, ``speed``, ``pacer``, ``trace`` and ``debug`` (asyncio
+    debug mode, which also turns on the observer guard, D059) are passed to
+    every run, which validates them.
     A run stopped by ``until`` returns ``None``, so the list then holds ``None``
     for it; the overloads type the result as ``list[T | None]`` when ``until``
     is given and as ``list[T]`` when it is not, like ``desyncio.run``.
@@ -87,6 +92,7 @@ def replicate[T](
                 pacer=pacer,
                 trace=trace,
                 subscribers=subs,
+                debug=debug,
             )
             for i in range(n)
         ]
@@ -99,6 +105,7 @@ def replicate[T](
             pacer=pacer,
             trace=trace,
             subscribers=subs,
+            debug=debug,
         )
         for i in range(n)
     ]
