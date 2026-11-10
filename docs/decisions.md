@@ -404,3 +404,7 @@ The Hodos lead sent its needs in priority order (owner's request): EVT-01, RES-0
 - Subclassing `Event` is a documented, supported public contract, tested with a user subclass (EVT-01).
 - `Event`, `Subscription` and `ObserverError` are importable from `desyncio.events` before EVT-08 does the top-level exports: `Subscription` by EVT-02, `ObserverError` by EVT-06 (both now own `events.py`; they are in different batches from EVT-01 and from each other's batch partner).
 The lead sends Hodos the `integration` SHA after batch 30 and after batch 31. Hodos's later list (`sim.stop()`, a WASM/no-self-pipe loop mode and a browser pacer, cross-thread commands in real time, RL decision points, correctly rounded sampling) is recorded in the handoff, unscheduled.
+
+## D063 — Batch 29 calls (lead)
+- **RES-04 test placement:** the one parametrised test over the four resource classes lives in `tests/test_scheduled.py`, not `tests/test_resource.py` as the row listed, because building a `ScheduledResource` needs a run and that file's helpers. Accepted: it is the smaller suite.
+- **EVT-01 exports check is one-directional:** every `Event` subclass defined in `desyncio.events` must be in `__all__`, but `__all__` may hold other names. The fixer's first version required equality, which would have failed as soon as EVT-02 and EVT-06 add `Subscription` and `ObserverError` (D062), in files they don't own. Redirected within fix round 1.

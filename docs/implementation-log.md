@@ -1324,3 +1324,18 @@ Branch: feat/RES-04  ·  Merged: cd24156
 **Gotchas.** `name=True` raises `TypeError` (bool is not a str); a whitespace-only name is accepted (the spec only rejects empty).
 
 **Follow-ups (SHOULD).** The test does not assert that `name` is read-only (it is: no setter). `_check_name` is a private name imported across modules; EVT-04 touches both files and may move it.
+
+## EVT-01 — Event types (2026-11-10, batch 29)
+Branch: feat/EVT-01 + fix/EVT-01-1  ·  Merged: 453562a
+
+**Approach.** New `desyncio.events`: `Event(t, seq)` and the built-ins `RunStarted(seed, until)`, `RunFinished(reason)`, `ResourceChanged(resource, in_use, capacity, queue_len)`, all `@dataclass(frozen=True, slots=True, kw_only=True)`. `to_dict()` walks `dataclasses.fields(self)`, so it covers user subclasses, and adds `"kind"` (the class name). `EVENT_SCHEMA_VERSION = 1`. The module docstring is the public contract for subclassing (D062): the decorator and why each flag, primitives only, `kind` collisions, `sim.emit(Kind, **fields)` as the intended use.
+
+**asyncio internals.** None. Python dataclass details: `kw_only` exempts fields from the "no required field after a default" rule, so subclasses can add required fields; each subclass must repeat `slots=True` or it gets a `__dict__` again (probe-verified); a non-frozen subclass of a frozen dataclass raises `TypeError` at class creation.
+
+**Trade-offs.** `RunFinished.reason` is a `Literal`, not validated at construction: the sim is the only producer, and a `__post_init__` would complicate the subclass contract. The reviewer agreed.
+
+**Review findings.** Round 1 MUST: the introspection test walked a hard-coded list, so a new built-in with a `list` field passed. Now the list is derived from the module, and every `Event` subclass there must be in `__all__`. The lead had the fixer make that check one-directional (D063), because EVT-02 and EVT-06 add non-event names to `__all__`.
+
+**Gotchas.** Dropping `frozen=True` from a built-in fails at collection (TypeError), not as a test failure: loud enough.
+
+**Follow-ups (SHOULD).** Assert the derived list is non-empty (otherwise the test is vacuous if the module filter ever stops matching). An `Event` subclass imported into `events.py` from elsewhere would be skipped by the `__module__` filter.
