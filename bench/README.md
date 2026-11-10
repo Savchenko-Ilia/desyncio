@@ -110,14 +110,16 @@ Summary of the 3.13 runs (medians):
 The "events/s" column the script prints is emitted events divided by the whole run's median time, so it
 is the model's throughput, not the bus's own capacity.
 
-## How this compares with the draft's 20% target
+## How this compares with the target
 
-The platform's draft v0.1 wanted at most 20% overhead for one no-op subscriber. It was informative only
-(D060). On this M/M/1, one no-op subscriber cost +20% to +27% over no subscriber (medians, three 3.13 runs),
-so it is at or above the draft's figure. The M/M/1
-is close to a worst case for this ratio: the model does almost nothing besides the resource, and
-each customer produces about three events. A model with real work between resource operations
-pays proportionally less.
+The platform's draft v0.1 wanted at most 20% overhead for one no-op subscriber. The owner has since
+accepted up to **30%** (D069). Both are **informative, not a gate** (D060, D069).
+
+On this M/M/1, one no-op subscriber cost +20% to +27% over no subscriber (medians, three 3.13 runs):
+within the owner's ≤30%, but at or above the draft's 20%. Given the noise, a single run can land
+either side of 30%; run it on your own machine before quoting a number. The M/M/1 is close to a worst case
+for this ratio: the model does almost nothing besides the resource, and each customer produces about
+three events. A model with real work between resource operations pays proportionally less.
 
 ## Where the cost comes from
 
