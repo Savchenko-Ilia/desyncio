@@ -112,6 +112,14 @@ def main() -> int:
     parser.add_argument(
         "--reps", type=int, default=7, help="timed repetitions per configuration"
     )
+    parser.add_argument(
+        "--check-fail",
+        action="store_true",
+        help=(
+            "self-check of the identical-results assertion: run configuration 3 "
+            "with a different seed, so the script must exit with FAIL"
+        ),
+    )
     args = parser.parse_args()
     customers: int = args.customers
     reps: int = args.reps
@@ -119,6 +127,8 @@ def main() -> int:
         parser.error("--customers must be at least 1")
     if reps < 1:
         parser.error("--reps must be at least 1")
+    # The configuration whose seed --check-fail changes (to prove the check works).
+    perturbed = CONFIGS[3].name if args.check_fail else None
 
     print(
         f"Python {platform.python_version()} on {platform.machine()} "
@@ -144,7 +154,8 @@ def main() -> int:
     for rnd in range(reps):
         shift = rnd % len(CONFIGS)
         for cfg in CONFIGS[shift:] + CONFIGS[:shift]:
-            elapsed, result, recorded = time_once(cfg, customers)
+            seed = SEED + 1 if cfg.name == perturbed else SEED
+            elapsed, result, recorded = time_once(cfg, customers, seed)
             times[cfg.name].append(elapsed)
             if cfg.name in results and results[cfg.name] != result:
                 sys.exit(f"FAIL: {cfg.name} gave different results between repetitions")
