@@ -352,23 +352,28 @@ class Bus:
     def register_resource(self, resource: object, name: str | None) -> str:
         """Return ``resource``'s name in this run, registering it on first call.
 
-        The first call gives an unnamed resource ``resource-N`` (N counts the
-        unnamed resources of this run, from 1, in registration order). Names,
-        explicit or automatic, are unique per run. Later calls for the same
-        object return the same name and ignore ``name``.
+        Names, explicit or automatic, are unique per run (D064). The first
+        call gives an unnamed resource ``resource-N``, with N the next number
+        (from 1, in registration order) whose name is still free: an
+        automatic name skips a name another resource took explicitly, so an
+        unnamed resource never raises. Later calls for the same object return
+        the same name and ignore ``name``. A failed call changes nothing.
 
         Raises:
-            ValueError: the name is already used by another resource in this
-                run (an explicit name such as ``"resource-1"`` can clash with
-                an automatic one).
+            ValueError: the explicit ``name`` is already used by another
+                resource in this run, explicitly or as an automatic name
+                (``"resource-1"`` given after an unnamed resource got it).
         """
         known = self._names.get(resource)
         if known is not None:
             return known
         if name is None:
-            self._unnamed += 1
-            name = f"resource-{self._unnamed}"
-        if name in self._taken:
+            n = self._unnamed + 1
+            while f"resource-{n}" in self._taken:
+                n += 1
+            self._unnamed = n
+            name = f"resource-{n}"
+        elif name in self._taken:
             raise ValueError(f"resource name {name!r} is already used in this run")
         self._taken.add(name)
         self._names[resource] = name

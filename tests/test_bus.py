@@ -430,7 +430,7 @@ def test_helpers_in_a_run() -> None:
     async def main() -> None:
         sim.subscribe(got.append, kinds=(Ping,))
         emit_event(Ping, n=5)
-        a, b, c = object(), object(), object()
+        a, b, c, d, x = object(), object(), object(), object(), object()
         names.extend(
             [
                 register_resource_name(a, None),
@@ -439,14 +439,26 @@ def test_helpers_in_a_run() -> None:
                 register_resource_name(a, "ignored"),  # already registered
             ]
         )
+        # An explicit name taken by an explicit or an automatic one raises,
+        # and changes nothing: x stays unregistered, the counter unmoved.
         with pytest.raises(ValueError, match="teller"):
-            register_resource_name(object(), "teller")
+            register_resource_name(x, "teller")
         with pytest.raises(ValueError, match="resource-1"):
-            register_resource_name(object(), "resource-1")
+            register_resource_name(x, "resource-1")
+        # An automatic name skips one taken explicitly; it never raises (D064).
+        names.append(register_resource_name(d, "resource-3"))
+        names.append(register_resource_name(x, None))
 
     for _ in range(2):  # names are per run
         got.clear()
         names.clear()
         run(main())
-        assert names == ["resource-1", "teller", "resource-2", "resource-1"]
+        assert names == [
+            "resource-1",
+            "teller",
+            "resource-2",
+            "resource-1",
+            "resource-3",
+            "resource-4",
+        ]
         assert [(e.t, e.seq) for e in got] == [(0.0, 1)]
