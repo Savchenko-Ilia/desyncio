@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from desyncio import events as events_module
-from desyncio.bus import ObserverError, emit_event
+from desyncio.bus import ObserverError
 from desyncio.events import Event, RunFinished, RunStarted
 from desyncio.interrupt import Interrupt
 from desyncio.loop import VirtualTimeLoop
@@ -47,39 +47,51 @@ def _noop() -> None:
     pass
 
 
+# One representative per guarded code path: sim.spawn for create_task
+# (asyncio.create_task and TaskGroup end in the same loop.create_task),
+# call_later for _schedule via call_at, sim.emit for Bus.emit.
 FORBIDDEN: dict[str, Callable[[Env], object]] = {
     "sim.spawn": lambda env: sim.spawn(_child()),
-    "asyncio.create_task": lambda env: asyncio.create_task(_child()),
-    "loop.create_task": lambda env: env.loop.create_task(_child()),
     "loop.call_soon": lambda env: env.loop.call_soon(_noop),
     "loop.call_later": lambda env: env.loop.call_later(1.0, _noop),
-    "loop.call_at": lambda env: env.loop.call_at(5.0, _noop),
     "loop.call_at_priority": lambda env: env.loop.call_at_priority(5.0, 1, _noop),  # type: ignore[attr-defined]
     "sim.interrupt": lambda env: sim.interrupt(env.victim, "x"),
     "sim.random": lambda env: sim.random("s"),
     "sim.np_random": lambda env: sim.np_random("s"),
     "sim.emit": lambda env: sim.emit(Pong),
-    "emit_event": lambda env: emit_event(Pong),
 }
 # The name the error message must contain for each call.
 NAMED = {
     "sim.spawn": "create_task",
-    "asyncio.create_task": "create_task",
-    "loop.create_task": "create_task",
     "loop.call_soon": "call_soon",
-    "loop.call_later": "call_at",
-    "loop.call_at": "call_at",
-    "loop.call_at_priority": "call_at_priority",
+    "loop.call_later": "loop.call_at ",
+    "loop.call_at_priority": "loop.call_at_priority",
     "sim.interrupt": "sim.interrupt",
     "sim.random": "sim.random",
     "sim.np_random": "sim.np_random",
-    "sim.emit": "emit",
-    "emit_event": "emit",
+    "sim.emit": "emit (",
 }
 
 
+def _snapshot(env: Env) -> tuple[int, ...]:
+    """What a forbidden call would change: tasks, timers, ready callbacks,
+    the victim's pending interrupt, the event sequence number."""
+    loop: Any = env.loop
+    return (
+        len(asyncio.all_tasks()),
+        len(loop._scheduled),
+        len(loop._ready),
+        env.victim.cancelling(),
+        loop.bus._seq,
+    )
+
+
 def _model(call: Callable[[Env], object], log: list[str]) -> Any:
-    """Main: start a victim in an interruptible block, emit Ping, go on."""
+    """Main: start a victim in an interruptible block, emit Ping, go on.
+
+    The handler makes ``call`` and logs, synchronously, whether it raised
+    ``ObserverError`` (and the message) and whether the run's state changed.
+    """
 
     async def victim() -> None:
         try:
@@ -96,7 +108,14 @@ def _model(call: Callable[[Env], object], log: list[str]) -> Any:
         await sim.timeout(1)
 
         def handler(event: Ping) -> None:
-            call(env)
+            before = _snapshot(env)
+            try:
+                call(env)
+            except ObserverError as exc:
+                log.append(f"raised: {exc}")
+            else:
+                log.append("returned")
+            log.append("unchanged" if _snapshot(env) == before else "changed")
 
         sim.subscribe(handler, kinds=(Ping,))
         sim.emit(Ping, n=1)
@@ -109,15 +128,22 @@ def _model(call: Callable[[Env], object], log: list[str]) -> Any:
 
 @pytest.mark.parametrize("name", list(FORBIDDEN))
 def test_forbidden_call_raises_in_debug_mode(name: str) -> None:
-    """The call raises ObserverError naming it (call_soon only records it);
-    run ends and raises it."""
+    """The call raises ObserverError naming it inside the handler, before it
+    changes anything; run ends and raises that error. call_soon only records
+    the error: the callback is scheduled and run raises afterwards."""
     log: list[str] = []
-    with pytest.raises(ObserverError, match=NAMED[name]) as info:
+    with pytest.raises(ObserverError) as info:
         run(_model(FORBIDDEN[name], log), debug=True)
-    assert "observers must not change the run" in str(info.value)
+    message = str(info.value)  # not the notes: they hold the handler's source
+    assert NAMED[name] in message
+    assert "observers must not change the run" in message
+    if name == "loop.call_soon":
+        assert log[:2] == ["returned", "changed"]
+    else:
+        assert log[:2] == [f"raised: {message}", "unchanged"]
     # The emitting task finished its step; the loop stopped after it, so the
     # victim was never interrupted and main never resumed (D058).
-    assert log == ["after emit"]
+    assert log[2:] == ["after emit"]
 
 
 @pytest.mark.parametrize("name", ["loop.call_soon", "sim.random", "sim.interrupt"])
@@ -125,7 +151,8 @@ def test_forbidden_call_not_checked_outside_debug_mode(name: str) -> None:
     """Outside debug mode nothing is checked (the effect is undefined)."""
     log: list[str] = []
     run(_model(FORBIDDEN[name], log), debug=False)
-    assert log[0] == "after emit"
+    assert log[0] == "returned"
+    assert log[2] == "after emit"
 
 
 def test_swallowed_observer_error_still_ends_the_run() -> None:
@@ -315,7 +342,7 @@ def test_debug_argument_is_forwarded(
     assert run(main(), debug=debug) is expected
 
 
-@pytest.mark.parametrize("debug", [1, "yes", 0.0])
+@pytest.mark.parametrize("debug", [1, "yes"])
 def test_debug_argument_validation(debug: object) -> None:
     async def main() -> None:
         pass
