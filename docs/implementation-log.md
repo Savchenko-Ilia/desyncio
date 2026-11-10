@@ -1069,3 +1069,243 @@ Branch: feat/TST-05  ·  Merged: f02743c
 
 **Follow-ups (SHOULD).** Source `gate.env` from the checked-out worktree in `gate.sh`. The alternative `items: tuple[object, ...] = store.items` keeps the tuple check without narrowing.
 
+
+## CLN-06 — Gate reads gate.env from the tested tree (2026-11-09, batch 19)
+Branch: feat/CLN-06  ·  Merged: c22b7ee
+
+**Approach.** The `gate.env` source and the `${VAR:-default}` lines moved from before `git worktree add` to just after `cd "$TMP"`. The script sources `$TMP/scripts/gate.env` if present, else the main checkout's, else uses the built-in defaults. Steps, order, exit 2 and the `GATE PASS (<branch>)` line are unchanged.
+
+**asyncio internals.** None.
+
+**Trade-offs.** Sourcing the tested tree's file means the branch decides its own gate commands (D046). The alternative, keeping the main checkout's file, was the D044 gap.
+
+**Review findings.** No MUST. Proof reproduced by the reviewer: a throwaway branch with `TEST_CMD="false"` gives `GATE FAIL` with the new script and `GATE PASS` with the old; a tree without `gate.env` falls back to the main checkout's; a partial `gate.env` takes defaults for the rest under `set -u`.
+
+**Gotchas.** `gate.sh` itself still runs from the checkout it is started in, so changes to the script are still verified after merge (D044, D046).
+
+**Follow-ups (SHOULD).** The trap is set only after `git worktree add` succeeds, so a bad branch name leaves an empty `mktemp` directory behind (pre-existing). Set the trap right after `mktemp -d`.
+
+## CLN-07 — Raising monitor outside a running loop (2026-11-09, batch 19)
+Branch: feat/CLN-07  ·  Merged: 0da8d5e
+
+**Approach.** A new private `src/desyncio/_monitor.py` has `report_monitor_error(message, exc, key, primitive)`. Resource/PriorityResource (`_call_monitor`), Container (`_notify_monitor`) and the stores (`_call_monitor`) call it from their existing `except Exception`. Inside a loop it calls `call_exception_handler` with the same context as before; with no running loop it logs the message at ERROR on the `desyncio` logger with `exc_info` (D045). Two new parametrized tests (Store, PriorityStore) call `shutdown(immediate=True)` after `desyncio.run` has closed its loop. 556 → 558 tests.
+
+**asyncio internals.** `asyncio.get_running_loop()` raises `RuntimeError` when the thread has no running loop; unlike `get_event_loop()` it never creates or guesses one. The `try` covers only that call, so a `RuntimeError` from a custom exception handler is not swallowed.
+
+**Trade-offs.** One helper instead of three copies of the reporting code. The `desyncio` logger, not `asyncio`'s, so users can tell the source; the message text matches the handler's context message.
+
+**Review findings.** No MUST. The reviewer reverted the src changes and saw both new tests fail with the original `RuntimeError`.
+
+**Gotchas.** Each call site keeps its own `except Exception`, so `KeyboardInterrupt`/`SystemExit` still propagate (D023 v2).
+
+**Follow-ups (SHOULD).** Resource and Container use the helper but have no outside-loop test (the spec asked for stores only).
+
+## CLN-08 — Relative-import guard; late-interrupt docstring (2026-11-09, batch 19)
+Branch: feat/CLN-08  ·  Merged: 36d0215
+
+**Approach.** `test_no_from_desyncio_import_x` now also asserts `node.module is not None` for any `ImportFrom` with `level >= 1`, so `from . import X` and `from .. import X` fail while `from .sim import sim` passes. `interrupt.py`'s late-interrupt bullet gains one clause: with a non-eager task the late `interrupt()` raises `RuntimeError` ("not inside ..."), because the block has already closed.
+
+**asyncio internals.** A non-eager task created inside the block first runs on the next loop iteration, after the block has exited; an eager task (`eager_start`) runs its first step synchronously at creation, inside the block.
+
+**Trade-offs.** None.
+
+**Review findings.** No MUST. Mutation reproduced by the reviewer: `from . import clock` in `store.py` makes the guard fail. `SUBMODULES` globs every module, including private ones like `_validate.py`.
+
+**Gotchas.** `__init__.py` is not scanned, where `from . import X` is legitimate.
+
+**Follow-ups.** None.
+
+## DEP-01 — numpy and scipy as dependencies (2026-11-09, batch 20)
+Branch: feat/DEP-01  ·  Merged: 6790cdf
+
+**Approach.** `uv add` put `numpy>=2.0` and `scipy>=1.16.2` in `[project] dependencies`, and `scipy-stubs` in the dev group (it pulls in `optype` and `numpy-typing-compat`, dev only). The lock resolves numpy 2.5.4 and scipy 1.18.1; wheels install on 3.13 and 3.14. No mypy override was needed. Two tests in `tests/test_import.py`: a smoke test (numpy major ≥ 2, `scipy.stats.norm.cdf(0) == 0.5`) and a subprocess test that `import desyncio` loads neither numpy nor scipy. 558 → 560 tests.
+
+**asyncio internals.** None.
+
+**Trade-offs.** `scipy-stubs` instead of a mypy override, so scipy calls are type-checked under strict mode.
+
+**Review findings.** No MUST. The reviewer proved the sys.modules test by adding `import numpy` to `__init__.py` (it failed), and checked `--resolution lowest-direct` on 3.14: scipy 1.16.2 installs and imports.
+
+**Gotchas.** `numpy>=2.0` is a nominal floor on 3.14: numpy 2.0.0 has no 3.14 wheels, so the real floor there is higher. The spec's reason for 2.0 is weighted `np.quantile`.
+
+**Follow-ups (SHOULD).** Raise the numpy floor to the first release with 3.14 wheels, once checked.
+
+## STA-01 — Tally: statistics of observations (2026-11-09, batch 21)
+Branch: feat/STA-01  ·  Merged: 47dd7f5
+
+**Approach.** New `src/desyncio/tally.py`. `Tally.record(value)` appends a validated float (it reuses `monitor._real`) and never reads `sim.now`. Every statistic converts the list to an array and calls numpy: `np.mean`, `np.var`/`np.std` with `ddof=1`, `np.min`/`np.max`, `np.quantile` (default linear method), `np.histogram`. Results are converted to Python `float`/`int`. numpy is imported inside each method.
+
+**asyncio internals.** None: `record` is a synchronous append.
+
+**Trade-offs.** O(n) per statistic (array conversion) instead of Welford's O(1) running mean: D048 says call numpy, and statistics are read rarely.
+
+**Review findings.** No MUST. Mutations caught: `ddof=0`, `method="lower"`. Deferred to STA-03 (D050): `quantile` accepts `bool`/`str` p, unlike `TimeSeries.quantile`.
+
+**Gotchas.** A numpy array as `p` is not a `Sequence`, so it takes the scalar path and numpy raises a TypeError.
+
+**Follow-ups (SHOULD).** Move `_real` to a shared private module if a third user appears.
+
+## STA-02 — TimeSeries: time-weighted distribution (2026-11-09, batch 21)
+Branch: feat/STA-02 (+ fix/STA-02-1)  ·  Merged: 24856f2
+
+**Approach.** A private `_weighted(until, what)` returns `(values, durations)` with the same checks and order as `mean()`, dropping zero-duration segments. `time_fractions` sums durations per value with `math.fsum`; `quantile` is `np.quantile(values, p, weights=durations, method="inverted_cdf")`; `variance` is `np.average` of squared deviations with duration weights (population). A zero-length span gives `{last: 1.0}`, last, and 0.0.
+
+**asyncio internals.** None beyond `sim.now`.
+
+**Trade-offs.** numpy ≥ 2.0 supports `weights=` only with `method="inverted_cdf"`, so the time-weighted quantile is a step function (no interpolation).
+
+**Review findings.** Round 1 (D050, promoted SHOULD): the M/M/1 test's comment overstated the error (±0.02) and its band was loose (0.05). Measured max error over seeds 1..10 is 0.0123; the band is now 0.04, and a ×1.2 bias on P(N=0) that passed at 0.05 now fails.
+
+**Gotchas.** The M/M/1 test uses its own small model, because `tests/models/mm1.py` records nothing about the number in system. It takes about 0.7 s.
+
+**Follow-ups.** None.
+
+## STA-04 — Replications and confidence intervals (2026-11-09, batch 21)
+Branch: feat/STA-04 (+ fix/STA-04-1)  ·  Merged: 18e16ce
+
+**Approach.** New `src/desyncio/experiment.py`. `replicate(model, n, *, seed, until, speed, pacer, trace)` calls `run(model(), seed=seed + i, ...)` for each i; explicit keyword params instead of `**run_kwargs`, with two `@overload`s mirroring `run` (`list[T]` without `until`, `list[T | None]` with it). `confidence_interval(values, level)` uses `scipy.stats.t.interval(level, n-1, loc=mean, scale=scipy.stats.sem(values))` and returns `(mean, half_width)`; scipy gives nan for a zero scale, so all-equal values return `(mean, 0.0)`.
+
+**asyncio internals.** Each replication is a separate `desyncio.run`, so a fresh loop and fresh random streams per run.
+
+**Trade-offs.** `n` must be an `int` (TypeError for `2.0` or `bool`), which is stricter than the row.
+
+**Review findings.** Round 1, two MUSTs: (1) `cast(T, ...)` hid a real `None` behind `list[T]` when `until` was set; fixed with overloads and `assert_type` tests checked by mypy in the gate. (2) The seed+i contract was not pinned (`seed + i + 1` passed); the test now compares against `run(..., seed=3 + i)` directly. The docstring also says a `pacer` is shared by all runs and keeps its paused state (CLN-03).
+
+**Gotchas.** The coverage test uses a seeded `random.Random`, not a simulation, so it is cheap and deterministic.
+
+**Follow-ups (SHOULD).** A test that `speed`/`pacer`/`trace` reach the run in both overload branches.
+
+## RND-02 — numpy random streams (2026-11-09, batch 21)
+Branch: feat/RND-02 (+ fix/RND-02-1)  ·  Merged: 402bcb4
+
+**Approach.** `RandomStreams.np_stream(name)` caches a `numpy.random.Generator` per name in its own dict, seeded with `default_rng(SeedSequence(int.from_bytes(sha256(f"{seed}:{name}").digest(), "big")))`. `Sim.np_random(name)` mirrors `Sim.random`, including the fresh-context error. numpy is imported inside `np_stream`; annotations use `TYPE_CHECKING`.
+
+**asyncio internals.** The streams live in the run's `contextvars` context (D026), so a task created with a fresh `contextvars.Context` cannot see them.
+
+**Trade-offs.** SHA-256 instead of `hash()`, because `PYTHONHASHSEED` randomises `str` hashes per process. `SeedSequence` spreads the 256-bit entropy into the generator's state.
+
+**Review findings.** Round 1 (D050, promoted SHOULD): the formula was not pinned, so a changed key passed every test. A golden-value test now pins `(0, "x")` and `(42, "service")`; key swap, sha1 and separator mutations all fail it. The cross-process test now inherits `os.environ`.
+
+**Gotchas.** `Sim.np_random` duplicates about 10 lines of `Sim.random`'s error handling; sharing it would have touched CLN-01's tested message.
+
+**Follow-ups (SHOULD).** Factor the shared error handling into one helper with the method name as a parameter.
+
+## STA-03 — Warm-up removal (2026-11-09, batch 22)
+Branch: feat/STA-03  ·  Merged: 44649b1
+
+**Approach.** `Tally(warmup=t)` drops an observation iff `warmup > 0 and sim.now < t` (the value is validated first; with `warmup == 0` `sim.now` is never read). `TimeSeries(warmup=t)` keeps a `_start` field, `None` until the first record at or after `t`; that record opens the window at `t` with the value that held then, cutting the straddling segment, and `_area`/`min`/`max` accumulate only from then on, so `record` and `mean` stay O(1). `_window(until)` gives `(start, end)` for all statistics; `_weighted` clips segments with `max(t0, start)`. If every record so far is before `t`, the last value holds from `t`. `until` before the window start is a `ValueError`. `samples`, `len` and `last` still cover every record. D050: `Tally.quantile` now validates `p` like `TimeSeries.quantile`. 604 → 615 tests.
+
+**asyncio internals.** None beyond `sim.now`.
+
+**Trade-offs.** Warm-up drops data rather than hiding it, so a series cannot be re-read with another warm-up; it keeps `record` O(1).
+
+**Review findings.** No MUST. The reviewer compared every statistic against an independent brute-force reference on 3000 random cases (records at the warm-up instant, several at one instant, none or all before warm-up, `until` at the window start): 0 mismatches. The M/M/1 tests' measured figures were re-checked on 5 seeds; a no-op warm-up fails them.
+
+**Gotchas.** `min`/`max` include the value holding at the warm-up instant only if it is held for some time: a record exactly at `t` replaces it.
+
+**Follow-ups (SHOULD).** `Tally.quantile(b"x")` raises `ValueError` (bytes is a Sequence of ints), where `TimeSeries.quantile` raises `TypeError`; reject `bytes`/`bytearray` too.
+
+## STA-06 — Exports and statistics guide (2026-11-09, batch 23)
+Branch: feat/STA-06 (+ fix/STA-06-1)  ·  Merged: 34ebdec
+
+**Approach.** `__init__.py` imports `Tally`, `replicate` and `confidence_interval` directly: the stats modules already import numpy/scipy inside their functions, so `import desyncio` stays numpy-free without a module `__getattr__`, and the names stay visible to mypy and IDEs. README "Public API" lists them plus `sim.np_random`, and links the new guide. `docs/statistics.md` has five executed examples on one M/M/1 model (λ=0.8, μ=1): Tally of waits, TimeSeries of the number in system, warm-up, 20 replications with a 95% interval, and `sim.np_random` inputs (`rng.poisson`, an empirical distribution via `numpy.quantile`, `scipy.stats.truncnorm` with `random_state=rng`). `tests/test_docs_examples.py` now runs a `GUIDES` table (primitives, statistics), with the fence checks, determinism and output checks applied to both. 615 → 627 tests, about 14 s.
+
+**asyncio internals.** None new.
+
+**Trade-offs.** Short runs keep the guide under about 2 s per pass, at the cost of visibly noisy numbers; the prose says so.
+
+**Review findings.** Round 1, two MUSTs in the guide's prose: (1) it said `TimeSeries.mean` uses `numpy.average`; it is desyncio's own running integral, and `time_fractions` uses `math.fsum`. (2) The replications example printed "contains the true value 4", but the estimand (mean wait after a time-50 warm-up in a 500-customer empty-start run) is biased low (about 3.83 over 400 replications). The output now prints the interval, and the prose explains the estimand. Also fixed: empty start as a bias, population vs sample variance, the time-fraction gap, histogram wording. Mutations (a `Python` fence, a changed number, a removed `text` block) all fail the docs tests.
+
+**Gotchas.** `ruff format` also formats the guide's code blocks, so the gate's format check covers them. `Tally(warmup=50)` is a time threshold, not a customer count.
+
+**Follow-ups (SHOULD).** The Tally section calls an empty-start run "one sample" of the long-run mean 4; say it is noisy and slightly low (reviewer's wording is in the review report: "A short run is noisy, and because it starts empty it is also biased a little low...").
+
+## CAL-01 — Calendar: sim time ↔ dates (2026-11-09, batch 24)
+Branch: feat/CAL-01 (+ fix/CAL-01-1)  ·  Merged: cfcc09c
+
+**Approach.** New `src/desyncio/dates.py` (named so it cannot shadow the stdlib `calendar`). `Calendar(start, *, unit=timedelta(seconds=1))` keeps `start` and `start` in UTC. `to_datetime(t)` is `start_utc + t * unit`, then `astimezone(start.tzinfo)`; `to_sim(dt)` is `(dt.astimezone(UTC) - start_utc) / unit`; `now()` is `to_datetime(sim.now)`. Out-of-range dates raise `ValueError` both ways.
+
+**asyncio internals.** None; `now()` reads `sim.now`.
+
+**Trade-offs.** Conversion in UTC, so sim time is elapsed real time and a DST change only changes the displayed wall clock.
+
+**Review findings.** Round 1 (D052, promoted SHOULDs): the round-trip tolerance allowed 3.6 ms for an hour unit instead of 1 µs (now `1e-6 / unit + ulp(t)`; a millisecond-rounding mutation for units ≥ 60 s now fails), and `to_sim` leaked `OverflowError`.
+
+**Gotchas.** Aware subtraction of two datetimes that share one `tzinfo` compares wall clocks and ignores a DST offset change; `to_sim` converts both sides to UTC explicitly, and a test (July vs a January start) pins it. Python's `==` between different zones is False inside a DST fold, so the hypothesis test compares in UTC.
+
+**Follow-ups.** None.
+
+## CAL-02 — Shift schedule (2026-11-09, batch 25)
+Branch: feat/CAL-02  ·  Merged: 00ed281
+
+**Approach.** New `src/desyncio/schedule.py`. `Shift(days, start, end, capacity)` is an immutable class (frozenset of weekdays, naive `time`s, `end <= start` = overnight). `Schedule(calendar, shifts, *, closed=())` resolves each shift instance by its start date (closed dates skip the start). Local boundaries become instants with D051's rules: an ambiguous time takes `fold=0`; a non-existent one is detected by a UTC round trip and moved to the transition instant, found by bisecting to the microsecond between the fold=1 and fold=0 readings, which works for any zone. `capacity_at(t)` sums the shifts running at `t` (start dates today−2..today+1). `changes(after)` walks day by day with a heap of `(time, ±capacity)` events, releasing them up to the next local midnight, merging equal times and skipping non-changes.
+
+**asyncio internals.** None: pure code.
+
+**Trade-offs.** D053: `changes` ends after 400 days without a change past the last closed date (constant capacity would otherwise loop forever); a shift entirely inside a DST gap is empty.
+
+**Review findings.** No MUST. The reviewer's independent brute-force reference (own gap resolution, every shift instance) agreed on about 1000 random configurations in 8 zones, including midnight gaps (Havana, Beirut) and a 30-minute DST zone (Lord Howe).
+
+**Gotchas.** A shift belongs to the weekday it starts on: with a calendar starting Monday 00:00, Sunday's night shift is already running at t=0.
+
+**Follow-ups (SHOULD).** The hypothesis property never reaches the October fall-back (a fixed test does); fixed tests for a midnight gap and a 30-minute zone; a far-future closed date makes `changes` walk day by day to it (slow for `date.max`; document or bound); `OverflowError` near `date.min`/`date.max` should become `ValueError`.
+
+## CAL-03 — Shift-controlled resource (2026-11-09, batch 26)
+Branch: feat/CAL-03 (+ fix/CAL-03-1)  ·  Merged: 251002b
+
+**Approach.** New `src/desyncio/scheduled.py`: `ScheduledResource(schedule, *, monitor=None)` and `ShiftEnded(at, resource)`. Waiters are a FIFO `deque` of holds, each awaiting its own future (synchronous release, as D030); `_units` lists every hold with a unit in grant order, including granted-but-not-resumed reservations. A driver task (`"ScheduledResource driver"`) waits for each `schedule.changes(now)` entry with `loop.call_at_priority(t, 1, ...)` (D054) and applies it synchronously in `_set_capacity`: on a drop it pops the most recently granted holds, marks them `lost`, settles counters, grants waiters and calls the monitor, then calls `interrupt_task` for the resumed victims. A taken-back reservation raises `Interrupt(ShiftEnded)` from `__aenter__` (D034 behaviour). `__aenter__` opens an `Interruptible` scope after acquiring, so the body is interruptible. A done-callback reports a failed driver at once through `call_exception_handler`.
+
+**asyncio internals.** At one virtual time, `_run_once` moves all due timers to the ready queue in `(when, priority, seq)` order; the callbacks only resolve futures, and task steps follow via `call_soon` in FIFO order. With the driver at priority 1, a holder's release and an arrival's queueing (one step from a priority-0 timer) run before the driver's step. Work further away can still come after it (documented). `task.exception()` in the done-callback marks the exception retrieved, so asyncio does not log it again.
+
+**Trade-offs.** A FIFO deque plus futures instead of a `Semaphore` (asyncio has no semaphore whose size can shrink, and release must be synchronous). `call_at` with the absolute time, so `ShiftEnded.at` is exactly the boundary.
+
+**Review findings.** Round 1, three MUSTs: (1) no test for a waiter cancelled after being granted but before resuming (two leak mutants survived; now killed, plus tests for real-cancel-vs-shift-end and a taken-back reservation then cancelled); (2) D054: the same-instant order depended on timer arming order; now an explicit priority, tested in both arming orders; (3) a failing driver froze capacity silently; now reported at once, and state is settled before interrupts. A stress test (1500 random cases with cancels, interrupts and raising monitors) found no invariant violation before or after.
+
+**Gotchas.** A body with its own `sim.interruptible()` catches `Interrupt(ShiftEnded)` there and continues after its unit is gone (as RES-03; documented). While the schedule still has changes ahead, a `main` waiting forever is not reported as `SimulationDeadlock`, because the driver has a timer.
+
+**Follow-ups.** None required.
+
+## CAL-04 — Exports and calendar guide (2026-11-09, batch 27)
+Branch: feat/CAL-04 (+ fix/CAL-04-1)  ·  Merged: 60da3ad
+
+**Approach.** `Calendar`, `Shift`, `Schedule`, `ScheduledResource` and `ShiftEnded` are exported at the top level, and listed in `__all__`, the `__init__` docstring and the README, which links the new guide. `docs/calendar.md` has six executed examples: conversions (default unit and minutes), the Berlin DST days, a weekly schedule with weekday/weekend/overnight shifts and a closed date, overlapping shifts, shifts across both DST days, and a clinic (`ScheduledResource`, `Tally` of waits, interrupts caught outside the `async with`). `GUIDES` gets the calendar guide with a minimum of 6 examples. 668 → 683 tests.
+
+**asyncio internals.** None new; the guide explains D054's same-instant order for learners.
+
+**Trade-offs.** The clinic is short (one day), so many patients are still queued at the end; the prose says so and why the printed mean wait is a lower bound.
+
+**Review findings.** Round 1, two MUSTs in the prose: (1) "a visit ending at a shift end finishes" omitted D054's limit (an Event-driven visit can still be interrupted; shown by a scratch run); (2) the "keeps the clock moving" limit hid that a stuck run then never ends. Also: the clinic output now shows the most-recently-granted rule (computed, not hard-coded).
+
+**Gotchas.** `%a`/`%b` in the examples print C-locale names; Python does not call `setlocale` at startup.
+
+**Follow-ups (SHOULD).** Wrap one long line in the clinic intro.
+
+## DOC-03 — Quick start (2026-11-09, batch 28)
+Branch: feat/DOC-03 (+ fix/DOC-03-1)  ·  Merged: d1ec9af
+
+**Approach.** New `docs/quickstart.md`, linked near the top of the README and first in its Documentation list. It covers install from git (`uv add git+...`, `pip install git+...`; shell commands in `text` fences, because the D038 allowlist is `python`/`text`), a first model (200 customers, one `Resource`, a `Tally`, seed 1), a walk-through (`sim`, named streams, TaskGroup, FIFO, why `sim.timeout` returns instantly, why the seed fixes the output) and "where next". The example runs in the docs tests (`GUIDES` minimum 1). 683 → 688 tests.
+
+**asyncio internals.** The walk-through explains the clock jump: when every task waits on a timer, the loop moves the virtual clock to the earliest one instead of sleeping.
+
+**Trade-offs.** One short model, not several; the examples folder carries the complete models.
+
+**Review findings.** Round 1, one MUST: the prose called the mean wait only "noisy"; the run is M/M/1 with Wq = 16 and starts empty, so 12.61 is also biased low. The text now says so and links the statistics guide's warm-up and replications section.
+
+**Gotchas.** A shell block right after a python block would be read as its expected output by `_examples`; keep install blocks before the first python block.
+
+**Follow-ups (SHOULD).** Optionally say "steady state" next to the long-run 16.
+
+## EX-01 — Examples folder (2026-11-09, batch 28)
+Branch: feat/EX-01 (+ fix/EX-01-1)  ·  Merged: 98614ba
+
+**Approach.** Four commented models in `examples/`, each with a docstring (what it models, features shown, how to run): `bank.py` (M/M/1, `Tally` + `TimeSeries` vs theory, then `replicate` + `confidence_interval` with an honest bias caveat), `machine_shop.py` (breakdowns, repairmen as a `PreemptiveResource`, urgent repairs preempting maintenance, `Interrupt`/`Preempted` caught outside the `async with` and the remaining work re-queued), `inventory.py` (stock `Container`, (s, S) policy with lead time, lost sales, `time_fractions` of stock), `clinic.py` (`Calendar` in Europe/Berlin, a week with a Saturday shift and closed Thursday/Sunday, `ScheduledResource`, interrupted patients re-queue with their remaining time). `examples/README.md` lists them. `tests/test_examples.py` runs each in a subprocess and checks exact key lines. The gate's `LINT_CMD` now type-checks `examples`. 688 → 692 tests.
+
+**asyncio internals.** Comments explain the TaskGroup wait, main suspended in `sim.timeout` while customers run, `Interrupt` not being a `CancelledError`, and leftover tasks being cancelled when `main` returns.
+
+**Trade-offs.** The clinic is overloaded on purpose (its docstring says so) to show what closed days do to a queue.
+
+**Review findings.** Round 1, one MUST: the bank test didn't pin the single-run seed (seed 1 → 2 still passed); its single-run lines are now pinned. The reviewer verified with instrumented copies the machine-shop work accounting (every finished job's work equals its amount), the inventory invariant `level + on_order ≤ S` on all 365 days, and `Container.get` waiting in FIFO order. SHOULDs done: clinic backlog explained, per-preemption count explained, `unmet` an int, `assert` replaced by a re-raise.
+
+**Gotchas.** `bank.py` takes about 1.5 s, most of it importing scipy for `confidence_interval`.
+
+**Follow-ups.** None.

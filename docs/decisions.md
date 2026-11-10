@@ -300,3 +300,92 @@ The owner extended D042 with the two remaining audit points:
 ## D044 — Gate changes are verified after merge (lead)
 `scripts/gate.sh` sources `scripts/gate.env` from the main checkout, not from the branch it tests. So a branch that changes `gate.env` passes the gate under the *old* commands. For TST-05 the lead merged on the reviewer's manual run of the new command on the merged tree, then ran `scripts/gate.sh origin/integration`, which used the new `mypy src tests`: GATE PASS. Until `gate.sh` is fixed (a SHOULD), any gate change is verified this way: run it by hand on the merged tree, merge, then gate `integration`.
 
+
+## D045 — Batch 19: the SHOULD clean-ups; monitor errors outside a loop are logged (lead, the owner may revise)
+The owner said "go" with Module 3 still undefined, so the lead ran the defined work: the four SHOULD clean-ups from the batch 18 handoff, as CLN-06..08. Module 3 still waits for the owner.
+For CLN-07, a monitor that raises when there is no running loop (e.g. `Store.shutdown(immediate=True)` called outside a simulation) is logged at ERROR on the `desyncio` logger with the traceback, the way asyncio's default exception handler logs (to its `asyncio` logger). The operation still completes. Inside a loop nothing changes: `call_exception_handler` as in D023 v2.
+
+## D046 — D044 is resolved by CLN-06; a branch's gate.env is trusted (lead)
+`scripts/gate.sh` now sources `scripts/gate.env` from the tree under test, so a branch that changes its gate commands is gated by its own commands. D044's merge-then-verify procedure is no longer needed for `gate.env` changes. It is still needed for changes to `gate.sh` itself, because the script runs from the checkout it is started in. A branch's `gate.env` runs as shell code inside the gate (an `exit 0` there would end the gate early); that adds no trust the gate did not already give to the branch's tests, and the lead reads every diff before gating.
+
+## D047 — Module 3 is statistics; module 4 is calendar/shifts (owner)
+The owner chose statistics as module 3 ("B, after that C"), with:
+- **Distributions, both kinds:** output distributions (quantiles, histograms, time-weighted fractions) and input distributions (only those `random.Random` lacks).
+- **Standard library only:** no numpy or scipy. The Student t quantile is computed in pure Python.
+- **In scope:** Tally (plain statistics of observations), replications across seeds, confidence intervals, warm-up removal.
+The feature rows (STA-01..06) were drafted by the lead and shown to the owner before the first batch. Module 4 (calendar/shifts) is defined after module 3.
+
+## D048 — numpy and scipy are required runtime dependencies (owner)
+The owner: "use numpy if it's already written there", then chose:
+- **numpy is required**, not an optional extra.
+- **scipy is added too**, for the Student t quantile (`scipy.stats.t`) and its other distributions.
+- **Input randomness:** a new `sim.np_random(name)` returns a numpy `Generator` per named stream, seeded deterministically from the run seed and the name, like `sim.random` (D026). Models use numpy's and scipy's own distributions, so STA-05 (hand-written distributions) is dropped.
+Principle 6 is extended: if numpy or scipy already implements something, call it and never re-implement it. This supersedes D047's "standard library only". The core loop and primitives still import neither: `import desyncio` stays numpy-free, so a simulation that uses no statistics pays no import cost.
+
+## D049 — The lead stops after a module, not after each batch (owner)
+The owner: "Stop after module. Do not stop after batch." From module 3 on, the lead runs the module's batches back to back, with the per-batch steps of CLAUDE.md unchanged (review, max 2 fix rounds, gate, merge, log, handoff rewrite, push). It reports and waits for "go" only at the end of a module, or earlier when a feature is blocked, a spec is ambiguous, or an owner decision is needed.
+
+## D050 — Batch 21: two reviewer SHOULDs promoted to MUST (lead)
+- **RND-02:** the `np_random` seeding formula must be pinned by a literal golden value (as RND-01 does for `random`). Without it, a change to the key or the hash passes every test, and principle 2 says the same seed must give the same trace across versions.
+- **STA-02:** the M/M/1 test's comment states a wrong error figure (±0.02; measured ±0.012 over seeds 1..10) and the band (0.05) is looser than needed. Fix the comment and tighten the band to 0.04. A misleading test comment is a test defect.
+- **STA-01 (deferred to STA-03, which owns tally.py next):** `Tally.quantile` accepts `bool` and `str` p, while `TimeSeries.quantile` rejects them. STA-03 validates `p` the same way in both.
+
+## D051 — Module 4 is calendar and shifts (owner, with lead proposals to confirm)
+The owner chose:
+- **Real, timezone-aware dates.**
+- **A shift end interrupts** a holder who is still using a unit.
+- **A calendar that converts sim time to dates**, as well as resources whose capacity follows a schedule.
+The lead proposed these defaults, and the owner accepted all six ("go"):
+1. One sim time unit is one second (D004), configurable with `Calendar(unit=...)`.
+2. When capacity drops, the **most recently granted** holders are interrupted first (the ones who started last lose least work).
+3. Overlapping shifts **add** their capacities.
+4. `closed` dates: no shift *starts* on them (an overnight shift from the day before still finishes).
+5. DST: a boundary at a non-existent local time moves to the first valid instant after the gap; an ambiguous one uses the first occurrence.
+6. No new dependency. `zoneinfo` needs the system time-zone database. Linux and macOS have it; Windows needs the `tzdata` package, which is not added (this needs the owner's OK).
+
+## D052 — CAL-01 review: two SHOULDs promoted to MUST (lead)
+- The round-trip test's tolerance was `1e-6 * unit` seconds-in-sim-units, which for an hour unit allows 3.6 ms, not the row's 1 µs. A test that does not check the spec is a test defect.
+- `to_sim` leaked a bare `OverflowError` for an out-of-range datetime, while `to_datetime` raises `ValueError`. Both must raise `ValueError`.
+
+## D053 — CAL-02: two gaps in the spec, filled by the lead
+- **`Schedule.changes(after)` ends** when capacity can never change again. The row said "endless", but a schedule whose capacity is constant forever (e.g. 24-hour shifts every day) would then loop forever without yielding. The generator stops after 400 days without a change past the last closed date and the date of `after`. The weekly pattern repeats, so that means no change ever again. A consumer (CAL-03) keeps the last capacity once `changes` ends.
+- **A shift that lies entirely inside a DST gap** (start and end both at non-existent local times) moves to the same instant at both ends, so it is empty and never runs.
+
+## D054 — CAL-03: a shift change runs after everything else scheduled for the same instant (lead, the owner may revise)
+The CAL-03 review found that when a release and a capacity drop fall on the same virtual time, the winner depended on which timer was armed first. That is deterministic, but it is not the explicit tie-break principle 2 asks for. The driver now arms its timers with `loop.call_at_priority(t, +1, ...)`, so at time `t` every ordinary timer (priority 0) fires first. A visit that ends exactly at a shift boundary therefore finishes and releases its unit, and only then does capacity drop. Arrivals at `t` are queued before a capacity rise at `t` is applied, so they are granted in FIFO order by it.
+The same review promoted two other findings to MUST: a test for a waiter cancelled after it was granted but before it resumed (two leak mutants survived), and immediate reporting of a driver that dies with an exception (it would freeze capacity silently).
+
+## D055 — Module 5 is a quick start and an examples folder (owner: "go with all")
+The owner asked whether there is a quick start and examples. There were neither. The README has only one plain-asyncio snippet, and the guides illustrate one feature per snippet. The owner approved all of the lead's proposal:
+- **DOC-03:** `docs/quickstart.md` with install from git, a first model with a walk-through, and "where next".
+- **EX-01:** four complete example models in `examples/` (bank, machine shop, inventory, clinic), smoke-tested by `tests/test_examples.py` and type-checked by the gate (`mypy src tests examples`).
+
+## D056 — Module 6 is the event API core; blocks and entities live in the platform (owner)
+The platform team sent "Event API requirements, draft v0.1" (2026-11-10). desyncio has no blocks or entities (Source, Queue, Service, Delay, Branch, Sink), and the owner decided they "probably" live in the platform, on top of `sim.emit`. So:
+- desyncio's schema v1 is `Event`, `RunStarted`, `RunFinished` and `ResourceChanged` only. The eight entity/service event types of the draft's R4 are the platform's custom events. EVT-05 (block emission) is dropped from desyncio.
+- Module 6 is EVT-01..04, EVT-06..08 and RES-04 (rows in `docs/features.md`). If blocks ever move into desyncio, that is a new module with its own spec (AGENTS §1 scope change).
+- The draft was reviewed twice: by the lead and by an independent reviewer that verified its findings with probe scripts. D057–D060 record the outcome.
+
+## D057 — Event API: owner decisions on run lifecycle, subscription and names
+- **End of run:** `RunFinished` is the last event, and the bus is closed **before** teardown. Teardown cancels leftover tasks in `asyncio.all_tasks()` order, which is a set ordered by object address, so events from teardown releases would not be reproducible (probe: three identical runs, three orders). The last `ResourceChanged` may therefore show units still in use; the guide says so.
+- **Reasons:** `main_returned | until | error` (`error` includes `SimulationDeadlock`). There is no stop API, so no `stopped`; a `sim.stop()` is not part of module 6.
+- **Pre-run subscription:** `desyncio.run(..., subscribers=[...])`, forwarded by `replicate`. `sim.subscribe` needs a running loop, so without this nobody can see `RunStarted`, and with `until` code after the model never runs.
+- **Resource names:** `name=` on the four resource classes, with an automatic default and duplicate detection. Building a resource outside a run stays legal, so the per-run part (the default `resource-N` and the duplicate check) happens when the resource is first used in a run, before any state change (D060).
+
+## D058 — Event handler errors follow the trace-sink model (lead; the owner left it open)
+The draft says a handler exception propagates at the emit point. Probes showed that this cannot meet its own goal ("fails loudly"): in a task nobody awaits the exception sat unseen and the run finished normally; a model's `try/except` swallowed it; on a resource's grant path it leaked the unit. So handler errors work as D016 does for trace sinks: the first exception is contained, no further events are delivered (later subscribers do not get that event either), the loop stops after the current iteration, and `desyncio.run` raises that exception. `KeyboardInterrupt`/`SystemExit` follow the tracer's existing rule. This differs from `monitor=` (D023 v2, log and continue): a subscriber is usually the whole record of a run.
+
+## D059 — The observer guard reuses asyncio's debug mode (lead; the owner asked to consider reuse)
+`desyncio.run(..., debug=None)` is forwarded to `asyncio.Runner(debug=...)`, so it means what it means in `asyncio.run` (and `PYTHONASYNCIODEBUG=1` works too). The guard is active when `loop.get_debug()` is true; there is no second switch. In debug mode, during dispatch, these raise `ObserverError`: creating a task (`sim.spawn`, `asyncio.create_task`), scheduling a callback (`call_soon`/`call_later`/`call_at`), `sim.interrupt`, `sim.random`/`sim.np_random` (a draw from a handler changes the model's next value; probe-verified), and `sim.emit`. `subscribe` and `Subscription.close` stay allowed (R1). The guard cannot see direct mutation (`store.shutdown()`, `task.cancel()`); the guide says so. `sim.timeout` and `async with resource:` only create objects in a sync handler and need no guard.
+
+## D060 — Event API: spec fixes decided by the lead
+- **Bus state** lives on the loop's `_state` (D017), not in a context variable (a task with a fresh `Context` would lose it). On a loop that is not a `VirtualTimeLoop`, an emit point does nothing.
+- **`seq`** ticks at every emit point, also when no event is built and when nobody subscribes, so it never depends on subscriptions. "Zero cost when off" therefore means one check and one integer add, and no event object.
+- **Custom events:** `sim.emit(MyEvent, **fields)`; the sim fills `t` and `seq` and builds the event only if a subscriber wants that kind (a per-class cache, rebuilt on subscribe/close). `Event` fields are keyword-only. Trade-off accepted: mypy cannot check `**fields`; the dataclass constructor checks names at run time.
+- **Payload rule (primitives only, frozen, slotted)** is enforced by test for the built-in events and documented for user subclasses.
+- **`EVENT_SCHEMA_VERSION`** is one int, bumped on any change to a built-in event's fields. `to_dict()["kind"]` is the class name; same-named user classes collide and the guide says so.
+- **`async def` handlers** are rejected with `inspect.iscoroutinefunction`, which is best effort (a lambda returning a coroutine passes).
+- **`ResourceChanged`:** exactly one per existing `_changed()` call in `Resource`, `PriorityResource`, `PreemptiveResource` and `ScheduledResource` (so a preemption swap and a shift change are one event each), emitted after the monitor call. `queue_len` is `queue_length`, which counts granted-but-not-resumed requests.
+- **Names, per-run part:** on a resource's first use in a run it registers with the bus: an unnamed one gets `resource-N` in registration order, a duplicate name raises `ValueError` before any state change.
+- **Benchmark:** EVT-07 has its own `Resource`-based M/M/1 and no comparison libraries; LOOP-12 stays deferred (D018). The draft's 20% is informative only (a prototype measured +19% to +28%).
+- **Stale references in the draft:** AGENTS has no §3.2/§3.4/§8 (the principles are §2.2 and §2.4); the time unit is settled (D004); `resources.py` is `resource.py` plus `scheduled.py`; `tests/models/mm1.py` uses `asyncio.Lock`, so event tests need a new `Resource`-based model.

@@ -26,9 +26,17 @@ EXPORTS: dict[str, str | None] = {
     "PriorityStore": "store",
     "Interrupt": "interrupt",
     "TimeSeries": "monitor",
+    "Tally": "tally",
+    "replicate": "experiment",
+    "confidence_interval": "experiment",
     "RealIOError": "guards",
     "SimulationDeadlock": "loop",
     "RealTimePacer": "realtime",
+    "Calendar": "dates",
+    "Shift": "schedule",
+    "Schedule": "schedule",
+    "ScheduledResource": "scheduled",
+    "ShiftEnded": "scheduled",
 }
 
 SUBMODULES = sorted(
@@ -74,9 +82,34 @@ def test_import_desyncio_succeeds_in_a_fresh_interpreter() -> None:
 def test_no_from_desyncio_import_x() -> None:
     """Inside the package, `from desyncio import X` is forbidden: it can yield a
     submodule instead of the object, and it risks cycles. Import from the
-    defining submodule (`from desyncio.sim import sim`)."""
+    defining submodule (`from desyncio.sim import sim`). The relative form
+    `from . import X` is the same import and is forbidden too; `from .sim
+    import sim` (a module after the dot) is fine."""
     for module in SUBMODULES:
         path = Path(desyncio.__file__).parent / f"{module}.py"
         for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.ImportFrom) and node.level == 0:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level == 0:
                 assert node.module != "desyncio", f"{path}: {ast.unparse(node)}"
+            else:
+                assert node.module is not None, f"{path}: {ast.unparse(node)}"
+
+
+def test_numpy_and_scipy_import() -> None:
+    """Module 3 (statistics) depends on numpy >= 2 and scipy (D047, D048)."""
+    import numpy
+    import scipy.stats
+
+    assert int(numpy.__version__.split(".")[0]) >= 2
+    assert scipy.stats.norm.cdf(0.0) == 0.5
+
+
+def test_import_desyncio_does_not_import_numpy_or_scipy() -> None:
+    """The core never needs numpy or scipy; only the statistics code imports them."""
+    result = _run_python(
+        "import sys, desyncio; "
+        "bad = [m for m in ('numpy', 'scipy') if m in sys.modules]; "
+        "assert not bad, bad"
+    )
+    assert result.returncode == 0, result.stderr

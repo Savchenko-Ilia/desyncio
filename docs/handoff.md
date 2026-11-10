@@ -3,12 +3,12 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-09, end of batch 18. The test-suite trim (D042, D043) is done. Nothing is in flight. Next: the owner defines module 3._
+_Last updated: 2026-11-10. **Module 6 (event API) is planned, not started.** Rows and batches 29–33 are in `docs/features.md`; decisions D056–D060. Nothing is in flight; no agents are running. Waiting for the owner's "go" for batch 29._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
   `claude/setup-batch-1-5bb5vp` mirrors it; fast-forward it after each push.
-- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) is open for the owner. It covers batches 14–18.
+- **PR #4** (`integration` → `main`, https://github.com/Savchenko-Ilia/desyncio/pull/4) covered batches 14–18 and was **merged** on 2026-11-09. Batch 19 (CLN-06..08) is on `integration` only and needs a new PR when the owner asks for one.
   PR #3 was merged at `74c88b7` (end of batch 13). Only the owner merges into `main`.
   **Lesson:** after the owner merges a PR, the next batch's work needs a new PR. Check `list_pull_requests` before telling the owner that an open PR already contains it.
 - **CI is manual-only (D013)**: there are no GitHub Actions credits, so `scripts/gate.sh <branch>` is the check for every merge.
@@ -68,15 +68,53 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 18:** TST-05 (D043): the gate runs `mypy src tests`. D044: gate.sh reads gate.env from the main checkout, so gate changes are verified after merge.
 - `integration` passes the gate: 556 tests on 3.13 and 3.14, ruff, and mypy on 36 files. Nothing is in flight; no agents are running.
 
+## Clean-up follow-ups, batch 19 — DONE
+- CLN-08 (36d0215): the import guard also rejects `from . import X`; the late-interrupt docstring covers the non-eager case.
+- CLN-06 (c22b7ee): `gate.sh` sources `gate.env` from the tree under test (D046 resolves D044 for `gate.env`; changes to `gate.sh` itself are still verified after merge).
+- CLN-07 (0da8d5e): a raising monitor outside a running loop is logged on the `desyncio` logger (D045, owner may revise); one helper in `_monitor.py`.
+- All 0 fix rounds. `integration` passes the gate: 558 tests on 3.13 and 3.14, ruff, mypy. Nothing is in flight; no agents are running.
+
+## Module 3: statistics — DONE (batches 20–23)
+- Rows STA-01..06, RND-02 and DEP-01 are in `docs/features.md` (Module 3). Owner decisions: D047 (scope), D048 (numpy and scipy required; `sim.np_random`; STA-05 dropped; principle 6 extended to numpy/scipy, AGENTS.md updated).
+- **Batch 20:** DEP-01 merged (0 fix rounds): numpy 2.5.4, scipy 1.18.1, scipy-stubs in dev.
+- **Batch 21:** STA-01 (47dd7f5, 0 rounds), STA-04 (18e16ce, 1 round), RND-02 (402bcb4, 1 round), STA-02 (24856f2, 1 round). D050 promoted two SHOULDs.
+- **Batch 22:** STA-03 (0 fix rounds): warm-up for Tally and TimeSeries.
+- **Batch 23:** STA-06 (34ebdec, 1 fix round): exports and `docs/statistics.md`.
+- `integration` passes the gate: 627 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. PR #5 covers batches 19–23.
+- Guide for users: `docs/statistics.md`. Per-feature details and SHOULDs: `docs/implementation-log.md`.
+
+## Module 4: calendar and shifts — DONE (batches 24–27)
+- Rows CAL-01..04 in `docs/features.md`. Decisions: D051 (owner: real dates and zones, shift end interrupts, calendar + schedules; six defaults accepted), D052 (CAL-01 promoted SHOULDs), D053 (`changes` ends when constant; a shift inside a DST gap is empty), D054 (a shift change runs after ordinary timers at the same instant; owner may revise).
+- **Batch 24:** CAL-01 `Calendar` (1 fix round). **Batch 25:** CAL-02 `Shift`/`Schedule` (0 rounds). **Batch 26:** CAL-03 `ScheduledResource`/`ShiftEnded` (1 round). **Batch 27:** CAL-04 exports and `docs/calendar.md` (60da3ad, 1 round).
+- `integration` passes the gate: 683 tests on 3.13 and 3.14 (about 14 s each), ruff, mypy. AGENTS.md has no open question left.
+
+## Module 5: quick start and examples — DONE (batch 28)
+- D055. DOC-03 `docs/quickstart.md` (d1ec9af, 1 fix round). EX-01 `examples/` with bank, machine shop, inventory and clinic models, smoke-tested and type-checked by the gate (98614ba, 1 fix round).
+- `integration` passes the gate: 692 tests on 3.13 and 3.14 (about 15 s each), ruff, `mypy src tests examples`.
+
+## Module 6: event API — PLANNED (batches 29–33)
+- Requested by the platform built on desyncio ("Event API requirements, draft v0.1"). The draft is not in the repo; D056–D060 and the Module 6 rows in `docs/features.md` are the spec.
+- Blocks and entities live in the platform (D056): desyncio ships `Event`, `RunStarted`, `RunFinished`, `ResourceChanged`, the bus, `sim.emit` for custom events, and the debug-mode observer guard.
+- Batches: 29 EVT-01 + RES-04 · 30 EVT-02 · 31 EVT-04 + EVT-06 · 32 EVT-03 + EVT-07 · 33 EVT-08. Run them back to back after "go" (D049).
+- Tell reviewers of EVT-02 and EVT-04 to probe: handler error on the grant path (no leaked unit), no delivery after `RunFinished`, `seq` independent of subscriptions.
+- **Known gap outside module 6:** teardown cancels leftover tasks in set (address) order, so the *trace* of a run with leftover tasks is not reproducible. Proposed clean-up: cancel leftovers in creation order before `runner.close()`. Not scheduled.
+
 ## Next batches
-1. **Module 3 is undefined. Ask the owner.** Candidates: calendar/shift handling (AGENTS.md open question), LOOP-12 benchmark (deferred, D018), statistics consumers on the monitor hook.
-2. **Small SHOULD clean-ups, if the owner wants them:**
-   - `gate.sh` should source `gate.env` from the worktree under test (D044).
-   - The raising-monitor-on-immediate-shutdown case outside a loop gives "no running event loop" (STO-01; needs a src change).
-   - CLN-04: guard relative `from . import X`.
-   - The TST-06 docstring could add one clause about the non-eager case.
+1. **Batch 29** (EVT-01, RES-04) on the owner's "go". After module 6, candidates: the teardown-order clean-up above; LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
+2. **Small SHOULDs:**
+   - `gate.sh`: set the cleanup trap right after `mktemp -d`.
+   - Outside-loop monitor tests for Resource and Container.
+   - numpy floor for Python 3.14 (DEP-01).
+   - `Tally.quantile(b"x")` should raise `TypeError` (STA-03).
+   - The statistics guide's Tally section: an empty-start run is a noisy, slightly low estimate (STA-06).
+   - Factor `Sim.random`/`Sim.np_random` error handling into one helper (RND-02).
+   - CAL-02: hypothesis range to reach the October DST day; fixed tests for a midnight gap and a 30-minute zone; bound or document the walk to a far-future closed date; `OverflowError` → `ValueError` near `date.min`/`date.max`.
+   - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
+- **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. Is a `sim.stop()` wanted (D057 says not in module 6)?
+- **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
+- **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
 - **D028/D031:** confirm the `TimeSeries` wiring, `PriorityStore.put(item, priority=)`, and FilterStore with no `shutdown()`.
 - **D036:** `Preempted` is exported (lead decision). Should any of these also be exported: `SimulationCleanupError`, `ListSink`/`TraceSink`, `TraceRecord`, `VirtualTimeLoop`, `PriorityRequest`/`PreemptiveRequest`?
@@ -99,6 +137,10 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **Check `git branch --show-current` before every merge.** A reviewer left the main checkout on a detached HEAD at the branch under review; the lead's merge was then a no-op and the gate ran on the old `integration` (668 instead of 683 tests). Tell reviewers to use a scratch worktree, never to check out in the main tree.
+- **D049:** stop and report after a whole module, not after each batch (unless blocked or a spec question comes up).
+- **"Go" with several options open:** run the work that needs no owner definition, record the choice as a decision, and say so in the report (batch 19, D045).
+- **Gate quietly:** redirect `gate.sh` output to a file and check `$?` directly (D035).
 - **`git switch integration` before committing docs.** One commit landed on the session branch by mistake and had to be merged back (`febc420`). Check with `git branch --show-current`.
 - **Review on the merged tree.** Feature branches go stale while others merge. Reviewers test `integration` + `git merge --no-commit` of the branch.
 - **Specify contracts that cross features up front** (for example the monitor signature). Leaving one open produced three different signatures in batch 9 (D023).
