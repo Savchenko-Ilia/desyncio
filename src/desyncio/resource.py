@@ -278,7 +278,9 @@ class PriorityRequest:
     """One request for a unit of a ``PriorityResource`` (RES-02).
 
     Returned by ``PriorityResource.request(priority=...)`` and used as
-    ``async with res.request(priority=2): ...``. A request is single-use.
+    ``async with res.request(priority=2): ...``. A request is single-use,
+    even if entering it failed (say a duplicate name, ``ValueError``): to
+    retry, make a new request. This holds for ``PreemptiveRequest`` too.
     It is a class, not a bare context manager, so RES-03 can add options
     (preemption) without changing the call shape.
     """
