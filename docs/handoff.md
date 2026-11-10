@@ -98,7 +98,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 29:** RES-04 (cd24156, 0 fix rounds), EVT-01 (453562a, 1 round). **Batch 30:** EVT-02 (5fa61f2, 1 round, D064). **Batch 31:** EVT-04 (aa069cf, 2 rounds, D065), EVT-06 (1c63e63, 1 round, D066–D068). **Batch 32:** EVT-03 (6f869e0, 1 round), EVT-07 (76b88d1, 1 round, D069–D070). **Batch 33:** EVT-08 (af19a80, 0 rounds, D071–D072).
 - **Hodos** (hodoslab/hodosapp; lead session "Hodos dev", session_01TYFYZtG52HrqFTnMoMNdyo) pinned `69c98e2` (pin 2, after batch 31). It asked for messages only with pin SHAs or contract changes. Its later wishes: `sim.stop()` with reason `stopped`; a WASM / no-self-pipe loop mode and a browser pacer (Pyodide findings: `run` fails inside an already-running WebLoop, no `socket.socketpair`, a ~20-line shim works, real time blocks in `select`); thread-safe command injection for live runs; RL decision points; optionally correctly rounded sampling for cross-runtime identity.
 - **Known gaps:** teardown cancels leftover tasks in address order, so the *trace* (not the event stream) of a run with leftover tasks is not reproducible; proposed clean-up: cancel leftovers in creation order before `runner.close()`. A resource state change costs about +0.4 µs with nobody subscribed (cut it in bus.py with one combined helper if ever needed).
-- **A temporary git stash** (`evt06-proof-a8b66`, content already committed) was left by an implementer; dropping it was refused to the agent and is the owner's call.
+- The leftover stash was dropped (owner, 2026-11-10). D074 confirms `desyncio.events` as the public home of the event API.
 
 ## Next batches
 1. **Module 7 is undefined.** Candidates: a module-6 clean-up batch (the SHOULDs in the EVT-01..08 log entries, e.g. guide trim, D068 test through a real resource, later-run ScheduledResource test acquiring in run A); the teardown-order clean-up; `sim.stop()` (Hodos); LOOP-12 benchmark (D018); a 0.1 release (version, changelog, wheel check, PyPI); optional `tzdata` for Windows (D051 item 6).
@@ -115,8 +115,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 ## Open questions for the owner
 - **Determinism scope:** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
 - **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. `sim.stop()` is a post-module-6 candidate (D061: Hodos would use it for its run caps, not blocking).
-- **D072:** `desyncio.events` is reachable after `import desyncio` but not in `__all__`; `Event` and the built-ins are not top-level. OK?
-- **Stash:** drop the leftover `evt06-proof-a8b66` stash?
+- **Determinism scope** (owner: "later").
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
 - **D054:** confirm that at one instant a shift change runs after ordinary timers (a visit that ends exactly at a shift end finishes).
 - **D034:** confirm that a granted-but-not-resumed reservation on a `PreemptiveResource` can be preempted (its `async with` raises `Interrupt(Preempted)` and its body never runs).
