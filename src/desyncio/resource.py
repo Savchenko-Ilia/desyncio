@@ -13,27 +13,73 @@ Usage::
             await sim.timeout(5)         # being served
         # the teller is released here, even on exception or cancellation
 
-What is delegated to asyncio, and why
--------------------------------------
-Everything that is hard to get right is done by a stock ``asyncio.Semaphore``:
+Why not ``asyncio.Semaphore`` (D075)
+-----------------------------------
+Until batch 34 ``Resource`` was a thin wrapper over ``asyncio.Semaphore``
+(principle 6). It was replaced by our own queue because of a measured
+defect in CPython's semaphore (3.13 and 3.14 ``asyncio/locks.py``): when a
+waiter is cancelled, ``Semaphore.acquire`` first removes its future from the
+deque (``deque.remove``, a linear search) and then, in a ``finally``, calls
+``_wake_up_next()``, which walks the deque from the head looking for a future
+that is not done. Cancelling n waiters at once (the run ends at ``until``, a
+``TaskGroup`` aborts, a mass interrupt) marks all n futures cancelled before
+any of their tasks runs, so once the holder's unit is free every one of those
+cleanups walks past up to n cancelled futures: O(n^2) in total (Hodos
+measured 79 s of teardown for 100,000 waiters on one resource).
+``Semaphore.locked()`` is a linear ``any(...)`` over the waiters as well.
+AGENTS.md principle 6 allows this exception (D075): our code stays built on
+asyncio futures and keeps the semaphore's semantics, and
+``tests/test_scaling_resource.py`` pins the linear cost.
 
-* the FIFO queue of waiters (a deque of futures inside the semaphore);
-* "no barging": ``Semaphore.acquire`` refuses the fast path while anyone is
-  queued, so a newcomer arriving at the same instant as a release still
-  queues behind existing waiters;
-* cancellation: a cancelled waiter is removed from the queue, and a waiter
-  cancelled *after* being granted gives the unit back and wakes the next one.
+How waiting works
+-----------------
+Delegated to asyncio: the waiting itself. Each waiter awaits its own
+``loop.create_future()``; granting a unit is ``fut.set_result(None)``, and
+cancellation (``task.cancel()``, ``asyncio.timeout()``, a ``TaskGroup``,
+``sim.interrupt``, which is a cancel underneath, D024) arrives as the
+``CancelledError`` that asyncio raises at ``await fut``. Cancelling a task
+that waits on a future also cancels that future (``Task.cancel`` forwards to
+the future it is blocked on), so a cancelled waiter's future is ``done()``
+from that moment on, before its task has even run.
 
-Nothing in the virtual-time loop needs special support, so the semaphore
-works unchanged in simulated time.
+Ours, following ``Semaphore``'s design without copying its code:
 
-What is ours
-------------
-* argument validation;
-* the read-only ``capacity``, ``count`` and ``queue_length`` numbers. They are
-  our own counters, updated around ``acquire``/``release``; we never read the
-  semaphore's private attributes;
-* the optional ``monitor`` hook (D021) and its error contract (D023 v2).
+* the FIFO queue: a ``collections.deque`` of waiter futures;
+* the counters: ``count`` (holders that resumed), ``_granted`` (units handed
+  to a waiter whose task has not resumed yet) and ``queue_length``; a unit is
+  free when ``capacity - count - _granted > 0``;
+* "no barging": a newcomer takes the fast path (no suspension) only if a
+  unit is free *and* nobody is queued, which is ``not Semaphore.locked()``.
+  As there, a waiter that has been granted a unit but has not resumed yet
+  still counts as queued, while a cancelled one does not. Because release
+  hands a unit over in the same step (below), a newcomer arriving at the
+  instant of a release queues behind the existing waiters;
+* synchronous release (D030): ``__aexit__`` decrements ``count`` and, with
+  no ``await``, pops the first live future and resolves it (one waiter, as
+  ``Semaphore.release``), so a cancel or interrupt at the holder's exit can
+  never skip the release. A waiter, when it resumes or is cancelled, hands
+  on any unit still free (``Semaphore.acquire``'s ``finally``);
+* a waiter cancelled after its future was resolved but before its task
+  resumed gives the unit back and hands it to the next live waiter (the
+  "done and not cancelled" fix-up in ``Semaphore.acquire``);
+* lazy removal: a waiter cancelled while still queued does *not* search the
+  deque for its future. Its future is already done, and whoever next looks
+  at the head of the deque (a release, or a newcomer checking for live
+  waiters) pops it. Each future is popped at most once, so cancelling n
+  waiters costs O(n) in total. So that a long-held unit with many
+  reneging waiters cannot grow the deque without bound, the deque is
+  rebuilt without its done futures when they make up more than half of it
+  (O(n) once per n cancellations, so still O(1) amortised).
+
+``queue_length`` is our own counter, unchanged in meaning: it rises when a
+request queues and drops when that request's task resumes (granted) or runs
+its cancellation cleanup. A request that has been granted a unit but whose
+task has not resumed yet still counts as waiting.
+
+What else is ours: argument validation, names and ``ResourceChanged``
+events (EVT-04), and the optional ``monitor`` hook (D021) with its error
+contract (D023 v2). Nothing in the virtual-time loop needs special support:
+futures are driven by the loop like any other callback.
 
 PriorityResource: per-request futures, not Condition (D030)
 -----------------------------------------------------------
@@ -47,13 +93,33 @@ cancellation (a plain ``task.cancel()``, an enclosing ``asyncio.timeout()``
 or ``TaskGroup``, or ``sim.interrupt``, which is a cancel underneath, D024)
 arrives as the ``CancelledError`` that asyncio raises at ``await fut``.
 
-Ours: the ordering (a list kept sorted with ``bisect.insort``), the grant
-rule, the counters, validation and the monitor. A sorted list rather than a
-heap because a pending waiter that is cancelled must leave the order at once
-(``queue_length`` and the monitor see it go); with a sorted list that is one
-``bisect`` and a ``del``, where a heap would need lazy deletion plus a
-separate live counter. Inserts and removals shift the list (O(waiters)), which
-is fine for simulation queue sizes.
+Ours: the ordering (a ``heapq`` heap of ``(priority, seq, future, ticket)``
+entries), the grant rule, the counters, validation and the monitor.
+
+Lazy deletion (PERF-01, D075). Until batch 34 the waiters were a list kept
+sorted with ``bisect.insort``, and three parts of it were O(waiters) per
+operation, so cancelling or serving n waiters was O(n^2):
+
+* the grant loop skipped (but kept) the futures of cancelled waiters, so
+  after a release every cancelled waiter's cleanup rescanned all the
+  cancelled entries still ahead of it: at teardown this dominated (Hodos
+  measured 149 s for 50,000 waiters; the profile is nearly all
+  ``_grant_free_units``);
+* ``_blocked_by_waiter`` was an ``any(...)`` over every waiter, run on every
+  ``preempt=True`` arrival at a busy ``PreemptiveResource``: O(n) for each
+  arrival better than all queued ones;
+* each insert and each removal shifted the list.
+
+Now a cancelled waiter does not touch the heap: its future is already done
+(``Task.cancel`` cancelled it), so the entry is popped when it reaches the
+top (``_pop_dead_head``), exactly once, and its cleanup only decrements
+``_waiting``. ``queue_length`` is ``_waiting + _granted``, so it drops when
+the cancelled task runs its cleanup, as before. The best live waiter is
+always the top after dead entries are popped, so the no-barging check is one
+comparison. The heap is rebuilt without dead entries when they are the
+majority, so it cannot grow without bound behind a long-held unit. Every
+operation is O(log n) amortised. The order is still ``(priority, seq)`` and
+``seq`` is unique, so service order is exactly as before.
 
 How it mirrors ``Semaphore``:
 
@@ -65,11 +131,11 @@ How it mirrors ``Semaphore``:
   same instant finds no free unit and queues, unless its key is strictly
   better than every live waiter's (then it legitimately goes first);
 * the fast path takes a free unit without suspending, as ``Semaphore``
-  (and so RES-01's ``Resource``) does;
+  and ``Resource`` do;
 * a waiter cancelled after its future was resolved, but before it resumed,
   gives the unit to the next waiter (``Semaphore._acquire``'s fix-up for
-  "done and not cancelled"); a waiter cancelled while still pending removes
-  itself from the order.
+  "done and not cancelled"); a waiter cancelled while still pending leaves
+  its (done) entry to be popped lazily.
 
 Why not ``asyncio.Condition`` (round 0, rejected in D030): ``notify_all()``
 needs the Condition's lock, so the release in ``__aexit__`` had to ``await``
@@ -84,9 +150,10 @@ exactly the one that gets the unit.
 import asyncio
 import itertools
 import math
-from bisect import bisect_left, insort
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from heapq import heapify, heappop, heappush
 from types import TracebackType
 from typing import Any, Self
 
@@ -146,8 +213,10 @@ class Resource:
     a queued request leaving (cancelled) and a release. Read ``count`` and
     ``queue_length`` inside it. It must not block or acquire the resource.
 
-    A Resource is bound to the run in which it is first used (its
-    ``asyncio.Semaphore`` binds to one event loop), so create it inside the run.
+    Create it inside the run: its waiters' futures belong to the running
+    loop. Waiting is built on per-request futures in a FIFO deque, not on
+    ``asyncio.Semaphore``, so that cancelling many waiters stays linear
+    (D075; see the module docstring).
 
     Monitor errors (D023 v2) follow asyncio's rule for callbacks: an
     ``Exception`` raised by the monitor is passed to
@@ -178,8 +247,11 @@ class Resource:
         self._run_name = self._name
         self._capacity = capacity
         self._monitor = monitor
-        self._sem = asyncio.Semaphore(capacity)  # does all waiting and queueing
-        self._count = 0
+        # FIFO of waiter futures. A future that is already done here was
+        # cancelled while queued; it is popped lazily (see _pop_dead_head).
+        self._waiters: deque[asyncio.Future[None]] = deque()
+        self._count = 0  # units held by tasks that have resumed
+        self._granted = 0  # units handed to a waiter that has not resumed yet
         self._queue_length = 0
 
     @property
@@ -232,32 +304,112 @@ class Resource:
             queue_len=self._queue_length,
         )
 
+    def _free(self) -> int:
+        return self._capacity - self._count - self._granted
+
+    def _pop_dead_head(self) -> None:
+        """Drop futures at the head of the queue that are already done.
+
+        A queued future is done only if its waiter was cancelled (a granted
+        future leaves the deque when it is resolved). Each future is popped
+        once, so this is O(1) amortised; afterwards the head, if any, is live.
+        """
+        waiters = self._waiters
+        while waiters and waiters[0].done():
+            waiters.popleft()
+
+    def _wake_up_next(self) -> bool:
+        """Hand one unit to the first live waiter; False if there is none.
+
+        ``Semaphore._wake_up_next``, except that the cancelled futures it
+        passes are popped instead of being scanned over again on every call.
+        The caller has made sure a unit is free.
+        """
+        self._pop_dead_head()
+        if not self._waiters:
+            return False
+        fut = self._waiters.popleft()
+        self._granted += 1
+        fut.set_result(None)  # the waiter resumes at its next turn
+        return True
+
+    def _wake_up_while_free(self) -> None:
+        """``Semaphore.acquire``'s ``finally``: wake as many as units allow."""
+        while self._free() > 0:
+            if not self._wake_up_next():
+                break
+
+    def _drop_dead_if_mostly_dead(self) -> None:
+        """Rebuild the deque without done futures once they are the majority.
+
+        Without this, waiters that give up behind a unit held for a long time
+        would stay in the deque until the head reaches them. ``queue_length``
+        bounds the live futures in the deque from above, so a rebuild removes
+        at least half of the deque; it costs O(1) amortised per cancellation.
+        """
+        if len(self._waiters) > 2 * self._queue_length + 32:
+            self._waiters = deque(f for f in self._waiters if not f.done())
+
     async def _acquire(self) -> None:
         self._register()  # may raise ValueError: nothing has changed yet
-        # Semaphore.acquire has no await before its fast path, so this check
-        # agrees with what acquire() will decide a moment later.
-        must_wait = self._sem.locked()
-        if must_wait:
-            self._queue_length += 1
+        # Fast path, no suspension: ``not Semaphore.locked()``, i.e. a unit
+        # is free and nobody is queued (no barging). As in Semaphore, a waiter
+        # that has been granted a unit but has not resumed yet still counts as
+        # queued (``_granted``): a newcomer arriving then queues behind it even
+        # if another unit is free, and that waiter hands the free unit on when
+        # it resumes (below). Cancelled futures do not count as queued. (The
+        # pop is defensive: when a unit is free and nobody is granted, every
+        # wake-up has already emptied the deque. It makes sure a stale dead
+        # head can never make a newcomer wait for nobody.)
+        self._pop_dead_head()
+        if self._free() > 0 and not self._waiters and self._granted == 0:
+            self._count += 1
             self._changed()
+            return
+
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        self._queue_length += 1
+        self._changed()  # queued
         try:
-            await self._sem.acquire()
+            await fut
         except BaseException:
-            # Cancelled while queued, or granted and cancelled before resuming.
-            # In the second case the semaphore itself returns the unit, and
-            # because we have not incremented ``count`` there is nothing to undo.
-            if must_wait:
-                self._queue_length -= 1
-                self._changed()
-            raise
-        if must_wait:
+            # CancelledError (a cancel, timeout or sim.interrupt) is the only
+            # exception expected here; anything else is handled the same way
+            # so that no unit can leak.
             self._queue_length -= 1
+            if fut.done() and not fut.cancelled():
+                # Granted, then cancelled before resuming (Semaphore.acquire's
+                # fix-up): the unit was ours; it goes to the next waiter below.
+                self._granted -= 1
+            else:
+                # Cancelled while queued. The future is done (Task.cancel
+                # cancelled it), so it stays in the deque and is popped lazily:
+                # no O(n) search for it, unlike Semaphore's deque.remove().
+                # cancel() covers any other exception thrown in while the
+                # future was still pending (a no-op on a done future).
+                fut.cancel()
+                self._drop_dead_if_mostly_dead()
+            # Wake whoever can now go (Semaphore's ``finally`` does the same).
+            self._wake_up_while_free()
+            self._changed()
+            raise
+        # Granted by _wake_up_next, which already popped our future. Our unit
+        # moves from "granted" to "held" in one step (no free unit appears).
+        self._granted -= 1
         self._count += 1
+        # Newcomers that queued while we were granted-but-not-resumed may find
+        # a free unit now (Semaphore's ``finally`` runs on success too).
+        self._wake_up_while_free()
+        self._queue_length -= 1
         self._changed()
 
     def _release(self) -> None:
+        # Synchronous, like Semaphore.release(): decrement and hand-over to
+        # one waiter in one step, so neither a cancel nor a same-instant
+        # newcomer can get between them (D030).
         self._count -= 1
-        self._sem.release()
+        self._wake_up_next()
         self._changed()
 
     async def __aenter__(self) -> Self:
@@ -358,12 +510,18 @@ class PriorityResource:
         self._run_name = self._name
         self._capacity = capacity
         self._monitor = monitor
-        # Waiters in key order. The seq number is unique, so tuples compare on
-        # (priority, seq) only and never reach the (uncomparable) future.
+        # Waiters as a heap (``heapq``) keyed by (priority, seq). The seq
+        # number is unique, so tuples compare on (priority, seq) only and never
+        # reach the (uncomparable) future. An entry whose future is already
+        # done was cancelled while queued; it is popped lazily.
         self._waiters: list[
             tuple[float, int, asyncio.Future[None], _Ticket | None]
         ] = []
         self._seq = itertools.count()
+        # Queued requests whose task has neither been granted a unit nor run
+        # its cancellation cleanup: the "waiting" part of queue_length. Not
+        # len(_waiters), which may still hold cancelled entries not popped yet.
+        self._waiting = 0
         self._count = 0  # units held by tasks that have resumed
         self._granted = 0  # units handed to a waiter that has not resumed yet
 
@@ -389,7 +547,7 @@ class PriorityResource:
         As for ``Resource``, a request that has been handed a unit but whose
         task has not yet resumed still counts as waiting until it does.
         """
-        return len(self._waiters) + self._granted
+        return self._waiting + self._granted
 
     def request(self, priority: float = 0) -> PriorityRequest:
         """Return a request to use as ``async with res.request(priority=p):``."""
@@ -419,13 +577,36 @@ class PriorityResource:
     def _free(self) -> int:
         return self._capacity - self._count - self._granted
 
+    def _pop_dead_head(self) -> None:
+        """Pop heap entries whose future is done (cancelled while queued).
+
+        A granted entry leaves the heap when it is resolved, so a done future
+        still in the heap means a cancelled waiter. Each entry is popped once
+        (O(log n)); afterwards the head, if any, is the best live waiter.
+        """
+        waiters = self._waiters
+        while waiters and waiters[0][2].done():
+            heappop(waiters)
+
     def _blocked_by_waiter(self, priority: float) -> bool:
         """True if a live waiter has a better-or-equal key than a newcomer.
 
         A newcomer's request order is the newest, so "better or equal" means
-        any priority <= its own.
+        any priority <= its own, i.e. the best live waiter's priority is <=.
         """
-        return any(not w[2].done() and w[0] <= priority for w in self._waiters)
+        self._pop_dead_head()
+        return bool(self._waiters) and self._waiters[0][0] <= priority
+
+    def _drop_dead_if_mostly_dead(self) -> None:
+        """Rebuild the heap without done entries once they are the majority.
+
+        As ``Resource._drop_dead_if_mostly_dead``: ``_waiting`` bounds the
+        live entries from above, so a rebuild (O(n) with ``heapify``) removes
+        at least half the heap: O(1) amortised per cancellation.
+        """
+        if len(self._waiters) > 2 * self._waiting + 32:
+            self._waiters = [w for w in self._waiters if not w[2].done()]
+            heapify(self._waiters)
 
     # Hooks for PreemptiveResource; no-ops here. ``ticket`` is None unless a
     # subclass passes one to ``_acquire``.
@@ -445,16 +626,15 @@ class PriorityResource:
         """Hand every free unit to the best live waiters, synchronously.
 
         Like ``Semaphore._wake_up_next``: a waiter whose future is already
-        done was cancelled while pending; it is skipped here and removes
-        itself from the order when its task runs.
+        done was cancelled while pending; it is popped here (and never looked
+        at again) while its task, when it runs, only fixes the counters.
         """
-        i = 0
-        while self._free() > 0 and i < len(self._waiters):
-            fut, ticket = self._waiters[i][2], self._waiters[i][3]
-            if fut.done():
-                i += 1
-                continue
-            del self._waiters[i]
+        while self._free() > 0:
+            self._pop_dead_head()
+            if not self._waiters:
+                return
+            _, _, fut, ticket = heappop(self._waiters)
+            self._waiting -= 1
             self._granted += 1
             self._unit_assigned(ticket)
             fut.set_result(None)  # the waiter resumes at its next turn
@@ -479,7 +659,8 @@ class PriorityResource:
 
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         entry = (priority, key[1], fut, ticket)
-        insort(self._waiters, entry)
+        heappush(self._waiters, entry)
+        self._waiting += 1
         self._changed()  # queued
         try:
             await fut
@@ -496,8 +677,13 @@ class PriorityResource:
                     self._granted -= 1
                     self._unit_dropped(ticket)
             else:
-                # Still in the order: leave it.
-                del self._waiters[bisect_left(self._waiters, key)]
+                # Cancelled while queued: the future is done (Task.cancel
+                # cancelled it), so the entry is popped lazily from the heap;
+                # cancel() covers any other exception thrown in while it was
+                # still pending (a no-op on a done future).
+                fut.cancel()
+                self._waiting -= 1
+                self._drop_dead_if_mostly_dead()
             # Wake whoever can now go (Semaphore's ``finally`` does the same).
             self._grant_free_units()
             self._changed()
@@ -506,7 +692,7 @@ class PriorityResource:
             # Granted, then preempted before resuming (PreemptiveResource):
             # the unit is already the preemptor's; the monitor was called then.
             raise Interrupt(ticket.evicted)
-        # Granted by _grant_free_units, which already removed our entry.
+        # Granted by _grant_free_units, which already popped our entry.
         self._granted -= 1
         self._count += 1
         self._became_holder(ticket)

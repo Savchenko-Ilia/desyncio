@@ -30,8 +30,8 @@ Contents:
 - **A process is a coroutine.** `sim.spawn(coro)` starts one (a task, like
   `asyncio.create_task`); `asyncio.gather` and `asyncio.TaskGroup` work as usual.
 - **Create primitives inside the run**, i.e. inside the coroutine you pass to
-  `desyncio.run(...)`. They are built on asyncio objects (`Semaphore`, `Condition`, `Queue`,
-  futures) that bind to the event loop that first uses them, and each `run` makes a fresh loop.
+  `desyncio.run(...)`. They are built on asyncio objects (`Condition`, `Queue`, futures) that
+  bind to the event loop that first uses them, and each `run` makes a fresh loop.
 - **Primitives are used with `async with`** (D019): `async with resource:` acquires, and the
   exit releases, on normal exit, exception and cancellation alike.
 - **Same model + same seed = same trace.** Wherever several tasks are ready at the same virtual
@@ -91,11 +91,22 @@ done at t=8; in use=0, waiting=0
 
 | Piece | Who |
 | --- | --- |
-| The FIFO queue of waiters | asyncio: a stock `asyncio.Semaphore(capacity)` (a deque of futures) |
-| "No barging": a newcomer arriving at the instant of a release queues behind existing waiters | asyncio: `Semaphore.acquire` refuses its fast path while anyone is queued |
-| Cancelling a waiter removes it from the queue; a waiter cancelled after being granted but before resuming gives the unit back and wakes the next | asyncio: `Semaphore`'s own cleanup |
-| Virtual time | nothing special: the semaphore only uses futures, which the virtual-time loop drives |
-| `capacity`/`count`/`queue_length`, argument validation, the `monitor` hook and its error contract | desyncio (our own counters; we never read the semaphore's private attributes) |
+| Waiting itself: each waiter awaits its own `loop.create_future()`; granting is `fut.set_result(None)` | asyncio futures |
+| Cancellation (`task.cancel()`, `asyncio.timeout()`, `TaskGroup`, `sim.interrupt`) arriving as `CancelledError` at `await fut` | asyncio |
+| The FIFO queue of waiters (a `collections.deque` of those futures) | desyncio (D075) |
+| "No barging": a newcomer arriving at the instant of a release queues behind existing waiters | desyncio, with `asyncio.Semaphore`'s rule: the fast path only when a unit is free and nobody is queued |
+| Cancelling a waiter takes it out of the queue; a waiter cancelled after being granted but before resuming gives the unit back and wakes the next | desyncio, with `Semaphore`'s cleanup rules; a cancelled waiter's future is dropped lazily, in O(1) amortised |
+| Virtual time | nothing special: only futures are used, which the virtual-time loop drives |
+| `capacity`/`count`/`queue_length`, argument validation, the `monitor` hook and its error contract | desyncio |
+
+Until batch 34 `Resource` was a thin wrapper over `asyncio.Semaphore`. It stopped delegating
+because CPython's `Semaphore` makes cancelling many waiters quadratic: each cancelled waiter's
+cleanup removes its future with `deque.remove` and then scans the deque from the head for a
+waiter to wake, past every other cancelled future (79 s of teardown for 100,000 waiters).
+`Resource` keeps the semaphore's semantics exactly, on its own deque of futures: the cleanup of a
+cancelled waiter touches nothing, and the dead future is popped once, when a release or a
+newcomer reaches it. This is the recorded exception to "reuse asyncio first" (D075), pinned by
+`tests/test_scaling_resource.py`.
 
 ### Guarantees
 
@@ -284,11 +295,13 @@ a PriorityRequest can be used only once
 | Waiting itself: each waiter awaits its own `loop.create_future()`; granting is `fut.set_result(None)` | asyncio futures |
 | Cancellation (`task.cancel()`, `asyncio.timeout()`, `TaskGroup`, `sim.interrupt`) arriving as `CancelledError` at `await fut` | asyncio |
 | The shape of `Semaphore`: synchronous release that hands the unit straight to the next waiter; a waiter cancelled after being granted passes the unit on | copied from `asyncio.Semaphore`'s design, re-implemented |
-| The ordering (a list kept sorted with `bisect.insort`), the grant rule, counters, validation, the monitor | desyncio |
+| The ordering (a `heapq` heap keyed by `(priority, request order)`, cancelled entries dropped lazily), the grant rule, counters, validation, the monitor | desyncio |
 
-asyncio has no priority semaphore, so this is the one place the waiting logic is ours. It could
-not be built on `asyncio.Condition`: `notify_all()` needs the Condition's lock, so release had to
-`await`, and a cancel at that await leaked the unit (D030).
+asyncio has no priority semaphore, so the waiting logic is ours (as for `Resource`, D075). It
+could not be built on `asyncio.Condition`: `notify_all()` needs the Condition's lock, so release
+had to `await`, and a cancel at that await leaked the unit (D030). A waiter cancelled while
+queued leaves its entry in the heap; the entry is popped when it reaches the top, so cancelling n
+waiters, or n arrivals each better than every queued one, costs O(n log n) in total (PERF-01).
 
 ### Guarantees
 
