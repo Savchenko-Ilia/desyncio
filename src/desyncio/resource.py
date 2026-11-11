@@ -65,11 +65,13 @@ Ours, following ``Semaphore``'s design without copying its code:
 * lazy removal: a waiter cancelled while still queued does *not* search the
   deque for its future. Its future is already done, and whoever next looks
   at the head of the deque (a release, or a newcomer checking for live
-  waiters) pops it. Each future is popped at most once, so cancelling n
-  waiters costs O(n) in total. So that a long-held unit with many
-  reneging waiters cannot grow the deque without bound, the deque is
-  rebuilt without its done futures when they make up more than half of it
-  (O(n) once per n cancellations, so still O(1) amortised).
+  waiters) pops it, unless the rebuild below has dropped it first. Each
+  future is dropped once, so cancelling n waiters costs O(n) in total. (The
+  cleanup still hands on any free unit, as ``Semaphore``'s does.) So that
+  a long-held unit with many reneging waiters cannot grow the deque without
+  bound, the deque is rebuilt without its done futures when they make up
+  more than half of it (O(n) once per n cancellations, so still O(1)
+  amortised).
 
 ``queue_length`` is our own counter, unchanged in meaning: it rises when a
 request queues and drops when that request's task resumes (granted) or runs
@@ -110,15 +112,18 @@ operation, so cancelling or serving n waiters was O(n^2):
   arrival better than all queued ones;
 * each insert and each removal shifted the list.
 
-Now a cancelled waiter does not touch the heap: its future is already done
-(``Task.cancel`` cancelled it), so the entry is popped when it reaches the
-top (``_pop_dead_head``), exactly once, and its cleanup only decrements
-``_waiting``. ``queue_length`` is ``_waiting + _granted``, so it drops when
-the cancelled task runs its cleanup, as before. The best live waiter is
-always the top after dead entries are popped, so the no-barging check is one
-comparison. The heap is rebuilt without dead entries when they are the
-majority, so it cannot grow without bound behind a long-held unit. Every
-operation is O(log n) amortised. The order is still ``(priority, seq)`` and
+Now a cancelled waiter's cleanup does not search the heap: its future is
+already done (``Task.cancel`` cancelled it), so the entry stays where it is
+and is dropped exactly once, either popped when it reaches the top
+(``_pop_dead_head``) or in a rebuild (below). The cleanup decrements
+``_waiting``, may trigger that rebuild, and hands any free unit to the best
+live waiters (``_grant_free_units``). ``queue_length`` is
+``_waiting + _granted``, so it drops when the cancelled task runs its
+cleanup, as before. The best live waiter is always the top after dead
+entries are popped, so the no-barging check is one comparison. The heap is
+rebuilt without dead entries when they are the majority, so it cannot grow
+without bound behind a long-held unit. Every operation is O(log n)
+amortised. The order is still ``(priority, seq)`` and
 ``seq`` is unique, so service order is exactly as before.
 
 How it mirrors ``Semaphore``:
@@ -135,7 +140,7 @@ How it mirrors ``Semaphore``:
 * a waiter cancelled after its future was resolved, but before it resumed,
   gives the unit to the next waiter (``Semaphore._acquire``'s fix-up for
   "done and not cancelled"); a waiter cancelled while still pending leaves
-  its (done) entry to be popped lazily.
+  its (done) entry to be dropped lazily.
 
 Why not ``asyncio.Condition`` (round 0, rejected in D030): ``notify_all()``
 needs the Condition's lock, so the release in ``__aexit__`` had to ``await``
@@ -248,7 +253,8 @@ class Resource:
         self._capacity = capacity
         self._monitor = monitor
         # FIFO of waiter futures. A future that is already done here was
-        # cancelled while queued; it is popped lazily (see _pop_dead_head).
+        # cancelled while queued; it is dropped lazily (see _pop_dead_head
+        # and _drop_dead_if_mostly_dead).
         self._waiters: deque[asyncio.Future[None]] = deque()
         self._count = 0  # units held by tasks that have resumed
         self._granted = 0  # units handed to a waiter that has not resumed yet
@@ -312,7 +318,8 @@ class Resource:
 
         A queued future is done only if its waiter was cancelled (a granted
         future leaves the deque when it is resolved). Each future is popped
-        once, so this is O(1) amortised; afterwards the head, if any, is live.
+        at most once (a rebuild may drop it first), so this is O(1)
+        amortised; afterwards the head, if any, is live.
         """
         waiters = self._waiters
         while waiters and waiters[0].done():
@@ -384,7 +391,7 @@ class Resource:
                 self._granted -= 1
             else:
                 # Cancelled while queued. The future is done (Task.cancel
-                # cancelled it), so it stays in the deque and is popped lazily:
+                # cancelled it), so it stays in the deque and is dropped lazily:
                 # no O(n) search for it, unlike Semaphore's deque.remove().
                 # cancel() covers any other exception thrown in while the
                 # future was still pending (a no-op on a done future).
@@ -513,7 +520,8 @@ class PriorityResource:
         # Waiters as a heap (``heapq``) keyed by (priority, seq). The seq
         # number is unique, so tuples compare on (priority, seq) only and never
         # reach the (uncomparable) future. An entry whose future is already
-        # done was cancelled while queued; it is popped lazily.
+        # done was cancelled while queued; it is dropped lazily (popped at
+        # the top, or in a rebuild).
         self._waiters: list[
             tuple[float, int, asyncio.Future[None], _Ticket | None]
         ] = []
@@ -581,8 +589,9 @@ class PriorityResource:
         """Pop heap entries whose future is done (cancelled while queued).
 
         A granted entry leaves the heap when it is resolved, so a done future
-        still in the heap means a cancelled waiter. Each entry is popped once
-        (O(log n)); afterwards the head, if any, is the best live waiter.
+        still in the heap means a cancelled waiter. Each entry is popped at
+        most once (O(log n); a rebuild may drop it first); afterwards the
+        head, if any, is the best live waiter.
         """
         waiters = self._waiters
         while waiters and waiters[0][2].done():
@@ -627,7 +636,8 @@ class PriorityResource:
 
         Like ``Semaphore._wake_up_next``: a waiter whose future is already
         done was cancelled while pending; it is popped here (and never looked
-        at again) while its task, when it runs, only fixes the counters.
+        at again). Its task's cleanup, when it runs, does not look for the
+        entry: it fixes the counters, may rebuild the heap, and calls this.
         """
         while self._free() > 0:
             self._pop_dead_head()
@@ -678,7 +688,7 @@ class PriorityResource:
                     self._unit_dropped(ticket)
             else:
                 # Cancelled while queued: the future is done (Task.cancel
-                # cancelled it), so the entry is popped lazily from the heap;
+                # cancelled it), so the entry is dropped lazily from the heap;
                 # cancel() covers any other exception thrown in while it was
                 # still pending (a no-op on a done future).
                 fut.cancel()
