@@ -1439,3 +1439,16 @@ Branch: feat/PERF-02 + fix/PERF-02-1  ·  Merged: 6897dce
 **Gotchas.** Loop binding still raises "bound to a different event loop", as Queue and Condition did.
 
 **Follow-ups (SHOULD).** The FilterStore paragraph in `docs/primitives.md` names only `deque.remove` as the cause, not `Condition._notify`'s rescans. An oldest-first reneging case would cover FilterStore's bounded memory directly (it is covered through the shared `_Waiters` today). `_LoopBinding.get`'s "changes" note should say it raises where the original returned None. A synchronous `FilterStore.shutdown()` is now possible (D078).
+
+## PERF-01 — Resource classes scale (2026-11-11, batch 34)
+Branch: feat/PERF-01 + fix/PERF-01-1 + fix/PERF-01-2  ·  Merged: 83d8ca0
+
+**Approach.** `Resource` no longer delegates to `asyncio.Semaphore` (D075): CPython's `Semaphore.acquire` removes a cancelled waiter with `deque.remove` and its `finally` calls `_wake_up_next()`, which walks past every done future, once per waiter. `Resource` keeps its own deque of `loop.create_future()` futures and mirrors `Semaphore` exactly (the `locked()` rule — a granted-but-not-resumed waiter still counts as queued — synchronous release waking one, the hand-on of a granted-then-cancelled waiter); a cancelled waiter's future is dropped once, popped at the head or in a rebuild once dead futures are the majority. `PriorityResource`/`PreemptiveResource`: the sorted list became a `heapq` heap with lazy deletion and a `_waiting` counter; the old grant loop rescanned dead entries on every cleanup (about n²/4 `done()` calls), and `_blocked_by_waiter` scanned all waiters on every preempting arrival. Teardown at 50k: Resource 39 s → 0.7 s, PriorityResource 211 s → 0.6 s.
+
+**asyncio internals.** `Task.cancel()` cancels the future the task awaits, so at teardown every waiter's future is done before any cleanup runs; any cleanup that searches the queue is then O(n) per waiter.
+
+**Review findings.** Behaviour identical to the old code (4,500+ fuzz seeds per class on 3.13 and 3.14, sensitive to every behavioural mutant). Tests took two rounds: round 1, the profiler-event count could not see `deque.remove`/`heapify` inside one C call (added a comparison count with counting futures and priorities; the 180-case seeded stress became a hypothesis test, D041); round 2, a rebuild on every cancel and an `is`-based Python search were invisible (added a staggered reneging case and counting `_waiters` containers). Counts are deterministic on 3.13 and 3.14.
+
+**Gotchas.** A contended `Resource` reused in a later run no longer raises "bound to a different event loop" (D077). In the priority classes a newcomer can take a free unit at the same instant ahead of an equal-priority granted-but-not-resumed waiter (existing behaviour; open owner question).
+
+**Follow-ups (SHOULD).** No measured scenario grants while a long queue waits, so extra O(n) work per grant (`sorted(...)` after a heappop) is invisible; add an "n queued, each served in turn" count. The documented blind spot: per-cancel work done entirely in C without comparing or iterating through `__iter__`.
