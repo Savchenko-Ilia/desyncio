@@ -370,6 +370,7 @@ class ScheduledResource:
         self._run_name = register_resource_name(self, self._name)
         hold = _Hold(task)
         # No barging: a free unit is taken at once only if nobody is queued.
+        # (Equals ``not self._waiters``: grants empty the deque while a unit is free.)
         if len(self._units) < self._capacity and not self._queued:
             self._units[hold] = None
             hold.held = True
