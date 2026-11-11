@@ -29,7 +29,8 @@ schedules the task to run in a later step; cancellation (``task.cancel()``,
 underneath, D024) arrives as the ``CancelledError`` asyncio raises at
 ``await future``. Timers and virtual time: nothing here knows about time.
 
-Ours (no code is copied from CPython):
+Ours (no code in this module is copied from CPython; the one reused helper
+is named in the last bullet):
 
 * one FIFO line per direction (:class:`_Line`), a deque of :class:`_Waiter`
   records. A request stays in its line from the moment it parks until it is
@@ -60,8 +61,10 @@ Ours (no code is copied from CPython):
   interleave inside one operation. The old ``Condition`` lock was never
   contended for the same reason;
 * loop binding: like ``asyncio.Condition``, a container is bound to the first
-  event loop a task parks on it in (``RuntimeError`` on another loop), through
-  the stores' ``_LoopBinding`` helper.
+  event loop a task parks on it in (``RuntimeError`` on another loop). This
+  reuses ``store._LoopBinding``, which is adapted from CPython's
+  ``_LoopBoundMixin._get_loop`` and carries its PSF notice in ``store.py``
+  (``LICENSES/PSF.txt``); nothing of it is copied here.
 
 What changed for models (D076, accepted by the owner): strict FIFO per
 direction, head-of-line blocking, the no-barging rule, the monitor contract
