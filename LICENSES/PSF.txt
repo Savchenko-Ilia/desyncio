@@ -13,6 +13,18 @@ Adapted portions:
   __aexit__ and _deliver
   adapted from Lib/asyncio/timeouts.py, class Timeout (_State,
   __aenter__, __aexit__, _on_timeout), CPython 3.13
+- src/desyncio/store.py, _WaitingQueue.put and _WaitingQueue.get
+  adapted from Lib/asyncio/queues.py, Queue.put and Queue.get
+  (CPython 3.13)
+- src/desyncio/store.py, FilterStore._wait
+  adapted from Lib/asyncio/locks.py, Condition.wait (CPython 3.13)
+- src/desyncio/store.py, _Waiters.wake and _Waiters.wake_all
+  adapted from Lib/asyncio/queues.py, Queue._wakeup_next and the waking
+  loops of Queue.shutdown, and Lib/asyncio/locks.py, Condition._notify
+  (CPython 3.13)
+- src/desyncio/store.py, _LoopBinding.get
+  adapted from Lib/asyncio/mixins.py, _LoopBoundMixin._get_loop
+  (CPython 3.13)
 
 Copyright (c) 2001 Python Software Foundation; All Rights Reserved
 
