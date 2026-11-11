@@ -1417,3 +1417,14 @@ Branch: feat/EVT-08  ·  Merged: af19a80
 **Gotchas.** The docs-examples test allows only top-level `desyncio` imports and `python`/`text` fences, so the guide imports `from desyncio import events`.
 
 **Follow-ups (SHOULD).** Trim the guide (580 lines vs 469 for calendar.md): the delivery-rule bullets repeat the subscribing section, and "seq has gaps under a filter" appears twice. The built-in events table should note that `RunFinished` is absent after a handler error. The overhead range in the guide is from 3.13 runs; say so. Wrap two long lines in bench/README.md.
+
+## PERF-03 — ScheduledResource scales (2026-11-11, batch 34)
+Branch: feat/PERF-03 + fix/PERF-03-1 + fix/PERF-03-2  ·  Merged: 3c6f97a
+
+**Approach.** Cancelling a waiter called `self._waiters.remove(hold)` and a release called `self._units.remove(hold)`, both linear scans, so mass cancellation (teardown after `until`, reverse-order cancels) was O(n²). Now waiters that leave are marked (`_Hold.queued`) and skipped lazily, a `_queued` count keeps `queue_length` exact, and the deque is rebuilt in order once stale entries outnumber live ones by more than 16; `_units` is an insertion-ordered dict (release = `del`, `popitem()` LIFO for shift-end victims as before). Teardown at 50k: waiters 5.7 → 0.5 s, holders 7.2 → 0.9 s.
+
+**Review findings.** Behaviour unchanged (two differential fuzzes, 1,500 + 5,000 seeds, sensitive to every behavioural mutant). The tests took two rounds: round 1, the comparison-count test missed regressions without `==` (identity rebuilds, a compaction-threshold typo, rebuilding `_units`); the CPU-time ratio added for them was flaky on 3.14 (2 of 25 runs). Round 2 replaced timing with deterministic counts: a test subclass whose `_waiters`/`_units` properties wrap every stored container in a counting deque/dict. Counts are identical on every run on 3.13 and 3.14.
+
+**Gotchas.** Teardown order is address-dependent, so a teardown test with capacity 1 catches `deque.remove` only sometimes; the test uses capacity 0 (no shifts) so nothing is granted and every cancel scans.
+
+**Follow-ups (SHOULD).** The counting containers don't count O(n) work through dict views, `copy()`, `rotate`/`reverse` (none is a revert of the bug); the holders ratio check is vacuous (counts 0/0), the absolute bound does the work.
