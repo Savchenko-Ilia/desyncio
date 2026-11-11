@@ -149,6 +149,16 @@ class _Waiters:
             self._futures = deque(f for f in self._futures if not f.done())
             self._cancelled = 0
 
+    # Adapted from CPython Lib/asyncio/queues.py, Queue._wakeup_next and the
+    # waking loops of Queue.shutdown, and Lib/asyncio/locks.py,
+    # Condition._notify (Python 3.13; unchanged in 3.14).
+    # Copyright (c) 2001 Python Software Foundation. Licensed under the PSF
+    # License Agreement v2; see LICENSES/PSF.txt.
+    # Changes from the original (wake, and wake_all through it): one loop for
+    # all three, waking up to n futures (_wakeup_next wakes 1, shutdown wakes
+    # all); like _wakeup_next and shutdown, every future met is popped,
+    # including the woken ones, whereas Condition._notify leaves its futures
+    # in place and each waiter removes its own after waking.
     def wake(self, n: int = 1) -> None:
         """Wake the ``n`` longest-waiting live waiters (fewer if there are fewer).
 
@@ -181,6 +191,14 @@ class _LoopBinding:
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
 
+    # Adapted from CPython Lib/asyncio/mixins.py, _LoopBoundMixin._get_loop
+    # (Python 3.13; unchanged in 3.14).
+    # Copyright (c) 2001 Python Software Foundation. Licensed under the PSF
+    # License Agreement v2; see LICENSES/PSF.txt.
+    # Changes from the original: the bound loop lives in this helper, not in
+    # a mixin of the store, and the owner to name in the error is passed in;
+    # no global lock around the first binding (it only guarded threads, and
+    # a store is used from its loop's thread).
     def get(self, owner: object) -> asyncio.AbstractEventLoop:
         """Return the running loop, binding to it on first use."""
         loop = asyncio.get_running_loop()
