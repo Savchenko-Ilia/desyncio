@@ -1,48 +1,120 @@
 """Container: a level of homogeneous stuff (fuel, water, money) with blocking put/get.
 
-asyncio has no primitive for "wait until an amount is available", so ``Container``
-is built on the closest stock piece, :class:`asyncio.Condition`.
+asyncio has no primitive for "wait until an amount is available". Until batch
+34 ``Container`` was built on the closest stock piece, ``asyncio.Condition``
+(``wait_for`` plus ``notify_all``). It now parks its waiters itself, on asyncio
+futures, because the ``Condition`` made cancellation quadratic (D075, D076).
 
-What asyncio does for us
-------------------------
-* ``Condition.wait_for(predicate)``: parks the task on a future, re-checks the
-  predicate after every wakeup, and re-acquires the lock before returning.
-* ``Condition.notify_all()``: wakes every parked task so each re-checks its
-  predicate.
-* The ``Lock`` inside the ``Condition``: FIFO and mutually exclusive, so the
-  level is never modified by two tasks at once, and tasks are admitted in call
-  order.
-* Cancellation: ``Condition.wait`` re-acquires the lock even when cancelled, so
-  our ``finally`` block always runs holding the lock.
-* Timers and virtual time: nothing here knows about time at all. Blocking is
-  plain futures, which the desyncio loop drives in virtual time.
+Why not ``asyncio.Condition`` (D075)
+-----------------------------------
+A waiter cancelled inside ``Condition.wait`` removes its future with
+``deque.remove`` (a linear search), then calls ``Condition._notify(1)`` to
+pass a possible notification on, which walks the deque from the head past
+every future that is already done; and our cleanup then called
+``notify_all()``, another walk of the whole deque. Cancelling n parked waiters
+at once (the run ends at ``until``, a ``TaskGroup`` aborts, a mass interrupt)
+cancels all n futures before any cleanup runs, so each cleanup walks past up
+to n cancelled futures: O(n^2), about 117 s for 50,000 waiters. Besides,
+``notify_all`` on every change woke every parked waiter, O(n) per put or get,
+although only the head of each line can proceed. desyncio cannot change
+asyncio, so AGENTS.md principle 6 allows this exception (D075), and
+``tests/test_scaling_container.py`` pins the linear cost.
 
-What is ours (the minimum on top)
----------------------------------
-``Condition`` wakes waiters in FIFO order, but ``wait_for`` makes each of them
-re-check its *own* predicate, so after a ``notify_all`` a small ``get(1)`` queued
-behind a big ``get(10)`` would see ``level >= 1`` and overtake it. The spec
-(D021) wants strict FIFO with head-of-line blocking. Condition cannot express
-that by itself, so each direction keeps a deque of tickets (plain ``object()``
-instances) and the predicate also requires "my ticket is at the front". That is
-the only extra state: no hand-rolled futures, no wakeup logic.
-When a waiter leaves (served or cancelled) its ticket is removed and
-``notify_all`` lets the new head re-check, so a cancelled head cannot block the
-line.
-Cost: ``notify_all`` wakes every parked waiter in that Condition, so each put or
-get costs O(N) wakeups and predicate checks for N waiters, even though at most
-the heads can proceed.
+How waiting works
+-----------------
+Delegated to asyncio: the waiting itself. A parked request awaits its own
+``loop.create_future()``; a wake-up is ``future.set_result(None)``, which
+schedules the task to run in a later step; cancellation (``task.cancel()``,
+``asyncio.timeout()``, a ``TaskGroup``, ``sim.interrupt``, which is a cancel
+underneath, D024) arrives as the ``CancelledError`` asyncio raises at
+``await future``. Timers and virtual time: nothing here knows about time.
+
+Ours (no code in this module is copied from CPython; the one reused helper
+is named in the last bullet):
+
+* one FIFO line per direction (:class:`_Line`), a deque of :class:`_Waiter`
+  records. A request stays in its line from the moment it parks until it is
+  served or leaves, and it keeps its place when it re-parks;
+* strict FIFO with head-of-line blocking (D021): only the head of a line is
+  ever woken, and it re-checks whether its amount fits when it resumes. If it
+  fits, it changes the level itself, in that step; if not (the level moved
+  again before it ran), it parks again, still at the head;
+* no barging: a new request is served at once (no suspension) only if its line
+  is empty and the amount fits. A head that was woken but has not run yet is
+  still in the line, so a newcomer queues behind it, as before;
+* wake-ups: every level change wakes the parked head of each line (the oldest
+  park first, where a head that re-parks after a wake-up counts as parking
+  anew: the order ``Condition.notify_all`` used, pinned by
+  ``test_heads_are_woken_oldest_park_first``). A head that leaves
+  with an exception (a cancel, a timeout, an interrupt) wakes the next head of
+  its own line, so a cancelled big request never blocks the line and a
+  wake-up is never lost. Nothing else wakes anyone: a parked head that does
+  not fit stays unfit until the level changes;
+* lazy deletion: a waiter that leaves from the middle of its line is only
+  marked; marked records are popped when they reach the head, and the deque
+  is rebuilt without them whenever, after a waiter leaves (served or
+  cancelled, from the head or the middle), it holds more than twice the live
+  waiters plus ``_SLACK`` (O(1) amortised per departure; at any time a line
+  holds at most ``2 * live + _SLACK`` records);
+* no lock: the level and both lines are read and changed only in synchronous
+  code (no ``await`` between the check and the change), so two tasks can never
+  interleave inside one operation. The old ``Condition`` lock was never
+  contended for the same reason;
+* loop binding: like ``asyncio.Condition``, a container is bound to the first
+  event loop a task parks on it in (``RuntimeError`` on another loop). This
+  reuses ``store._LoopBinding``, which is adapted from CPython's
+  ``_LoopBoundMixin._get_loop`` and carries its PSF notice in ``store.py``
+  (``LICENSES/PSF.txt``); nothing of it is copied here.
+
+What changed for models (D076, accepted by the owner): strict FIFO per
+direction, head-of-line blocking, the no-barging rule, the monitor contract
+and the guide's examples are unchanged. The *order* in which tasks run within
+one instant can differ: a waiter behind the head used to be woken together
+with it by ``notify_all`` and now is woken by the head's own level change, one
+step later. For requests made at given instants, each is still served (or
+cancelled) at the same instant and the level at the end of every instant is
+the same (``tests/test_scaling_container.py`` checks this against the old
+code), but only when both of these hold:
+
+* the amounts add up exactly (integers, or fractions such as 0.5 and 0.25
+  whose sums are exact in binary floating point). With amounts like 0.1 the
+  level is rounded after every change, and a different order of puts and gets
+  within an instant can round differently, so a request may fit, or not, at
+  another instant than before;
+* every cancel is issued at the start of its instant: by a timer set at an
+  earlier instant (``asyncio.timeout()``, ``wait_for``, ``loop.call_at``), or
+  by a task resuming from a sleep until that instant, before it suspends
+  again. A cancel issued later in the instant (after ``await
+  asyncio.sleep(0)`` steps, after waking on an ``Event``, a ``Queue`` or
+  another ``Container``'s put or get, or from a zero-delay
+  ``loop.call_soon``/``loop.call_later(0, ...)``) can reach a waiter that the
+  old code had already served by then (a waiter behind a head is served a
+  step later than before), so that waiter is cancelled instead of served.
+
+Both exceptions are pinned in ``tests/test_scaling_container.py``. And a task
+that resumes a step earlier or later may make its next request in a different
+order relative to other tasks, so a model can give a different result for the
+same seed than desyncio versions before batch 34.
+
+Also ours: amount and capacity validation, ``level``/``capacity``, and the
+``monitor=`` hook (D021, D023 v2).
 """
 
 import asyncio
+import itertools
 import math
 import numbers
 from collections import deque
 from collections.abc import Callable
 
 from desyncio._monitor import report_monitor_error
+from desyncio.store import _LoopBinding
 
 __all__ = ["Container"]
+
+# A line's deque is rebuilt without its departed records once they outnumber
+# the live ones by more than this, so a few departures never cost a rebuild.
+_SLACK = 16
 
 
 def _check_real(name: str, value: object) -> float:
@@ -50,6 +122,65 @@ def _check_real(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a real number, not {value!r}")
     return float(value)
+
+
+class _Waiter:
+    """A parked request: its place in a line and the future it waits on."""
+
+    __slots__ = ("future", "parked", "queued")
+
+    def __init__(self, future: "asyncio.Future[None]", parked: int) -> None:
+        self.future = future
+        self.parked = parked  # park number, for the order of wake-ups
+        self.queued = True  # False once it has left its line
+
+
+class _Line:
+    """One direction's FIFO of waiters, with O(1) amortised departures.
+
+    ``live`` counts the waiters still queued; the deque may also hold records
+    of waiters that left from the middle of the line (``queued`` is False).
+    Those are popped when they reach the front, or dropped by a rebuild.
+    """
+
+    __slots__ = ("_waiters", "live")
+
+    def __init__(self) -> None:
+        self._waiters: deque[_Waiter] = deque()
+        self.live = 0
+
+    def join(self, waiter: _Waiter) -> None:
+        """Queue ``waiter`` at the back."""
+        self._waiters.append(waiter)
+        self.live += 1
+
+    def head(self) -> _Waiter | None:
+        """The first queued waiter, popping departed records in front of it."""
+        waiters = self._waiters
+        while waiters and not waiters[0].queued:
+            waiters.popleft()  # each record is popped at most once
+        return waiters[0] if waiters else None
+
+    def leave(self, waiter: _Waiter) -> bool:
+        """Take ``waiter`` out of the line; return True if it was the head.
+
+        The head is popped. Any other waiter is only marked (no search, unlike
+        ``deque.remove``). After either, the deque is rebuilt if it holds more
+        than twice the live waiters plus ``_SLACK``, so the departed records
+        behind the head never pile up, whichever end the waiters leave from.
+        A rebuild leaves ``m`` records, all live. The next one waits until the
+        gap ``len - 2 * live`` has climbed from ``-m`` past ``_SLACK``, at most
+        2 per departure, so after at least ``m / 2`` departures, and it costs
+        ``m`` plus the joins since: O(1) amortised per operation.
+        """
+        was_head = self.head() is waiter
+        waiter.queued = False
+        self.live -= 1
+        if was_head:
+            self._waiters.popleft()
+        if len(self._waiters) > 2 * self.live + _SLACK:
+            self._waiters = deque(w for w in self._waiters if w.queued)
+        return was_head
 
 
 class Container:
@@ -62,17 +193,22 @@ class Container:
     not block each other's queues.
 
     ``monitor``, if given, is called as ``monitor(container)`` after every level
-    change (not on blocked or cancelled requests), once the state is fully
-    settled: the served ticket is gone and waiters have been notified. It runs
-    while the Condition's lock is still held, so ``level`` cannot change under
-    it. It reads public properties (``level``, ``capacity``) and must not block
-    or call ``put``/``get`` (D023).
+    change (not on blocked or cancelled requests), once the served request has
+    left its line. It is called synchronously in the task that changed the
+    level, with no ``await`` in between: the tasks the change wakes have not
+    run yet, so ``level`` cannot change under it. It reads public properties
+    (``level``, ``capacity``) and must not block or call ``put``/``get``
+    (D023).
 
     A monitor that raises an ``Exception`` does not affect the model (D023 v2):
     the ``put``/``get`` still completes normally and the error goes to
     ``loop.call_exception_handler`` (logged by default), just as asyncio does
     for a raising callback. Set ``loop.set_exception_handler(...)`` to make such
     errors fatal. ``KeyboardInterrupt`` and ``SystemExit`` still propagate.
+
+    Like asyncio's primitives, a container is bound to the first event loop a
+    task waits on it in; waiting on it from another loop raises
+    ``RuntimeError``.
     """
 
     def __init__(
@@ -91,10 +227,14 @@ class Container:
         self._capacity = capacity
         self._level = init
         self._monitor = monitor
-        # One Condition (and so one Lock) guards the level and both queues.
-        self._cond = asyncio.Condition()
-        self._putters: deque[object] = deque()
-        self._getters: deque[object] = deque()
+        # One line per direction. No lock: every read and change of the level
+        # and the lines happens in one synchronous step (see the module
+        # docstring).
+        self._putters = _Line()
+        self._getters = _Line()
+        # Park numbers: wake-ups go to the head that parked first.
+        self._parks = itertools.count()
+        self._binding = _LoopBinding()
 
     @property
     def level(self) -> float:
@@ -129,27 +269,58 @@ class Container:
         await self._transfer(self._getters, -value, lambda: self._level >= value)
 
     async def _transfer(
-        self, queue: deque[object], delta: float, fits: Callable[[], bool]
+        self, line: _Line, delta: float, fits: Callable[[], bool]
     ) -> None:
-        ticket = object()
-        # ``async with cond`` takes the Condition's Lock; ``wait_for`` releases it
-        # while parked and re-takes it before each predicate check.
-        async with self._cond:
-            queue.append(ticket)
-            try:
-                await self._cond.wait_for(lambda: queue[0] is ticket and fits())
-                self._level += delta
-            finally:
-                # Runs on success and on cancellation (the lock is held either
-                # way). Dropping the ticket promotes the next waiter; notify_all
-                # makes it, and anyone the level change now satisfies, re-check.
-                # notify_all only schedules wakeups: the woken tasks cannot run
-                # until we release the lock below.
-                queue.remove(ticket)
-                self._cond.notify_all()
-            # Only reached on success (a cancellation re-raises out of the
-            # finally above). The state is settled and the lock is still held.
-            self._notify_monitor()
+        if not line.live and fits():
+            # Nobody queued in this direction and it fits: no suspension.
+            self._level += delta
+            self._level_changed()
+            return
+        loop = self._binding.get(self)
+        waiter = _Waiter(loop.create_future(), next(self._parks))
+        line.join(waiter)
+        try:
+            # Only a head is ever woken. It re-checks here, because the level
+            # may have moved again between the wake-up and this step.
+            await waiter.future
+            while not fits():
+                waiter.future = loop.create_future()
+                waiter.parked = next(self._parks)
+                await waiter.future
+        except BaseException:
+            # Cancelled, timed out or interrupted while parked, or after a
+            # wake-up but before this step ran. The level is untouched. If
+            # this was the head, the next waiter is the head now and may fit
+            # (a big request no longer blocks a small one): wake it, so a
+            # wake-up is never lost.
+            if line.leave(waiter):
+                self._wake(line.head())
+            raise
+        line.leave(waiter)  # the head: woken heads are the only ones to run
+        self._level += delta
+        self._level_changed()
+
+    def _level_changed(self) -> None:
+        """Wake the parked head of each line (oldest park first); call the monitor.
+
+        A level change is the only thing that can make a waiting head fit, so
+        both heads re-check; a head that was already woken and has not run yet
+        will see the new level when it runs. The order of the wake-ups is
+        observable: the woken tasks run in that order, later. Whether the
+        monitor is called before or after them is not: ``set_result`` only
+        schedules a woken task, which runs after this task's current step, so
+        the monitor sees the same level either way.
+        """
+        heads = [w for w in (self._putters.head(), self._getters.head()) if w]
+        heads.sort(key=lambda w: w.parked)
+        for waiter in heads:
+            self._wake(waiter)
+        self._notify_monitor()
+
+    @staticmethod
+    def _wake(waiter: _Waiter | None) -> None:
+        if waiter is not None and not waiter.future.done():
+            waiter.future.set_result(None)
 
     def _notify_monitor(self) -> None:
         """Call the monitor, routing its errors to the loop's exception handler.
