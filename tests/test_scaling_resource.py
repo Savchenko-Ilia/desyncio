@@ -32,9 +32,12 @@ from types import FrameType
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import desyncio
 from desyncio import Interrupt, PreemptiveResource, PriorityResource, Resource, sim
+from desyncio.events import Event, ResourceChanged
 
 N = 500  # compared with 4 * N; the new code needs well under 0.5 s in total
 THRESHOLD = 8.0  # linear: ~4, quadratic: ~16
@@ -395,33 +398,60 @@ def test_resource_newcomer_queues_behind_a_granted_waiter_that_has_not_resumed()
     ]
 
 
-@pytest.mark.parametrize("seed", range(60))
 @ALL
-def test_seeded_stress_keeps_the_counters_consistent(
+@given(st.integers(0, 2**32))
+# 60 derandomized hypothesis draws per class, not the fixed seeds 0..59 (D042).
+@settings(max_examples=60, derandomize=True, deadline=None)
+def test_stress_keeps_counters_events_and_fifo_consistent(
     make: Callable[..., AnyResource], seed: int
 ) -> None:
     """Random arrivals, holds, timeouts and cancels (some at the instant of a
-    release): at every monitor call 0 <= count <= capacity and
-    queue_length >= 0, and at the end everything is back to zero. (A grant
-    that briefly saw a phantom free unit fails this.)"""
+    release). Checked:
+
+    * at every monitor call 0 <= count <= capacity and queue_length >= 0 (a
+      grant that briefly saw a phantom free unit fails this), and everything
+      is back to zero at the end;
+    * the ``ResourceChanged`` events report exactly the monitor's
+      ``(count, queue_length)`` sequence, with the capacity;
+    * FIFO among equal priorities (all of them for ``Resource``): the
+      requests served at one priority are served in the order they were made.
+      A request that gave up is never served, so it cannot break this; one
+      skipped while still live would. "Served" is when the body starts. For
+      ``Resource`` that is exactly grant order (a granted waiter that has not
+      resumed still counts as queued). The priority classes let a newcomer
+      take a free unit past such a waiter, so there two requests served at
+      the same instant may start in either order.
+    """
     rng = random.Random(seed)
     capacity = rng.randint(1, 3)
+    priority_class = make is not Resource
 
     # Recorded, not asserted: a monitor's exception goes to the loop's
     # exception handler (D023 v2) and would not fail the test.
+    states: list[tuple[int, int]] = []
     bad: list[tuple[float, int, int]] = []
 
     def check(r: AnyResource) -> None:
+        states.append((r.count, r.queue_length))
         if not (0 <= r.count <= r.capacity and r.queue_length >= 0):
             bad.append((sim.now, r.count, r.queue_length))
+
+    requested = 0
+    # priority -> (time, request number) of each request served, in service order
+    served: dict[float, list[tuple[float, int]]] = {}
 
     async def main() -> tuple[int, int]:
         res = make(capacity, monitor=check)
 
         async def use(priority: float, hold: float, patience: float) -> None:
+            nonlocal requested
             with contextlib.suppress(TimeoutError, Interrupt):
                 async with asyncio.timeout(patience):
+                    number = requested  # no await between this and the request
+                    requested += 1
                     async with request(res, priority):
+                        key = priority if priority_class else 0
+                        served.setdefault(key, []).append((sim.now, number))
                         await sim.timeout(hold)
 
         tasks: list[asyncio.Task[None]] = []
@@ -441,5 +471,14 @@ def test_seeded_stress_keeps_the_counters_consistent(
         await asyncio.gather(*tasks, return_exceptions=True)
         return res.count, res.queue_length
 
-    assert desyncio.run(main()) == (0, 0)
+    events: list[Event] = []
+    assert desyncio.run(main(), subscribers=[events.append]) == (0, 0)
     assert bad == []
+    changes = [e for e in events if isinstance(e, ResourceChanged)]
+    assert [(e.in_use, e.queue_len) for e in changes] == states
+    assert all(e.capacity == capacity for e in changes)
+    for entries in served.values():
+        if priority_class:
+            entries = sorted(entries)  # free order within one instant
+        numbers = [number for _, number in entries]
+        assert numbers == sorted(numbers)
