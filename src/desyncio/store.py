@@ -542,9 +542,11 @@ class FilterStore[T]:
     whose filter it was, nothing is removed, the lock is released and other
     waiters are unaffected.
 
-    No ``shutdown()`` (D031): waking the parked tasks happens under the lock,
-    which needs an ``await``, but ``shutdown`` is a synchronous call in
-    ``asyncio.Queue``. It is omitted rather than half-implemented.
+    No ``shutdown()``: it is omitted by decision D031, which was taken when
+    the waiters were parked in an ``asyncio.Condition`` (waking them needed
+    the lock, so an ``await``). With D075's waiter FIFO, waking them is
+    synchronous (:meth:`_Waiters.wake_all`), so a synchronous ``shutdown``
+    like ``Queue.shutdown`` would now be possible; adding it is a follow-up.
 
     Args:
         capacity: maximum number of items; an ``int >= 1`` or ``math.inf``.
