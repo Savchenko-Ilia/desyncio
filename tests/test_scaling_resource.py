@@ -7,11 +7,13 @@ and 4n waiters. Linear work gives a ratio of about 4, quadratic work about 16;
 the threshold, 8, is midway on a log scale, so neither noise nor a constant
 overhead can move a result across it. No wall clock is read.
 
-Blind spot: work done inside one C call (a ``deque.remove`` or a list ``del``
-shifting memory) is a single event. The quadratic paths this guards against
-were Python-level scans (``Semaphore._wake_up_next``,
-``PriorityResource._grant_free_units`` and ``_blocked_by_waiter``), which
-this measure sees.
+Blind spot: work done inside one C call (a ``deque.remove`` or a
+``heapify``) is a single event. The old quadratic paths were Python-level
+scans (``Semaphore._wake_up_next``, ``PriorityResource._grant_free_units`` and
+``_blocked_by_waiter``), which this measure sees; for the C-level searches a
+second measure counts comparisons instead (futures and priorities whose
+``__eq__``/``__lt__``/``__le__`` count), compared between n and 4n the same
+way. (A list ``del`` shifting memory compares nothing and stays invisible.)
 
 Scenarios: the holder releases while every waiter has just been cancelled
 (the worst order for the old code, made deterministic by cancelling in a fixed
@@ -177,6 +179,93 @@ def test_preemptive_arrivals_better_than_every_waiter_are_linear() -> None:
         return counter.events
 
     assert ratio(arrivals) < THRESHOLD
+
+
+# --- work inside one C call ---------------------------------------------------
+#
+# The profiler counts a C call as one event however long it runs, so a
+# ``deque.remove(fut)`` or ``list.remove(entry); heapify(...)`` per cancelled
+# waiter (both linear scans in C) looks linear above. What those scans do
+# for each element is compare it: ``==`` on futures for a deque, and ``==``
+# and ``<`` on the priorities inside the heap's tuples. So this test gives
+# every element a Python ``__eq__``/``__lt__``/``__le__`` that counts, which
+# makes those comparisons visible, deterministically.
+
+
+class CountingFuture(asyncio.Future[None]):
+    """A future that counts how often it is compared with ``==``."""
+
+    compared = 0
+
+    def __eq__(self, other: object) -> bool:
+        CountingFuture.compared += 1
+        return self is other
+
+    __hash__ = object.__hash__
+
+
+class CountingPriority(float):
+    """A priority that counts the comparisons the heap makes on it."""
+
+    compared = 0
+
+    def __eq__(self, other: object) -> bool:
+        CountingPriority.compared += 1
+        return float(self) == other
+
+    def __lt__(self, other: float) -> bool:
+        CountingPriority.compared += 1
+        return float(self) < other
+
+    def __le__(self, other: float) -> bool:
+        CountingPriority.compared += 1
+        return float(self) <= other
+
+    __hash__ = float.__hash__
+
+
+def comparisons_cancelling_in_reverse(make: Callable[[], AnyResource], n: int) -> int:
+    """One holder and n waiters; the waiters are cancelled newest first while
+    the holder still holds (so no release passes over them), and their
+    cleanups run. Returns the comparisons made meanwhile, plus n.
+
+    Newest first is the worst order for a removal that searches from the
+    head: each search walks past every waiter still queued. The ``+ n`` is
+    the one unit of work each cancellation costs at the least; the correct
+    code compares nothing here, so without it the ratio would be 0 / 0."""
+
+    async def use(res: AnyResource, priority: float) -> None:
+        async with request(res, priority):
+            await sim.timeout(1e9)
+
+    async def main() -> int:
+        loop = asyncio.get_running_loop()
+        # Instance attribute: shadows the method for this run's loop only.
+        loop.create_future = lambda: CountingFuture(loop=loop)  # type: ignore[method-assign]
+        res = make()
+        holder = sim.spawn(use(res, CountingPriority(0)))
+        # Each waiter has its own priority object, so no comparison between
+        # two entries is short-cut by identity.
+        waiters = [sim.spawn(use(res, CountingPriority(1))) for _ in range(n)]
+        await sim.timeout(1)
+        assert res.count == 1 and res.queue_length == n
+        CountingFuture.compared = CountingPriority.compared = 0
+        for task in reversed(waiters):
+            task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+        compared = CountingFuture.compared + CountingPriority.compared
+        assert res.count == 1 and res.queue_length == 0
+        holder.cancel()
+        return compared + n
+
+    return desyncio.run(main())
+
+
+@ALL
+def test_cancelling_waiters_makes_no_linear_search_per_waiter(
+    make: Callable[[], AnyResource],
+) -> None:
+    assert ratio(lambda n: comparisons_cancelling_in_reverse(make, n)) < THRESHOLD
 
 
 # --- behaviour of the lazy removal -------------------------------------------
