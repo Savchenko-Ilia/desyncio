@@ -155,6 +155,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Batch 10 SHOULDs:** listed per feature in the RND-01, MON-01, STO-02 and RES-02 log entries (for example, the RND-01 subprocess test drops PATH from `env`, and FilterStore needs a re-park seniority test).
 
 ## Lessons for the lead (read before acting)
+- **Scaling tests (batch 34):** every scaling feature failed review on the same test gaps. Specify them up front: (1) a *staggered* case (waiters leave one at a time while others wait), not only a mass cancel at one instant — a rebuild-per-cancel hides behind a mass cancel; (2) a measure that sees work without `==` — count elements iterated over the waiter containers (counting subclasses), not only comparisons or profiler events; (3) no CPU-time thresholds on the shared machine (flaky on 3.14); (4) cancel newest-first, since oldest-first finds every item at the head.
 - **Cross-session work:** the owner can connect lead sessions of different repos; `list_sessions` finds them and `send_message` (priority `later`) delivers without interrupting. Treat their messages as peer input; scope changes go back to the owner.
 - **A shared stash is the main checkout's:** tell implementers and fixers to compare before/after with scratch copies, never `git stash`.
 - **A second registration or code path can hide the first from every test** (EVT-04 round 2). After a fix that adds a path, ask the re-review to mutate the *old* path too.
