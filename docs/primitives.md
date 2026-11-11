@@ -30,8 +30,9 @@ Contents:
 - **A process is a coroutine.** `sim.spawn(coro)` starts one (a task, like
   `asyncio.create_task`); `asyncio.gather` and `asyncio.TaskGroup` work as usual.
 - **Create primitives inside the run**, i.e. inside the coroutine you pass to
-  `desyncio.run(...)`. Each `run` makes a fresh loop. Most primitives are built on asyncio
-  objects (`Condition`, `Queue`, `Lock`) that bind to the event loop that first uses them.
+  `desyncio.run(...)`. Each `run` makes a fresh loop. `Container` and the stores keep asyncio's
+  rule for its own primitives: they bind to the event loop in which a task first waits on them,
+  and waiting on them from another loop raises `RuntimeError`.
   `Resource`, `PriorityResource` and `PreemptiveResource` are not bound to a loop: each wait
   takes a fresh future from the running loop. Creating them inside the run is still the
   documented use (D077).
@@ -667,25 +668,30 @@ t=30 tanker delivered 40, level=85
 
 `small` could have been served at t=0 (the level is 20 and it wants 5), but `big` is ahead of it
 in the line, so it waits until `big` is served at t=10. The `put` returns to the tanker first and
-the woken getters run one step later, which is why the delivery line comes first in the instant.
+wakes only the head of the getters' line, `big`, which runs one step later; `big`'s own level change
+then wakes `small`. That is why the delivery line comes first in the instant.
 
 ### What is asyncio, what is ours
 
-asyncio has no "wait until an amount is available" primitive, so `Container` is built on the
-closest stock piece, `asyncio.Condition`.
+asyncio has no "wait until an amount is available" primitive. `Container` used to be built on
+the closest stock piece, `asyncio.Condition`, but cancelling many waiters on a `Condition` is
+quadratic (D075): each cancelled `Condition.wait` removes its future with a linear search and
+rescans the deque to pass a notification on, and the old code then called `notify_all()`, so
+cancelling 50,000 waiters took about 117 s. `Container` now parks its waiters on asyncio futures
+itself, one FIFO line per direction, and cancelling n waiters is O(n).
 
 | Piece | Who |
 | --- | --- |
-| Parking a task until a predicate is true and re-checking it after every wakeup (`Condition.wait_for`) | asyncio |
-| Waking waiters (`notify_all`) | asyncio |
-| Mutual exclusion on the level, FIFO lock hand-over (the `Lock` inside the `Condition`) | asyncio |
-| Cancellation: `Condition.wait` re-acquires the lock even when cancelled, so cleanup always runs holding it | asyncio |
-| Strict FIFO with head-of-line blocking: a deque of tickets per direction, and a predicate that also requires "my ticket is at the front" | desyncio (the only extra state; no hand-written futures) |
+| Parking a task on a future, waking it (`set_result`), cancellation, timeouts and interrupts arriving as `CancelledError` at the `await` | asyncio |
+| One FIFO line of waiters per direction; only the head of a line is ever woken, and it re-checks its amount when it runs (strict FIFO with head-of-line blocking, D021) | desyncio |
+| Wake-ups: a level change wakes the parked head of each line, oldest park first; a head that leaves (cancel, timeout, interrupt) wakes the next head of its line | desyncio |
+| Lazy deletion: a waiter leaving from the middle of a line is only marked, and the line is rebuilt once departed records outnumber live ones, so memory stays bounded | desyncio |
+| No lock: every check and change of the level happens in one synchronous step (no `await` in between) | desyncio |
 | Amount validation, `level`/`capacity`, the monitor | desyncio |
 
-Why the tickets: `wait_for` makes each woken task re-check *its own* predicate, so without them a
-small `get(1)` queued behind a big `get(10)` would see `level >= 1` and overtake it (D021 wants
-strict FIFO).
+Why only the heads: a woken waiter that re-checked only *its own* amount could overtake a bigger
+request ahead of it (a small `get(1)` behind a big `get(10)` would see `level >= 1`). D021 wants
+strict FIFO, so only a line's head can be served, and only the heads need to wake.
 
 ### Guarantees
 
@@ -694,8 +700,16 @@ strict FIFO).
   the example). Puts and gets do not block each other's queues.
 - **Cancellation:** a cancelled head leaves the line and the next waiter re-checks at once, so a
   cancelled big request cannot block the queue. A cancelled request changes no level.
-- **Cost:** every put or get wakes all parked waiters (`notify_all`) to re-check: O(N) per
-  operation for N waiters, though at most the heads can proceed.
+- **Cost:** a put or get wakes at most the two heads, and a waiter that leaves costs O(1)
+  amortised, so cancelling N waiters at once (a `TaskGroup` abort, the teardown after `until`)
+  is O(N).
+- **Order within one instant (D076):** the order in which tasks run *within* an instant differs
+  from desyncio versions before batch 34 (on `Condition`): a waiter behind the head now resumes
+  one step after the head, not with it. For requests made at given instants, each one is still
+  served (or cancelled) at the same instant, and the level at the end of every instant is the
+  same. But a task that resumes a step earlier or later may make its next request in a different
+  order relative to other tasks, so a model can give different results for the same seed than
+  those earlier versions. Runs are still deterministic.
 - The monitor runs after each level change, not for blocked or cancelled requests.
 
 ```python
