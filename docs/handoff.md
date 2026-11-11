@@ -3,7 +3,7 @@
 The state a fresh lead session needs. **Read this right after `AGENTS.md` and `CLAUDE.md`.**
 The lead rewrites it at the end of every batch, and whenever a session is about to end mid-batch.
 
-_Last updated: 2026-11-10, end of batch 33. **Module 6 (event API) is DONE** (D073). Nothing is in flight; no agents are running. `integration` passes the gate with 813 tests on 3.13 and 3.14. PR #5 (`integration` → `main`) predates module 6: check `list_pull_requests` before telling the owner what a PR contains. Next: the owner decides what comes next._
+_Last updated: 2026-11-11, end of batch 34. **Bug-fix batch 34 (quadratic waiter cancellation, D075–D080) is DONE.** Nothing is in flight; no agents are running. `integration` passes the gate with 878 tests on 3.13 and 3.14. PR #6 (`integration` → `main`) is open and now also carries batch 34. Next: the owner decides what comes next._
 
 ## Where things are
 - **`integration`** is the source of truth. All verified work is merged there. The session branch
@@ -100,14 +100,15 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
 - **Known gaps:** teardown cancels leftover tasks in address order, so the *trace* (not the event stream) of a run with leftover tasks is not reproducible; proposed clean-up: cancel leftovers in creation order before `runner.close()`. A resource state change costs about +0.4 µs with nobody subscribed (cut it in bus.py with one combined helper if ever needed).
 - The leftover stash was dropped (owner, 2026-11-10). D074 confirms `desyncio.events` as the public home of the event API.
 
-## Batch 34 IN FLIGHT (bug fix, D075–D077) — state at 2026-11-11
-- **PERF-01** `feat/PERF-01` (resource.py: own FIFO for Resource, heap for Priority/Preemptive; primitives.md Resource sections): implemented, in review (0 fix rounds). Teardown 50k: Resource 39 s → 0.7 s, PriorityResource 211 s → 0.6 s.
-- **PERF-02** `feat/PERF-02` (store.py: private waiter FIFO for all stores; FilterStore replaces Condition): implemented, in review (0 fix rounds). Still needs, after PERF-01 merges, a fix round that also owns the Store/FilterStore sections of `docs/primitives.md`, `LICENSES/PSF.txt` (two adapted-code entries) and the `tests/test_store.py` docstring (D077).
-- **PERF-03** `feat/PERF-03` (scheduled.py only): reviewed FAIL (test only counts `==`), fix round 1 running on `fix/PERF-03-1`.
-- **PERF-04** (Container replaces Condition; owner accepted the same-instant interleaving change, D076): not started; dispatch after PERF-01 merges (shares `docs/primitives.md`). A prototype is in the old container's scratch: /tmp/claude-0/-home-user-desyncio/40a1f0f0-d61d-5fb8-bb73-eb192ec0e2ef/scratchpad/perf03/container_proto.py (container-local).
-- After the batch: tell the Hodos lead (session_01TYFYZtG52HrqFTnMoMNdyo) and the reporter (session_01TYFYZwKbgKojghVFcsKdZR) the merged SHA; update the PR (PR #6 is open, `integration` → `main`).
+## Batch 34: quadratic waiter cancellation — DONE (D075–D080)
+- Reported by Hodos: cancelling n waiters on one primitive was O(n²) (teardown after `until`, or a mass cancel mid-run). Fixed for every primitive; behaviour unchanged except Container's same-instant interleaving (owner, D076; exact conditions in D080 and `docs/primitives.md`).
+- Teardown at 50k waiters, before → after: Resource 39 s → 0.7 s; PriorityResource 211 s → 0.6 s; Store ~9 s → ~1 s; FilterStore ~60 s → ~1.4 s; ScheduledResource 6–7 s → 0.5–0.9 s; Container ~105 s → 0.7 s.
+- `Resource`, the stores and `Container` no longer delegate waiting to `asyncio.Semaphore`/`Queue`/`Condition` (D075 exception to principle 6, AGENTS.md updated); adapted CPython code is PSF-marked and in `LICENSES/PSF.txt`.
+- **Merged:** PERF-03 (3c6f97a, 2 rounds), PERF-02 (6897dce, 1 round), PERF-01 (83d8ca0, 2 rounds), PERF-04 (f8bf55c, 2 rounds). Nothing blocked.
+- Every scaling test is deterministic (operation counts, no CPU-time thresholds). Lesson recorded below.
+- Tell both Hodos sessions the merged SHA (done at the end of batch 34; see the report).
 
-## Reported bug (2026-11-11, from Hodos session "App system design review") — not scheduled
+## Reported bug (2026-11-11, from Hodos session "App system design review") — FIXED in batch 34
 - **Teardown is quadratic in the number of tasks waiting on one primitive.** After `until`, cancelling n waiters on one `Resource`, `PriorityResource` or `Store` takes O(n²): Hodos measured 79 s for 100,000 waiters on a `Resource` (0.9 s to reach `until`), 149 s for 50,000 on a `PriorityResource`. The lead reproduced the growth on `integration` d507b48 (n 5k → 10k: `Resource` 0.11 → 0.34 s, `PriorityResource` 0.05 → 0.15 s, `Store` 0.09 → 0.37 s), and a plain `asyncio.Semaphore` shows the same, so for `Resource` it is CPython's `Semaphore.acquire` `finally` calling `_wake_up_next`, which scans the whole deque of cancelled waiters once per waiter. `PriorityResource` and `Store` are measured, not root-caused. Also reachable mid-run (a `TaskGroup` abort or mass interrupt while a unit is free). Repro: /tmp/claude-0/-home-user-desyncio/40a1f0f0-d61d-5fb8-bb73-eb192ec0e2ef/scratchpad/teardown/td.py (container-local; the Hodos message has the full script). Hodos wants the fix commit so it can bump its pin.
 - Hodos also reported (info only): ~72,000 `sim.timeout`/s; `PriorityTimerHandle.__lt__` builds two tuples per comparison (~18% of profile); each timeout costs two loop iterations with a real `epoll.poll`.
 
