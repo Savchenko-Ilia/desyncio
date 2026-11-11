@@ -30,8 +30,11 @@ Contents:
 - **A process is a coroutine.** `sim.spawn(coro)` starts one (a task, like
   `asyncio.create_task`); `asyncio.gather` and `asyncio.TaskGroup` work as usual.
 - **Create primitives inside the run**, i.e. inside the coroutine you pass to
-  `desyncio.run(...)`. They are built on asyncio objects (`Condition`, `Queue`, futures) that
-  bind to the event loop that first uses them, and each `run` makes a fresh loop.
+  `desyncio.run(...)`. Each `run` makes a fresh loop. Most primitives are built on asyncio
+  objects (`Condition`, `Queue`, `Lock`) that bind to the event loop that first uses them.
+  `Resource`, `PriorityResource` and `PreemptiveResource` are not bound to a loop: each wait
+  takes a fresh future from the running loop. Creating them inside the run is still the
+  documented use (D077).
 - **Primitives are used with `async with`** (D019): `async with resource:` acquires, and the
   exit releases, on normal exit, exception and cancellation alike.
 - **Same model + same seed = same trace.** Wherever several tasks are ready at the same virtual
@@ -103,9 +106,12 @@ Until batch 34 `Resource` was a thin wrapper over `asyncio.Semaphore`. It stoppe
 because CPython's `Semaphore` makes cancelling many waiters quadratic: each cancelled waiter's
 cleanup removes its future with `deque.remove` and then scans the deque from the head for a
 waiter to wake, past every other cancelled future (79 s of teardown for 100,000 waiters).
-`Resource` keeps the semaphore's semantics exactly, on its own deque of futures: the cleanup of a
-cancelled waiter touches nothing, and the dead future is popped once, when a release or a
-newcomer reaches it. This is the recorded exception to "reuse asyncio first" (D075), pinned by
+`Resource` keeps the semaphore's semantics exactly, on its own deque of futures. The cleanup of a
+cancelled waiter does not search the deque: its future is already cancelled, so it stays where it
+is and is dropped later, either popped when a release or a newcomer reaches the head, or in a
+rebuild of the deque once dead futures are the majority. Each future is dropped once, so the
+cost is O(1) amortised per waiter. The cleanup then wakes whoever can now go, as
+`Semaphore`'s does. This is the recorded exception to "reuse asyncio first" (D075), pinned by
 `tests/test_scaling_resource.py`.
 
 ### Guarantees
@@ -300,7 +306,8 @@ a PriorityRequest can be used only once
 asyncio has no priority semaphore, so the waiting logic is ours (as for `Resource`, D075). It
 could not be built on `asyncio.Condition`: `notify_all()` needs the Condition's lock, so release
 had to `await`, and a cancel at that await leaked the unit (D030). A waiter cancelled while
-queued leaves its entry in the heap; the entry is popped when it reaches the top, so cancelling n
+queued leaves its entry in the heap; the entry is dropped later, either popped when it reaches
+the top or in a rebuild of the heap once dead entries are the majority, so cancelling n
 waiters, or n arrivals each better than every queued one, costs O(n log n) in total (PERF-01).
 
 ### Guarantees
