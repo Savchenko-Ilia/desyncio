@@ -128,6 +128,7 @@ The backlog is in `docs/features.md`, Module 2 section. Governing decisions:
    - CAL-04: wrap one long line in `docs/calendar.md`.
 
 ## Open questions for the owner
+- **Priority-class newcomer at one instant (found in PERF-01, existing behaviour):** in `PriorityResource`/`PreemptiveResource` a newcomer can take a free unit in the same instant ahead of an equal-priority waiter that was granted a unit but has not resumed; `Resource` (like `Semaphore.locked()`) does not allow that. Make the priority classes match? It would change same-instant results.
 - **Determinism scope (owner: "later"; the guide already says "one runtime build"):** AGENTS principle 2 says same model + seed gives an identical trace. Hodos measured that libm-based distributions differ across runtime builds (native vs Pyodide). Should desyncio document the guarantee as "within one runtime build (Python, platform, libm)", as Hodos now does? Cross-runtime identity would need correctly rounded math in the random streams.
 - **D058/D059:** the owner left handler errors and the debug switch to the lead; confirm when convenient. `sim.stop()` is a post-module-6 candidate (D061: Hodos would use it for its run caps, not blocking).
 - **D045:** confirm that a monitor error outside a running loop is logged at ERROR on the `desyncio` logger.
