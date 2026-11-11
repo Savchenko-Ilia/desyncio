@@ -10,10 +10,16 @@ notification on.
 The scaling tests count work deterministically instead of timing it: every
 future created by the loop is a ``_CountingFuture`` that counts the calls a
 scan makes on it (``==`` from ``deque.remove``, ``done()``/``cancelled()``
-from the wake-up and rescan loops). Linear cleanup touches each future O(1)
-times, so going from n to 4n waiters multiplies the count by about 4; the old
-quadratic cleanup multiplied it by about 16. The threshold, 8, is 2x away from
-both.
+from the wake-up and rescan loops), and every waiter deque is a
+``_CountingDeque`` that counts the elements iterated over (a rebuild, or a
+``deque.remove`` scan), which catches work no future method sees. Linear
+cleanup does O(1) work per waiter, so going from n to 4n waiters multiplies
+the count by about 4; quadratic cleanup multiplies it by about 16. The
+threshold, 8, is 2x away from both. Two patterns are measured: all waiters
+cancelled at once (the teardown after ``until``; a ``TaskGroup`` abort or a
+mass interrupt cancel the same way), and waiters giving up one at a time while
+the others keep waiting (reneging), where a cleanup that does O(len) work on
+every cancellation is quadratic too.
 
 Because the stores now park their own futures, the differential tests check
 that nothing else changed: random scenarios with puts, gets, cancellations at
@@ -23,10 +29,11 @@ pre-PERF-02 ``FilterStore`` built on ``asyncio.Condition``).
 """
 
 import asyncio
+import contextlib
 import itertools
 import random
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -70,56 +77,144 @@ WAITERS = {
 }
 
 
-def _touches(case: str, n: int, mid_run: bool) -> int:
-    """Park ``n`` waiters on one store, cancel them all, return the count.
+class _CountingDeque(deque[Any]):
+    """A deque that counts the elements a scan of it steps over.
 
-    ``mid_run``: cancel every waiter at once (odd ones first, so the order is
-    not the park order), inside the run. Otherwise the run ends at ``until``
-    with the waiters still parked and the teardown cancels them.
+    ``_Waiters`` builds its deques through the module's ``deque`` name, so
+    patching ``desyncio.store.deque`` with this class makes every waiter
+    deque count. It catches work that never calls a future method: a rebuild
+    that filters with ``is``, or ``deque.remove`` (which compares by identity
+    first, so a match costs no ``__eq__``).
     """
-    kind, side = WAITERS[case]
 
-    async def waiter(store: Any) -> None:
-        if side == "put":
-            await store.put("x")
-        elif kind is FilterStore:
-            await store.get(filter=lambda item: False)
-        else:
-            await store.get()
+    steps = 0
 
-    async def main() -> None:
-        store: Any = kind(capacity=1) if side == "put" else kind()
-        if side == "put":
-            await store.put("full")
-        tasks = [sim.spawn(waiter(store)) for _ in range(n)]
-        await sim.timeout(1)  # every waiter is parked now
-        if mid_run:
-            for task in tasks[1::2] + tasks[::2]:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            assert all(task.cancelled() for task in tasks)
-        else:
-            await sim.timeout(10)  # still waiting when the run ends at until
+    def __iter__(self) -> Iterator[Any]:
+        for element in super().__iter__():
+            _CountingDeque.steps += 1
+            yield element
 
-    _CountingFuture.touches = 0
-    desyncio.run(main(), until=5)
-    return _CountingFuture.touches
+    def remove(self, value: Any) -> None:
+        # deque.remove scans from the left up to the first match.
+        try:
+            _CountingDeque.steps += self.index(value) + 1
+        except ValueError:
+            _CountingDeque.steps += len(self)
+        super().remove(value)
 
 
-@pytest.mark.parametrize("mid_run", [False, True], ids=["teardown", "mid-run"])
-@pytest.mark.parametrize("case", list(WAITERS))
-def test_cancelling_n_waiters_is_linear(
-    case: str, mid_run: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture
+def work(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
+    """Count the work on waiter futures and deques; return a reader."""
+
     def create_future(self: VirtualTimeLoop) -> asyncio.Future[Any]:
         return _CountingFuture(loop=self)
 
     monkeypatch.setattr(VirtualTimeLoop, "create_future", create_future)
+    monkeypatch.setattr(desyncio.store, "deque", _CountingDeque)
+    return lambda: _CountingFuture.touches + _CountingDeque.steps
+
+
+def _reset_counts() -> None:
+    _CountingFuture.touches = 0
+    _CountingDeque.steps = 0
+
+
+async def _waiter(store: Any, kind: type, side: str) -> None:
+    if side == "put":
+        await store.put("x")
+    elif kind is FilterStore:
+        await store.get(filter=lambda item: False)
+    else:
+        await store.get()
+
+
+async def _blocked_store(kind: type, side: str) -> Any:
+    """A store on which every ``put`` (or every ``get``) blocks."""
+    store: Any = kind(capacity=1) if side == "put" else kind()
+    if side == "put":
+        await store.put("full")
+    return store
+
+
+def _teardown_work(case: str, n: int, work: Callable[[], int]) -> int:
+    """Park ``n`` waiters; the run ends at ``until`` and the teardown cancels them."""
+    kind, side = WAITERS[case]
+
+    async def main() -> None:
+        store = await _blocked_store(kind, side)
+        for _ in range(n):
+            sim.spawn(_waiter(store, kind, side))
+        await sim.timeout(10)  # still waiting when the run ends at until
+
+    _reset_counts()
+    desyncio.run(main(), until=5)
+    return work()
+
+
+def _waiter_futures(store: Any, side: str) -> deque[asyncio.Future[Any]]:
+    """The deque of parked futures that ``side``'s waiters wait in."""
+    if isinstance(store, FilterStore):
+        waiters = store._waiters
+    else:
+        waiters = store._queue._putters if side == "put" else store._queue._getters
+    futures: deque[asyncio.Future[Any]] = waiters._futures
+    return futures
+
+
+def _reneging_work(case: str, n: int, work: Callable[[], int]) -> int:
+    """Park ``n`` waiters that give up one at a time (reneging), newest first.
+
+    Waiter ``i`` waits inside ``asyncio.timeout(n - i)``, so at each instant
+    one waiter leaves while the others keep waiting: this is where a cleanup
+    that costs O(len) on every cancellation is quadratic, even though no
+    instant cancels many. Newest first, so ``deque.remove`` would have to
+    scan the whole deque each time.
+
+    Bounded memory: between departures, at most about half of the deque may
+    be dead futures (fewer than ``_COMPACT_MIN`` are always allowed).
+    """
+    kind, side = WAITERS[case]
+
+    async def renege(store: Any, i: int) -> None:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(n - i):
+                await _waiter(store, kind, side)
+
+    async def main() -> None:
+        store = await _blocked_store(kind, side)
+        tasks = [sim.spawn(renege(store, i)) for i in range(n)]
+        await sim.timeout(0.5)  # every waiter is parked; check between departures
+        for _ in range(n):
+            await sim.timeout(1)
+            # Uncounted reads: the check is not part of the work measured.
+            futures = deque.__iter__(_waiter_futures(store, side))
+            dead = sum(1 for f in futures if asyncio.Future.done(f))
+            size = len(_waiter_futures(store, side))
+            assert dead < desyncio.store._COMPACT_MIN or 2 * dead <= size, (
+                f"{case}: {dead} dead futures kept in a deque of {size}"
+            )
+        assert all(task.done() for task in tasks)
+
+    _reset_counts()
+    desyncio.run(main())
+    return work()
+
+
+@pytest.mark.parametrize(
+    "measure", [_teardown_work, _reneging_work], ids=["teardown", "reneging"]
+)
+@pytest.mark.parametrize("case", list(WAITERS))
+def test_cancelling_n_waiters_is_linear(
+    case: str,
+    measure: Callable[[str, int, Callable[[], int]], int],
+    work: Callable[[], int],
+) -> None:
     n = 250
-    small, large = _touches(case, n, mid_run), _touches(case, 4 * n, mid_run)
+    small, large = measure(case, n, work), measure(case, 4 * n, work)
     ratio = large / small
     # linear: about 4; quadratic: about 16
-    assert ratio < 8, f"{case}: {small} -> {large} touches (x{ratio:.1f}) for n -> 4n"
+    assert ratio < 8, f"{case}: {small} -> {large} steps (x{ratio:.1f}) for n -> 4n"
 
 
 # --- semantics: same event log as the asyncio originals ---------------------
