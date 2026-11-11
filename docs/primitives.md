@@ -765,15 +765,21 @@ t=12 got item-4
 
 ### Store: what is asyncio, what is ours
 
-`Store` is a thin wrapper over `asyncio.Queue`, which already is a SimPy-style store.
+`Store` keeps its items in an `asyncio.Queue`, which already is a SimPy-style store, and uses its
+non-blocking methods. Blocked callers wait in desyncio's own FIFO of asyncio futures instead of
+the queue's (D075): asyncio removes a cancelled waiter with a linear `deque.remove`, so cancelling
+n parked waiters cost O(n²). The waiting logic is adapted from `Queue.put`/`get` (PSF, see
+`LICENSES/PSF.txt`) and keeps their semantics.
 
 | Piece | Who |
 | --- | --- |
 | FIFO order of items | asyncio (`Queue`'s deque) |
-| FIFO order of blocked getters and of blocked putters | asyncio (two deques of futures) |
-| Blocking `put` while full and `get` while empty | asyncio |
-| Cancellation cleanup: a cancelled waiter removes its own future; if it had already been woken it passes the wake-up on, so an item is never lost or duplicated | asyncio |
-| `shutdown(immediate=False)`: refuses new puts, wakes blocked waiters with `asyncio.QueueShutDown` | asyncio (`Store.shutdown` is a pass-through) |
+| "Full", "empty" and "shut down" decisions (`put_nowait`/`get_nowait`), `qsize()` | asyncio |
+| The queue's own `shutdown()`: refuses new puts; with `immediate=True` discards queued items | asyncio |
+| FIFO order of blocked getters and of blocked putters | desyncio (a waiter FIFO of futures, adapted from `Queue.put`/`get`) |
+| Blocking `put` while full and `get` while empty | desyncio (adapted from `Queue.put`/`get`) |
+| Cancellation cleanup: a cancelled waiter's future is left in place and skipped later (lazy deletion, O(1) amortised per cancellation); if it had already been woken it passes the wake-up on, so an item is never lost or duplicated | desyncio (adapted from `Queue.put`/`get`) |
+| `shutdown()` waking the blocked waiters, which then get `asyncio.QueueShutDown` | desyncio (after `Queue.shutdown`) |
 | Capacity validation, `math.inf` mapped to `maxsize=0`, `len()`, `items`, the monitor | desyncio |
 
 ### PriorityStore
@@ -807,7 +813,8 @@ run(main())
 
 | Piece | Who |
 | --- | --- |
-| Heap ordering, blocking, FIFO of blocked waiters, cancellation cleanup, `shutdown()` | asyncio (`PriorityQueue`) |
+| Heap ordering, "full"/"empty"/"shut down" decisions, `qsize()`, the queue's own `shutdown()` | asyncio (`PriorityQueue`) |
+| Blocking, FIFO of blocked waiters, cancellation cleanup (lazy deletion, O(1) amortised), waking waiters at `shutdown()` | desyncio (shared with `Store`, adapted from `Queue.put`/`get`) |
 | Storing `(priority, sequence, item)` with an `itertools.count()` sequence so ties keep put order and items are never compared; validation; `items`; the monitor | desyncio |
 
 ### FilterStore
@@ -846,19 +853,24 @@ t=2 fitted wheel-A
 left in store: ('engine',)
 ```
 
-asyncio has no filtered queue, so `FilterStore` is built on `asyncio.Condition`, like `Container`.
+asyncio has no filtered queue, so `FilterStore` uses the `asyncio.Condition` pattern (`wait_for`
+under a lock) on a plain `asyncio.Lock`, with desyncio's waiter FIFO in place of the
+`Condition`'s deque (D075): `Condition.wait` removes a cancelled waiter with a linear
+`deque.remove`, so cancelling n parked waiters cost O(n²). The wait is adapted from
+`Condition.wait` (PSF, see `LICENSES/PSF.txt`) and keeps its semantics.
 
 | Piece | Who |
 | --- | --- |
-| Parking a getter and re-running its filter each time the store changes (`wait_for`), blocking `put` while full | asyncio (`Condition`) |
+| Parking a getter and re-running its filter each time the store changes (`wait_for`), blocking `put` while full | desyncio (adapted from `Condition.wait`/`wait_for`) |
 | Mutual exclusion and FIFO lock hand-over | asyncio (`Lock`) |
-| Cancellation and `Interrupt`: `Condition.wait` re-acquires the lock before re-raising. The item is removed only inside the predicate, in the same synchronous step in which `get` returns, so a getter cancelled the instant an item arrives loses and duplicates nothing | asyncio |
+| Cancellation and `Interrupt`: the wait re-acquires the lock before re-raising, and a leaving waiter's future is skipped later (lazy deletion, O(1) amortised). The item is removed only inside the predicate, in the same synchronous step in which `get` returns, so a getter cancelled the instant an item arrives loses and duplicates nothing | desyncio (adapted from `Condition.wait`) |
 | The item deque, the matching scan, validation, `items`, the monitor | desyncio |
 
 ### Ordering and cancellation guarantees (all three stores)
 
 - **Items:** `Store` and `FilterStore` are FIFO; `PriorityStore` is `(priority, put order)`.
-- **Blocked getters/putters:** `Store`/`PriorityStore` serve them FIFO (asyncio's queue).
+- **Blocked getters/putters:** `Store`/`PriorityStore` serve them FIFO (desyncio's waiter FIFO,
+  the same order as `asyncio.Queue`'s).
   `FilterStore` retries parked getters longest-waiting first, and the first whose filter matches
   takes the first matching item. A getter whose filter matches nothing parks again, so it never
   blocks a later getter (**no head-of-line blocking**, unlike `Container`).
@@ -903,11 +915,10 @@ FilterStore -> old waiter still waiting
 - **Cancellation:** a cancelled `get` or `put` never loses or duplicates an item.
 - **A filter that raises:** the exception comes out of that caller's `get`; nothing is removed,
   the lock is released and other waiters are unaffected.
-- **`shutdown()`:** `Store` and `PriorityStore` have it (a pass-through to
-  `Queue.shutdown`: later `put` raises `asyncio.QueueShutDown`; with `immediate=True` queued items
-  are discarded and the monitor is called). **`FilterStore` has no `shutdown()`** (D031):
-  `Condition.notify_all()` may only be called with the lock held, which needs an `await`, but
-  `shutdown` is synchronous in `asyncio.Queue`. It is left out rather than half-implemented.
+- **`shutdown()`:** `Store` and `PriorityStore` have it (`Queue.shutdown`, then waking the parked
+  waiters: later `put` raises `asyncio.QueueShutDown`; with `immediate=True` queued items are
+  discarded and the monitor is called). **`FilterStore` has no `shutdown()`**: it was left out by
+  decision D031.
 
 <!-- pins: Store shutdown: items already inside drain, then get raises QueueShutDown; FilterStore has no shutdown (D042) -->
 ```python
