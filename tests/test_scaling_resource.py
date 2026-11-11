@@ -8,12 +8,24 @@ the threshold, 8, is midway on a log scale, so neither noise nor a constant
 overhead can move a result across it. No wall clock is read.
 
 Blind spot: work done inside one C call (a ``deque.remove`` or a
-``heapify``) is a single event. The old quadratic paths were Python-level
-scans (``Semaphore._wake_up_next``, ``PriorityResource._grant_free_units`` and
-``_blocked_by_waiter``), which this measure sees; for the C-level searches a
-second measure counts comparisons instead (futures and priorities whose
-``__eq__``/``__lt__``/``__le__`` count), compared between n and 4n the same
-way. (A list ``del`` shifting memory compares nothing and stays invisible.)
+``heapify``) is a single event, and so is a Python-level scan that only
+compares with ``is`` (no call, no comparison method). The old quadratic paths
+were Python-level calls (``Semaphore._wake_up_next``,
+``PriorityResource._grant_free_units`` and ``_blocked_by_waiter``), which
+this measure sees. For the rest a second measure counts work on the waiter
+containers: comparisons (futures and priorities whose
+``__eq__``/``__lt__``/``__le__`` count) plus the elements yielded by
+iterating ``_waiters`` and the length of every rebuilt ``_waiters`` (a
+resource subclass swaps in counting containers), compared between n and 4n
+the same way, with the waiters cancelled newest first both all at once and
+one at a time (reneging, where a cleanup that rebuilds or scans the queue on
+every cancellation is quadratic).
+
+Still invisible, documented and not tested: per-cancel work done entirely in
+C that neither compares, nor iterates ``_waiters`` through its ``__iter__``,
+nor assigns a new ``_waiters``; for example ``self._waiters.rotate(k)``, a
+list ``del`` shifting memory, or ``len(list(deque.__iter__(self._waiters)))``
+on every cancellation. These are contrived; nothing in the code does them.
 
 Scenarios: the holder releases while every waiter has just been cancelled
 (the worst order for the old code, made deterministic by cancelling in a fixed
@@ -26,7 +38,8 @@ import asyncio
 import contextlib
 import random
 import sys
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
 from contextlib import AbstractAsyncContextManager
 from types import FrameType
 from typing import Any
@@ -184,7 +197,7 @@ def test_preemptive_arrivals_better_than_every_waiter_are_linear() -> None:
     assert ratio(arrivals) < THRESHOLD
 
 
-# --- work inside one C call ---------------------------------------------------
+# --- work no profiler event sees ------------------------------------------
 #
 # The profiler counts a C call as one event however long it runs, so a
 # ``deque.remove(fut)`` or ``list.remove(entry); heapify(...)`` per cancelled
@@ -193,6 +206,12 @@ def test_preemptive_arrivals_better_than_every_waiter_are_linear() -> None:
 # and ``<`` on the priorities inside the heap's tuples. So this test gives
 # every element a Python ``__eq__``/``__lt__``/``__le__`` that counts, which
 # makes those comparisons visible, deterministically.
+#
+# A scan that compares with ``is`` (``for i, f in enumerate(waiters): if f is
+# fut``), or a rebuild of the queue on every cancellation, compares nothing.
+# So the resource also counts, through ``_CountingWaiters``, the elements
+# yielded by iterating its ``_waiters`` and the length of every new
+# ``_waiters`` it builds.
 
 
 class CountingFuture(asyncio.Future[None]):
@@ -227,15 +246,88 @@ class CountingPriority(float):
     __hash__ = float.__hash__
 
 
-def comparisons_cancelling_in_reverse(make: Callable[[], AnyResource], n: int) -> int:
+class Touched:
+    """Elements of a waiter container stepped over (iterated or rebuilt)."""
+
+    count = 0
+
+
+class _CountingDeque(deque[Any]):
+    """``Resource``'s waiter deque, counting the elements its iterator yields
+    (a ``for`` loop, a generator expression, ``deque(...)`` built from it)."""
+
+    def __iter__(self) -> Iterator[Any]:
+        for element in super().__iter__():
+            Touched.count += 1
+            yield element
+
+
+class _CountingList(list[Any]):
+    """The priority classes' waiter heap, counting the elements its iterator
+    yields. ``heapq`` works on it unchanged (and does not iterate)."""
+
+    def __iter__(self) -> Iterator[Any]:
+        for element in super().__iter__():
+            Touched.count += 1
+            yield element
+
+
+class _CountingWaiters:
+    """Makes ``_waiters`` a property: whatever deque or list the resource
+    stores there (at creation, or in a rebuild) is kept as a counting copy,
+    and every rebuild adds its length to ``Touched.count``. O(1) operations
+    (``append``, ``popleft``, ``heappush``, ``heappop``, indexing, ``len``)
+    add nothing."""
+
+    @property
+    def _waiters(self) -> Any:
+        return self.__dict__["_waiters"]
+
+    @_waiters.setter
+    def _waiters(self, value: Any) -> None:
+        if "_waiters" in self.__dict__:
+            Touched.count += len(value)  # a rebuild
+        if type(value) is deque:
+            value = _CountingDeque(value)
+        elif type(value) is list:
+            value = _CountingList(value)
+        self.__dict__["_waiters"] = value
+
+
+class _CountingResource(_CountingWaiters, Resource):
+    pass
+
+
+class _CountingPriorityResource(_CountingWaiters, PriorityResource):
+    pass
+
+
+class _CountingPreemptiveResource(_CountingWaiters, PreemptiveResource):
+    pass
+
+
+COUNTING: dict[Callable[[], AnyResource], Callable[[], AnyResource]] = {
+    Resource: _CountingResource,
+    PriorityResource: _CountingPriorityResource,
+    PreemptiveResource: _CountingPreemptiveResource,
+}
+
+
+def work_cancelling_newest_first(
+    make: Callable[[], AnyResource], n: int, *, one_at_a_time: bool
+) -> int:
     """One holder and n waiters; the waiters are cancelled newest first while
     the holder still holds (so no release passes over them), and their
-    cleanups run. Returns the comparisons made meanwhile, plus n.
+    cleanups run. Returns the comparisons and container elements touched
+    meanwhile (see above), plus n.
 
     Newest first is the worst order for a removal that searches from the
-    head: each search walks past every waiter still queued. The ``+ n`` is
-    the one unit of work each cancellation costs at the least; the correct
-    code compares nothing here, so without it the ratio would be 0 / 0."""
+    head: each search walks past every waiter still queued. All at once, the
+    cleanups run after every waiter is cancelled; one at a time (reneging),
+    each cleanup runs (``asyncio.sleep(0)``) before the next waiter gives up,
+    so a cleanup that rebuilds the queue every time copies the whole queue
+    still waiting. The ``+ n`` is the one unit of work each cancellation
+    costs at the least; it keeps the ratio defined if nothing else counts."""
 
     async def use(res: AnyResource, priority: float) -> None:
         async with request(res, priority):
@@ -245,30 +337,41 @@ def comparisons_cancelling_in_reverse(make: Callable[[], AnyResource], n: int) -
         loop = asyncio.get_running_loop()
         # Instance attribute: shadows the method for this run's loop only.
         loop.create_future = lambda: CountingFuture(loop=loop)  # type: ignore[method-assign]
-        res = make()
+        res = COUNTING[make]()
         holder = sim.spawn(use(res, CountingPriority(0)))
         # Each waiter has its own priority object, so no comparison between
         # two entries is short-cut by identity.
         waiters = [sim.spawn(use(res, CountingPriority(1))) for _ in range(n)]
         await sim.timeout(1)
         assert res.count == 1 and res.queue_length == n
-        CountingFuture.compared = CountingPriority.compared = 0
+        CountingFuture.compared = CountingPriority.compared = Touched.count = 0
         for task in reversed(waiters):
             task.cancel()
+            if one_at_a_time:
+                await asyncio.sleep(0)
+                assert task.done()  # its cleanup has run
         await asyncio.gather(*waiters, return_exceptions=True)
-        compared = CountingFuture.compared + CountingPriority.compared
+        work = CountingFuture.compared + CountingPriority.compared + Touched.count
         assert res.count == 1 and res.queue_length == 0
+        # The swap is still in place: the count saw every container.
+        assert isinstance(res._waiters, _CountingDeque | _CountingList)
         holder.cancel()
-        return compared + n
+        return work + n
 
     return desyncio.run(main())
 
 
 @ALL
+@pytest.mark.parametrize("one_at_a_time", [False], ids=["at_once"])
 def test_cancelling_waiters_makes_no_linear_search_per_waiter(
-    make: Callable[[], AnyResource],
+    make: Callable[[], AnyResource], one_at_a_time: bool
 ) -> None:
-    assert ratio(lambda n: comparisons_cancelling_in_reverse(make, n)) < THRESHOLD
+    assert (
+        ratio(
+            lambda n: work_cancelling_newest_first(make, n, one_at_a_time=one_at_a_time)
+        )
+        < THRESHOLD
+    )
 
 
 # --- behaviour of the lazy removal -------------------------------------------
