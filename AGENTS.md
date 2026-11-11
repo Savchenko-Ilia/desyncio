@@ -45,6 +45,8 @@ The library has no dependency on any web, LLM, or ML framework. Keep it that way
    and then build it on asyncio's building blocks (`Condition`, futures). Say in the docstring what is
    delegated. The same holds for numpy and scipy in the statistics modules (D048): call what they already
    implement. A hand-written replacement for existing asyncio functionality is a MUST review finding (D022).
+   Exception (D075): where delegating to asyncio is measurably super-linear (e.g. `Semaphore` waiter cancellation),
+   our own code built on asyncio futures may replace it, with a recorded decision and a scaling test.
 
 ---
 

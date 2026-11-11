@@ -205,3 +205,18 @@ Source: the platform's "Event API requirements, draft v0.1", as corrected by D05
 31. EVT-04, EVT-06 (no shared files; EVT-04 uses only the helper EVT-02 ships)
 32. EVT-03, EVT-07 (no shared files)
 33. EVT-08
+
+# Bug fix: quadratic waiter cancellation (D075)
+
+Reported by Hodos (2026-11-11): cancelling n tasks parked on one primitive takes O(n²), at teardown after `until` and mid-run (a `TaskGroup` abort, a mass interrupt). Reproduced on `integration` d507b48 for `Resource`, `PriorityResource`, `Store`, and for a plain `asyncio.Semaphore`.
+
+Common acceptance criteria for each row: cancelling all n waiters of one primitive (and ending a run at `until` with n waiters) is O(n) or O(n log n) overall; a regression test proves it without flaky wall-clock thresholds (either a deterministic operation count, or a CPU-time ratio between n and 4n with a threshold at least 2x away from both the linear and the quadratic expectation, best of several repeats, under ~2 s total); behaviour is unchanged (FIFO / priority order, no barging, the D023 v2 monitor contract, D030 synchronous release, `ResourceChanged` events, preemption, names); the existing tests and docs examples pass unchanged.
+
+| ID | Feature | Acceptance criteria | Owns files | Depends on | Status |
+|----|---------|---------------------|------------|------------|--------|
+| PERF-01 | Resource classes scale | `Resource` no longer delegates waiting to `asyncio.Semaphore` (CPython's `acquire` cleanup rescans every cancelled waiter, D075): it keeps its own FIFO of waiter futures built on asyncio futures, skips or drops cancelled ones in O(1) amortised, and keeps no-barging and the granted-but-not-resumed hand-on. `PriorityResource`/`PreemptiveResource`: find and fix the quadratic part (e.g. the O(n) `_has_waiter_at_or_better` scan, list deletions, the grant scan). Update `docs/primitives.md` where it says `Resource` is a thin wrapper over `Semaphore` (the "what is ours vs asyncio" tables) and the module docstring. | `src/desyncio/resource.py`, `tests/test_scaling_resource.py`, `docs/primitives.md` | EVT-04 | todo |
+| PERF-02 | Stores scale | `Store`, `FilterStore`, `PriorityStore`: find and fix the quadratic part of cancelling many blocked getters/putters (deque `remove`, wake-up scans). If `docs/primitives.md` needs a change, STOP and report (PERF-01 owns it). | `src/desyncio/store.py`, `tests/test_scaling_store.py` | — | todo |
+| PERF-03 | Container and ScheduledResource scale | `Container` (getters/putters) and `ScheduledResource` (waiters, `_units` list): find and fix the same pattern. If `docs/primitives.md` or `docs/calendar.md` needs a change, STOP and report. | `src/desyncio/container.py`, `src/desyncio/scheduled.py`, `tests/test_scaling_misc.py` | — | todo |
+
+## Suggested batches (bug fix)
+34. PERF-01, PERF-02, PERF-03 (no shared files)
