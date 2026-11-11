@@ -404,6 +404,12 @@ def _agreed_parts(served: Log, snapshots: Log) -> dict[str, Any]:
     }
 
 
+def _before_teardown(served: Log, snapshots: Log) -> tuple[Log, Log]:
+    """The full service log up to "left", and every monitor snapshot, in order."""
+    cut = next(i for i, entry in enumerate(served) if entry[0] == "left")
+    return served[: cut + 1], snapshots
+
+
 def test_agrees_with_the_condition_original() -> None:
     differ = 0
     outcomes: set[str] = set()
@@ -411,10 +417,13 @@ def test_agrees_with_the_condition_original() -> None:
         old, new = _scenario(False, seed), _scenario(True, seed)
         expected = _agreed_parts(*old)
         assert _agreed_parts(*new) == expected, f"seed {seed}"
-        differ += old != new
+        differ += _before_teardown(*old) != _before_teardown(*new)
         outcomes |= {what for _, what in expected["outcome"].values()}
-    # The scenarios mix outcomes, and some runs really do order an instant
-    # differently (D076), so the comparison above leaves out something real.
+    # The scenarios mix outcomes, and in some runs the order of service and
+    # level changes within an instant really differs (D076), so the
+    # comparison above leaves out something real. (Compared before the
+    # teardown only: it cancels in address order, which differs between any
+    # two runs, even of the same code.)
     assert outcomes == {"served", "cancelled"}
     assert differ > 0
 
