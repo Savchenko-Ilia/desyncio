@@ -24,6 +24,7 @@ Three kinds of check:
 """
 
 import gc
+import random
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -58,11 +59,12 @@ def comparisons(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
 
 
 def constant(capacity: int) -> Schedule:
-    """A schedule whose capacity is ``capacity`` around the clock, every day."""
-    return Schedule(
-        Calendar(datetime(2026, 1, 5, tzinfo=UTC)),
-        [Shift(range(7), dtime(0), dtime(0), capacity)],
-    )
+    """A schedule whose capacity is ``capacity`` around the clock, every day.
+
+    Capacity 0 is a schedule with no shifts (a ``Shift`` needs capacity >= 1).
+    """
+    shifts = [Shift(range(7), dtime(0), dtime(0), capacity)] if capacity else []
+    return Schedule(Calendar(datetime(2026, 1, 5, tzinfo=UTC)), shifts)
 
 
 async def _hold(res: ScheduledResource) -> None:
@@ -106,15 +108,26 @@ def test_cancelling_holders_makes_no_scan(comparisons: list[int]) -> None:
 
 
 def test_teardown_after_until_makes_no_scan(comparisons: list[int]) -> None:
-    # Half hold a unit and half wait; ``run`` cancels all of them after ``until``.
+    # N waiters on a closed resource; ``run`` cancels all of them after
+    # ``until``. Capacity 0, so no release at teardown grants and pops the
+    # cancelled waiters off the front before they leave by themselves (with a
+    # holder, its release would, and the runner picks the cancel order by
+    # task address). The waiters queue in a shuffled order, so whatever order
+    # the runner cancels them in, a scan from the front would compare ~N²/4.
     seen: list[int] = []
     before = -1
 
+    async def wait_then_hold(res: ScheduledResource, delay: float) -> None:
+        await sim.timeout(delay)
+        await _hold(res)
+
     async def main() -> None:
         nonlocal before
-        res = ScheduledResource(constant(N // 2))
-        for _ in range(N):
-            sim.spawn(_hold(res))
+        res = ScheduledResource(constant(0))
+        delays = [i / N for i in range(N)]
+        random.Random(0).shuffle(delays)
+        for delay in delays:
+            sim.spawn(wait_then_hold(res, delay))
         await sim.timeout(1)
         seen.extend((res.count, res.queue_length))
         before = comparisons[0]
@@ -122,8 +135,8 @@ def test_teardown_after_until_makes_no_scan(comparisons: list[int]) -> None:
 
     desyncio.run(main(), until=2)
     made = comparisons[0] - before
-    assert seen == [N // 2, N // 2]
-    assert made < N, f"{made} comparisons to tear down {N} tasks"
+    assert seen == [0, N]
+    assert made < N, f"{made} comparisons to tear down {N} waiters"
 
 
 def _cancel_cpu_time(n: int, capacity: int) -> float:
