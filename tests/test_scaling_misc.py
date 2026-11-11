@@ -12,20 +12,19 @@ Three kinds of check:
   With the scans, cancelling n tasks in reverse creation order costs about
   n²/2 comparisons; now a hold leaves its queue or the grant-order dict
   without any, so the count must stay below n.
-* CPU-time ratio: a quadratic cost that compares nothing (rebuilding the deque
-  or the dict on every cancel, compacting too eagerly) is invisible to the
-  count, so the CPU time of the same cancellation is compared between n and
-  4n tasks. Linear work gives a ratio of about 4, quadratic about 16; the
-  threshold, 8, is 2x from both. Each size is measured 3 times and the
-  fastest kept, which removes most scheduler noise (noise only adds time);
-  the cyclic GC is paused while timing.
+* Element counts (deterministic): a quadratic cost that compares nothing
+  (rebuilding the deque or the dict on every cancel, compacting too eagerly)
+  is invisible to the comparison count, so a resource subclass counts the
+  elements of its FIFO and grant-order dict that are iterated or copied into
+  a rebuilt container, for n and 4n cancelled tasks. Linear work gives a
+  ratio of about 4, quadratic about 16; the threshold, 8, is 2x from both.
+  These replace CPU-time ratios, which were flaky on a loaded machine.
 * Memory: lazy deletion must not let stale entries pile up while the head of
   the line is never served.
 """
 
-import gc
 import random
-import time
+from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from datetime import time as dtime
@@ -39,9 +38,8 @@ from desyncio.schedule import Schedule, Shift
 from desyncio.scheduled import ScheduledResource, _Hold
 
 N = 400
-RATIO_N = 2_000  # compared with 4 * RATIO_N
-RATIO_THRESHOLD = 8.0  # linear: ~4, quadratic: ~16
-REPEATS = 3
+TOUCH_N = 500  # compared with 4 * TOUCH_N
+TOUCH_THRESHOLD = 8.0  # linear: ~4, quadratic: ~16
 
 
 @pytest.fixture
@@ -139,55 +137,118 @@ def test_teardown_after_until_makes_no_scan(comparisons: list[int]) -> None:
     assert made < N, f"{made} comparisons to tear down {N} waiters"
 
 
-def _cancel_cpu_time(n: int, capacity: int) -> float:
-    """CPU seconds to cancel n tasks on one resource in reverse order, mid-run."""
-    spent = -1.0
+class _CountingDeque(deque[_Hold]):
+    """A deque that counts the elements its iterator yields."""
+
+    touched: list[int]
+
+    def __iter__(self) -> Iterator[_Hold]:
+        for hold in super().__iter__():
+            self.touched[0] += 1
+            yield hold
+
+
+class _CountingDict(dict[_Hold, None]):
+    """A dict that counts the keys its iterator yields."""
+
+    touched: list[int]
+
+    def __iter__(self) -> Iterator[_Hold]:
+        for hold in super().__iter__():
+            self.touched[0] += 1
+            yield hold
+
+
+class _CountingResource(ScheduledResource):
+    """A ``ScheduledResource`` that counts the elements of its waiter FIFO and
+    grant-order record that are iterated, or copied into a new container.
+
+    ``_waiters`` and ``_units`` are properties here: whatever deque or dict the
+    resource stores in them (at creation, or a rebuild later) is wrapped in a
+    counting copy, and every rebuild adds its length to the count. Only
+    iteration and rebuilds count; O(1) operations (``append``, ``popleft``,
+    ``del d[k]``, ``popitem``, ``len``) add nothing.
+    """
+
+    touched: list[int]
+
+    def _store(self, name: str, value: object) -> None:
+        if not hasattr(self, "touched"):
+            self.touched = [0]
+        else:
+            self.touched[0] += len(value)  # type: ignore[arg-type]
+        if type(value) is deque:
+            value = _CountingDeque(value)
+        elif type(value) is dict:
+            value = _CountingDict(value)
+        if isinstance(value, _CountingDeque | _CountingDict):
+            value.touched = self.touched
+        self.__dict__[name] = value
+
+    @property
+    def _waiters(self) -> deque[_Hold]:
+        return self.__dict__["_waiters"]  # type: ignore[no-any-return]
+
+    @_waiters.setter
+    def _waiters(self, value: deque[_Hold]) -> None:
+        self._store("_waiters", value)
+
+    @property
+    def _units(self) -> dict[_Hold, None]:
+        return self.__dict__["_units"]  # type: ignore[no-any-return]
+
+    @_units.setter
+    def _units(self, value: dict[_Hold, None]) -> None:
+        self._store("_units", value)
+
+
+def _cancel_touches(n: int, capacity: int) -> int:
+    """Elements touched (see ``_CountingResource``) while n tasks on one
+    resource are cancelled in reverse creation order, mid-run."""
+    made = -1
 
     async def main() -> None:
-        nonlocal spent
-        res = ScheduledResource(constant(capacity))
+        nonlocal made
+        res = _CountingResource(constant(capacity))
         tasks = [sim.spawn(_hold(res)) for _ in range(n)]
         await sim.timeout(1)
         assert res.count + res.queue_length == n
-        # A cyclic GC pass costs time in proportion to every live object, not
-        # to the work measured, so it is kept out of the timed part.
-        gc.collect()
-        gc.disable()
-        try:
-            start = time.process_time()
-            for task in reversed(tasks):
-                task.cancel()
-            await sim.timeout(1)
-            spent = time.process_time() - start
-        finally:
-            gc.enable()
+        assert isinstance(res._waiters, _CountingDeque)
+        assert isinstance(res._units, _CountingDict)
+        before = res.touched[0]
+        for task in reversed(tasks):
+            task.cancel()
+        await sim.timeout(1)
+        made = res.touched[0] - before
         assert res.count == 0
         assert res.queue_length == 0
 
     desyncio.run(main())
-    return spent
+    return made
 
 
 @pytest.mark.parametrize("capacity", [1, 10**9], ids=["waiters", "holders"])
-def test_cancelling_scales_linearly_in_cpu_time(capacity: int) -> None:
+def test_cancelling_touches_scale_linearly(capacity: int) -> None:
     # Capacity 1: one holder and n - 1 waiters; capacity 10**9: n holders.
-    # Interleaved, so a burst of load on the machine hits both sizes alike.
-    smalls: list[float] = []
-    larges: list[float] = []
-    for _ in range(REPEATS):
-        smalls.append(_cancel_cpu_time(RATIO_N, capacity))
-        larges.append(_cancel_cpu_time(4 * RATIO_N, capacity))
-    small, large = min(smalls), min(larges)
-    ratio = large / max(small, 1e-6)
-    assert ratio < RATIO_THRESHOLD, (
-        f"cancelling {4 * RATIO_N} tasks took {ratio:.1f}x the CPU time of "
-        f"{RATIO_N} ({large:.3f}s vs {small:.3f}s): not linear"
+    # Deterministic counts: linear work gives a ratio of about 4, a rebuild of
+    # the deque or the dict on every cancel (or compaction that is too eager)
+    # about 16. The threshold, 8, is 2x from both.
+    small = _cancel_touches(TOUCH_N, capacity)
+    large = _cancel_touches(4 * TOUCH_N, capacity)
+    ratio = large / max(small, 1)
+    assert ratio < TOUCH_THRESHOLD, (
+        f"cancelling {4 * TOUCH_N} tasks touched {ratio:.1f}x the elements "
+        f"of {TOUCH_N} ({large} vs {small}): not linear"
     )
+    assert large <= 4 * 4 * TOUCH_N, f"{large} elements touched for {4 * TOUCH_N}"
 
 
 def test_stale_waiters_are_compacted() -> None:
     # The head waiter is never served (the holder keeps the only unit), so the
     # grant never pops stale entries; compaction alone must bound the deque.
+    # Memory is checked through the private ``_waiters`` on purpose: stale
+    # entries are invisible in the public API (``queue_length`` counts only
+    # live waiters), so no public observation can see them pile up.
     stale: list[int] = []
 
     async def main() -> None:
