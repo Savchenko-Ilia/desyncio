@@ -707,7 +707,17 @@ strict FIFO, so only a line's head can be served, and only the heads need to wak
   from desyncio versions before batch 34 (on `Condition`): a waiter behind the head now resumes
   one step after the head, not with it. For requests made at given instants, each one is still
   served (or cancelled) at the same instant, and the level at the end of every instant is the
-  same. But a task that resumes a step earlier or later may make its next request in a different
+  same, with two exceptions (both pinned in `tests/test_scaling_container.py`):
+  - amounts that do not add up exactly in floating point (0.1, 0.3, ...; integers and fractions
+    such as 0.5 or 0.25 are exact): a different order of puts and gets within an instant can
+    round the level differently, so a request may be served at another instant, or not at all;
+  - a cancel issued partway through an instant (by a task that has run some
+    `await asyncio.sleep(0)` steps first) can hit a waiter the old code had already served by
+    then (a waiter behind a head is served a step later than before), so it is cancelled
+    instead of served. Cancels from timers (`asyncio.timeout()`, a task that sleeps
+    until the cancel time) are unaffected.
+
+  And a task that resumes a step earlier or later may make its next request in a different
   order relative to other tasks, so a model can give different results for the same seed than
   those earlier versions. Runs are still deterministic.
 - The monitor runs after each level change, not for blocked or cancelled requests.

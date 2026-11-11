@@ -36,7 +36,11 @@ The counts of the first three patterns are the same on every run.
 Behaviour: the differential test runs random scenarios on this ``Container``
 and on ``_ConditionContainer`` (the pre-PERF-04 code, on ``Condition``) and
 checks what must still agree; ``test_d076_same_instant_order_changed`` pins
-one scenario where the order within an instant is different, on purpose.
+one scenario where the order within an instant is different, on purpose, and
+the two ``test_d076_exception_*`` tests pin the documented exceptions where
+even who is served, and the level, differ (a cancel issued partway through an
+instant; amounts that do not add up exactly). The differential scenarios avoid
+both: integer amounts, cancels from timers only.
 """
 
 import asyncio
@@ -479,6 +483,125 @@ def test_d076_same_instant_order_changed() -> None:
         ("level", 1, 10),
         ("put 1", 1),  # woken by "put 2", the head before it
         ("bystander 2", 1),
+    ]
+
+
+def test_d076_exception_cancel_partway_through_an_instant() -> None:
+    # D076, first documented exception: a cancel issued after one
+    # asyncio.sleep(0) step, not by a timer. Same setup as above: "put 2"
+    # waits on a full container, "put 1" queues behind it, and at t=1 a task
+    # gets 3, takes one step and cancels "put 1". The Condition had woken
+    # "put 1" together with "put 2", so it was served before the cancel came;
+    # now it is still parked behind "put 2" and the cancel reaches it.
+    def run(ours: bool) -> Log:
+        log: Log = []
+
+        async def request(c: Any, name: str, amount: float, start: float) -> None:
+            await sim.timeout(start)
+            try:
+                await c.put(amount)
+            except asyncio.CancelledError:
+                log.append((name, "cancelled", sim.now))
+                raise
+            log.append((name, "served", sim.now))
+
+        async def main() -> None:
+            c: Any
+            if ours:
+                c = Container(10, init=10)
+            else:
+                c = _ConditionContainer(10, 10, lambda c: None)
+            sim.spawn(request(c, "put 2", 2, 0))
+            put1 = sim.spawn(request(c, "put 1", 1, 0.5))
+            await sim.timeout(1)
+            await c.get(3)
+            await asyncio.sleep(0)  # one step into the instant
+            put1.cancel()
+            await sim.timeout(1)
+            log.append(("final", c.level))
+
+        desyncio.run(main())
+        return log
+
+    assert run(False) == [
+        ("put 2", "served", 1),
+        ("put 1", "served", 1),
+        ("final", 10),
+    ]
+    assert run(True) == [
+        ("put 2", "served", 1),
+        ("put 1", "cancelled", 1),
+        ("final", 9),
+    ]
+
+
+def test_d076_exception_amounts_that_do_not_add_up_exactly() -> None:
+    # D076, second documented exception: with amounts like 0.1 the level is
+    # rounded after every change, and the new order of puts and gets within
+    # instant 2 rounds differently. At t=2 the old code ran 0.8 - 0.1 + 0.2
+    # and ended the instant at 0.9000000000000001; the new code runs
+    # 0.8 + 0.2 - 0.1 and ends it at 0.9. After "get 0.2" at t=3 the old level
+    # is 0.7000000000000002, so "put 0.3" (it fits while level <= 1 - 0.3, that
+    # is 0.7) is never served and holds back "put 0.1" behind it; the new
+    # level is 0.7 and "put 0.3" is served at t=3. Found by the PERF-04
+    # reviewer's random search; no smaller case turned up.
+    spec = [
+        ("put", 1, 2),
+        ("get", 0.1, 2),
+        ("get", 0.7, 0),
+        ("put", 0.3, 3),
+        ("get", 0.1, 1),
+        ("get", 0.1, 1),
+        ("get", 0.2, 3),
+        ("put", 0.2, 2),
+        ("put", 0.1, 3),
+        ("put", 0.2, 0),
+    ]
+
+    def run(ours: bool) -> Log:
+        log: Log = []
+
+        async def actor(c: Any, name: str, op: str, amount: float, start: int) -> None:
+            await sim.timeout(start)
+            await getattr(c, op)(amount)
+            log.append((name, sim.now))
+
+        async def main() -> None:
+            c: Any
+            if ours:
+                c = Container(1, init=0.5)
+            else:
+                c = _ConditionContainer(1, 0.5, lambda c: None)
+            for i, (op, amount, start) in enumerate(spec):
+                sim.spawn(actor(c, f"{op} {amount} #{i}", op, amount, start))
+            await sim.timeout(10)
+            log.append(("final", c.level))
+
+        desyncio.run(main(), until=20)
+        return log
+
+    assert run(False) == [
+        ("put 0.2 #9", 0),
+        ("get 0.7 #2", 0),
+        ("put 1 #0", 2),
+        ("get 0.1 #4", 2),
+        ("get 0.1 #5", 2),
+        ("get 0.1 #1", 2),
+        ("put 0.2 #7", 2),
+        ("get 0.2 #6", 3),
+        ("final", 0.7000000000000002),  # "put 0.3 #3" never fits
+    ]
+    assert run(True) == [
+        ("put 0.2 #9", 0),
+        ("get 0.7 #2", 0),
+        ("put 1 #0", 2),
+        ("get 0.1 #4", 2),
+        ("get 0.1 #5", 2),
+        ("put 0.2 #7", 2),  # before "get 0.1 #1" now
+        ("get 0.1 #1", 2),
+        ("get 0.2 #6", 3),
+        ("put 0.3 #3", 3),
+        ("final", 1.0),
     ]
 
 

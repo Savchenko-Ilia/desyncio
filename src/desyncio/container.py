@@ -68,9 +68,24 @@ with it by ``notify_all`` and now is woken by the head's own level change, one
 step later. For requests made at given instants, each is still served (or
 cancelled) at the same instant and the level at the end of every instant is
 the same (``tests/test_scaling_container.py`` checks this against the old
-code). But a task that resumes a step earlier or later may make its next
-request in a different order relative to other tasks, so a model can give a
-different result for the same seed than desyncio versions before batch 34.
+code), but only when both of these hold:
+
+* the amounts add up exactly (integers, or fractions such as 0.5 and 0.25
+  whose sums are exact in binary floating point). With amounts like 0.1 the
+  level is rounded after every change, and a different order of puts and gets
+  within an instant can round differently, so a request may fit, or not, at
+  another instant than before;
+* cancellations come from timers (``asyncio.timeout()``, a task that sleeps
+  until the cancel time and then cancels). A task that cancels a waiter
+  partway through an instant, after some ``await asyncio.sleep(0)`` steps, can
+  now reach a waiter that the old code had already served by that step (a
+  waiter behind a head is served a step later than before), so that waiter
+  is cancelled instead of served.
+
+Both exceptions are pinned in ``tests/test_scaling_container.py``. And a task
+that resumes a step earlier or later may make its next request in a different
+order relative to other tasks, so a model can give a different result for the
+same seed than desyncio versions before batch 34.
 
 Also ours: amount and capacity validation, ``level``/``capacity``, and the
 ``monitor=`` hook (D021, D023 v2).
