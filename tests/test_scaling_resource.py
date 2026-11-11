@@ -362,7 +362,7 @@ def work_cancelling_newest_first(
 
 
 @ALL
-@pytest.mark.parametrize("one_at_a_time", [False], ids=["at_once"])
+@pytest.mark.parametrize("one_at_a_time", [False, True], ids=["at_once", "reneging"])
 def test_cancelling_waiters_makes_no_linear_search_per_waiter(
     make: Callable[[], AnyResource], one_at_a_time: bool
 ) -> None:
