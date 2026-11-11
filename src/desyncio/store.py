@@ -104,13 +104,18 @@ class _Waiters:
     """A FIFO of parked waiter futures with O(1) amortised cancellation (D075).
 
     This replaces the ``deque`` of futures inside ``asyncio.Queue`` and
-    ``asyncio.Condition``. The difference is only in how a cancelled waiter
+    ``asyncio.Condition``. The main difference is in how a cancelled waiter
     leaves: asyncio calls ``deque.remove(future)``, a scan that makes
     cancelling n waiters O(n²); here the future is merely cancelled and left in
     place ("lazy deletion"). A cancelled future is ``done()``, and every wake-up
     already skips done futures, so a dead future can never be woken and is
-    popped at most once. To keep memory bounded, the deque is rebuilt without
-    its dead futures once at least half of it may be dead.
+    popped at most once. The other difference is ``Condition``'s: a wake-up
+    here pops every future it meets, the woken ones included (as
+    ``Queue._wakeup_next`` does), whereas ``Condition._notify`` leaves woken
+    futures in its deque for their waiters to remove. To keep memory bounded,
+    the deque is rebuilt without its dead futures once more than half of it
+    may be dead and there have been at least ``_COMPACT_MIN`` (32)
+    cancellations since the last rebuild.
 
     Futures are woken with ``set_result(None)``: the waiting task is scheduled
     with ``call_soon`` and runs in a later step, in wake-up order.
