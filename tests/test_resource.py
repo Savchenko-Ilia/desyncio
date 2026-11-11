@@ -30,9 +30,11 @@ AnyResource = Resource | PriorityResource
 
 # --- Resource (RES-01) ------------------------------------------------------
 #
-# FIFO order itself is asyncio.Semaphore's job and is not re-tested here (the
-# bank example in docs/primitives.md covers it). The no-barging test below is
-# kept on purpose: it is a guard in case Resource ever moves off Semaphore.
+# Resource used to delegate to asyncio.Semaphore; since PERF-01 (D075) its
+# FIFO queue is our own code. FIFO order is pinned by the bank example in
+# docs/primitives.md and by tests/test_scaling_resource.py (the order under
+# many cancellations, and FIFO in the stress test). The no-barging test below
+# was kept as a guard for exactly that move off Semaphore (D042).
 
 
 def test_no_barging_same_instant_newcomer() -> None:

@@ -25,6 +25,7 @@ The runtime goes from about 11 s to about 8 s. The figures are estimates; none o
 - Validation tables: constructor, priority, preempt, Container amounts.
 - Drop:
   - asyncio re-proofs: Resource FIFO, and no-barging (the owner may keep one as a Semaphore-swap guard);
+    _(2026-11-11: PERF-01 moved `Resource` off `Semaphore` (D075), so its FIFO and no-barging are our code again, no longer asyncio re-proofs. The kept no-barging test, the bank example and `tests/test_scaling_resource.py` now cover them.)_
   - docs duplicates: machine shop, fuel tank;
   - basic Container blocking (×2) and the Resource cancelled waiter;
   - the Priority cancelled-at-instant subset.
