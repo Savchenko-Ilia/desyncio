@@ -107,8 +107,17 @@ built on asyncio's building blocks like ``PriorityResource`` (D030):
   is reported through a task done-callback and the loop's exception handler,
   as asyncio reports a failed callback; interrupts reuse
   ``interrupt_task`` (cancel plus translation in ``__aexit__``, INT-01);
-* ours: the FIFO deque of waiters, the grant rule, the grant-order list used
-  to pick victims, the counters, and the monitor hook.
+* ours: the FIFO deque of waiters, the grant rule, the grant-order record
+  used to pick victims, the counters, and the monitor hook.
+
+Cost (PERF-03, D075): every operation is O(1) amortised, so cancelling n
+waiters or holders (a ``TaskGroup`` abort, the end of a run at ``until``) is
+O(n) overall. A waiter that leaves without a grant is only unmarked and
+skipped later (lazy deletion), instead of ``deque.remove``, which scans the
+line; the deque is compacted when stale entries outnumber live ones. Holders
+are keys of an insertion-ordered ``dict`` instead of a list: a release is a
+``del`` instead of ``list.remove``, and ``popitem()`` still takes the most
+recently granted one first at a shift end.
 
 The driver task is cancelled when ``run`` ends, like any leftover task
 (LOOP-04b), so it does not keep ``run(main)`` alive. While it still has a change
@@ -126,7 +135,6 @@ the units it takes back and the waiters it grants, is one event.
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
@@ -159,6 +167,7 @@ class _Hold:
 
     task: "asyncio.Task[Any]"
     fut: "asyncio.Future[None] | None" = None  # set while it waits in the queue
+    queued: bool = False  # counted in the FIFO (it may stay there as a stale entry)
     held: bool = False  # the task has resumed with the unit (else: reservation)
     lost: ShiftEnded | None = None  # set when the shift took the unit away
 
@@ -205,8 +214,17 @@ class ScheduledResource:
         self._schedule = schedule
         self._monitor = monitor
         self._capacity = schedule.capacity_at(now)
+        # The FIFO of waiting holds. A hold that leaves without a grant is only
+        # unmarked (``queued = False``) and stays as a stale entry, skipped when
+        # it reaches the front: ``deque.remove`` would scan the line, O(n) per
+        # cancel. ``_queued`` counts the live entries, so ``queue_length`` stays
+        # exact; ``_drop_waiter`` compacts once stale entries outnumber them.
         self._waiters: deque[_Hold] = deque()
-        self._units: list[_Hold] = []  # every hold with a unit, in grant order
+        self._queued = 0
+        # Every hold with a unit, in grant order. A dict keeps insertion order,
+        # deletes any key in O(1) (a release), and ``popitem()`` removes the
+        # most recently inserted one (the shift-end victim, D051 item 2).
+        self._units: dict[_Hold, None] = {}
         self._count = 0  # holds whose task has resumed
         self._plain: dict[asyncio.Task[Any], list[tuple[_Hold, Interruptible]]] = {}
         loop = _loop()
@@ -233,7 +251,7 @@ class ScheduledResource:
     @property
     def queue_length(self) -> int:
         """Requests waiting for a unit, including ones granted but not resumed."""
-        return len(self._waiters) + len(self._units) - self._count
+        return self._queued + len(self._units) - self._count
 
     def _changed(self) -> None:
         """Call the monitor, then emit one ``ResourceChanged`` (D060)."""
@@ -299,7 +317,7 @@ class ScheduledResource:
         victims: list[tuple[_Hold, ShiftEnded]] = []
         # Drop: take units from the most recently granted holds first.
         while len(self._units) > capacity:
-            hold = self._units.pop()
+            hold, _ = self._units.popitem()  # the most recently granted
             hold.lost = ShiftEnded(at=sim.now, resource=self)
             if hold.held:
                 self._count -= 1
@@ -320,11 +338,31 @@ class ScheduledResource:
         """Hand free units to the head waiters, FIFO, synchronously."""
         while self._waiters and len(self._units) < self._capacity:
             hold = self._waiters.popleft()
+            if not hold.queued:
+                continue  # a stale entry: it already left the queue
+            hold.queued = False
+            self._queued -= 1
             assert hold.fut is not None
             if hold.fut.done():
-                continue  # cancelled while queued; its task has left or will
-            self._units.append(hold)
+                continue  # cancelled while queued; its task will leave
+            self._units[hold] = None
             hold.fut.set_result(None)  # the waiter resumes at its next turn
+
+    def _drop_waiter(self, hold: _Hold) -> None:
+        """Take ``hold`` out of the queue in O(1) amortised (lazy deletion).
+
+        The entry stays in the deque, unmarked, until a grant reaches it. When
+        stale entries outnumber live ones (plus a little slack), the deque is
+        rebuilt from the live ones in queue order. A rebuild of length L
+        follows at least L/2 drops, so each drop costs O(1) amortised, and
+        memory stays bounded while the head of the line cannot be served.
+        """
+        if not hold.queued:
+            return  # already skipped by a grant
+        hold.queued = False
+        self._queued -= 1
+        if len(self._waiters) > 2 * self._queued + 16:
+            self._waiters = deque(h for h in self._waiters if h.queued)
 
     async def _acquire(self, task: "asyncio.Task[Any]") -> _Hold:
         # This run's name (a no-op in the run that built it). May raise
@@ -332,8 +370,8 @@ class ScheduledResource:
         self._run_name = register_resource_name(self, self._name)
         hold = _Hold(task)
         # No barging: a free unit is taken at once only if nobody is queued.
-        if len(self._units) < self._capacity and not self._waiters:
-            self._units.append(hold)
+        if len(self._units) < self._capacity and not self._queued:
+            self._units[hold] = None
             hold.held = True
             self._count += 1
             self._changed()
@@ -341,6 +379,8 @@ class ScheduledResource:
 
         hold.fut = asyncio.get_running_loop().create_future()
         self._waiters.append(hold)
+        hold.queued = True
+        self._queued += 1
         self._changed()  # queued
         try:
             await hold.fut
@@ -349,11 +389,10 @@ class ScheduledResource:
                 # Granted, then cancelled before resuming: pass the unit on.
                 # (If the shift took it back meanwhile there is nothing to do.)
                 if hold.lost is None:
-                    self._units.remove(hold)
+                    del self._units[hold]
             else:
                 # Still queued, or already skipped by a grant: leave if present.
-                with suppress(ValueError):
-                    self._waiters.remove(hold)
+                self._drop_waiter(hold)
             self._grant_free_units()
             self._changed()
             raise
@@ -367,7 +406,7 @@ class ScheduledResource:
     def _release(self, hold: _Hold) -> None:
         if hold.lost is not None:
             return  # the unit is already gone; releasing again would free another's
-        self._units.remove(hold)
+        del self._units[hold]
         self._count -= 1
         self._grant_free_units()
         self._changed()
