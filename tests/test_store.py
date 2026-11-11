@@ -1,12 +1,14 @@
 """Tests for ``desyncio.store``: Store (STO-01), PriorityStore and FilterStore (STO-02).
 
-Store and PriorityStore are thin wrappers over ``asyncio.Queue`` and
-``asyncio.PriorityQueue``; FIFO order, blocking, ``shutdown`` and most of the
-cancellation cleanup are asyncio's behaviour and are not re-proved here (D042).
-These tests pin what is ours: the ``items`` mirror, the monitor hook, the
-PriorityStore ordering contract, FilterStore (built on ``asyncio.Condition``),
-validation, and that cancellation still loses and duplicates nothing in
-*virtual* time.
+Store and PriorityStore keep their items in ``asyncio.Queue`` and
+``asyncio.PriorityQueue``; blocked callers wait in desyncio's own waiter FIFO
+(D075), adapted from ``Queue.put``/``get`` with the same semantics.
+FilterStore is the ``asyncio.Condition`` pattern on an ``asyncio.Lock`` with
+that waiter FIFO. ``tests/test_scaling_store.py`` checks that the waiting
+logic gives the same event log as the asyncio originals and scales linearly.
+These tests pin the store contracts: the ``items`` mirror, the monitor hook,
+the PriorityStore ordering contract, FilterStore's filtering, validation, and
+that cancellation still loses and duplicates nothing in *virtual* time.
 
 Behaviours shared by all three stores are written once and run for each kind
 in ``KIND``. FilterStore has no ``shutdown()``, so tests that use it check
