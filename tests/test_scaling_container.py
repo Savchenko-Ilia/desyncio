@@ -38,9 +38,9 @@ and on ``_ConditionContainer`` (the pre-PERF-04 code, on ``Condition``) and
 checks what must still agree; ``test_d076_same_instant_order_changed`` pins
 one scenario where the order within an instant is different, on purpose, and
 the two ``test_d076_exception_*`` tests pin the documented exceptions where
-even who is served, and the level, differ (a cancel issued partway through an
-instant; amounts that do not add up exactly). The differential scenarios avoid
-both: integer amounts, cancels from timers only.
+even who is served, and the level, differ (a cancel issued later in an instant
+than its start; amounts that do not add up exactly). The differential scenarios
+avoid both: integer amounts, every cancel at the start of its instant.
 """
 
 import asyncio
@@ -574,13 +574,48 @@ def test_heads_are_woken_oldest_park_first() -> None:
     assert run(False) == expected  # the Condition's order, too
 
 
-def test_d076_exception_cancel_partway_through_an_instant() -> None:
-    # D076, first documented exception: a cancel issued after one
-    # asyncio.sleep(0) step, not by a timer. Same setup as above: "put 2"
-    # waits on a full container, "put 1" queues behind it, and at t=1 a task
-    # gets 3, takes one step and cancels "put 1". The Condition had woken
-    # "put 1" together with "put 2", so it was served before the cancel came;
-    # now it is still parked behind "put 2" and the cancel reaches it.
+_SERVED_THEN_SERVED: Log = [
+    ("put 2", "served", 1),
+    ("put 1", "served", 1),
+    ("final", 10),
+]
+_SERVED_THEN_CANCELLED: Log = [
+    ("put 2", "served", 1),
+    ("put 1", "cancelled", 1),
+    ("final", 9),
+]
+_CANCELLED_THEN_SERVED: Log = [
+    ("put 1", "cancelled", 1),
+    ("put 2", "served", 1),
+    ("final", 9),
+]
+
+
+@pytest.mark.parametrize(
+    ("canceller", "old", "new"),
+    [
+        # Issued later in the instant: who is served differs.
+        ("after-sleep-0", _SERVED_THEN_SERVED, _SERVED_THEN_CANCELLED),
+        ("woken-by-event", _SERVED_THEN_SERVED, _SERVED_THEN_CANCELLED),
+        ("zero-delay-call-soon", _SERVED_THEN_SERVED, _SERVED_THEN_CANCELLED),
+        # Issued at the start of the instant: unaffected.
+        ("call-at-set-earlier", _CANCELLED_THEN_SERVED, _CANCELLED_THEN_SERVED),
+    ],
+)
+def test_d076_exception_cancel_partway_through_an_instant(
+    canceller: str, old: Log, new: Log
+) -> None:
+    # D076, first documented exception: a cancel issued later in an instant
+    # than its first round of steps. Same setup as above: "put 2" waits on a
+    # full container, "put 1" queues behind it, and at t=1 a task gets 3 and
+    # "put 1" is cancelled. The Condition had woken "put 1" together with
+    # "put 2", so a cancel that comes after that wake-up came too late and
+    # "put 1" was served; now "put 1" is still parked behind "put 2" and the
+    # cancel reaches it. The late cancels: after one asyncio.sleep(0) step;
+    # from a task woken by an Event the getter sets (no sleep(0), no timer);
+    # from a zero-delay loop.call_soon made by a task that slept until t=1.
+    # A cancel at the start of the instant (a loop.call_at timer set at t=0)
+    # gives the same result in both.
     def run(ours: bool) -> Log:
         log: Log = []
 
@@ -594,6 +629,7 @@ def test_d076_exception_cancel_partway_through_an_instant() -> None:
             log.append((name, "served", sim.now))
 
         async def main() -> None:
+            loop = asyncio.get_running_loop()
             c: Any
             if ours:
                 c = Container(10, init=10)
@@ -601,26 +637,39 @@ def test_d076_exception_cancel_partway_through_an_instant() -> None:
                 c = _ConditionContainer(10, 10, lambda c: None)
             sim.spawn(request(c, "put 2", 2, 0))
             put1 = sim.spawn(request(c, "put 1", 1, 0.5))
-            await sim.timeout(1)
-            await c.get(3)
-            await asyncio.sleep(0)  # one step into the instant
-            put1.cancel()
-            await sim.timeout(1)
+            got = asyncio.Event()
+
+            async def getter() -> None:
+                await sim.timeout(1)
+                await c.get(3)
+                got.set()
+                if canceller == "after-sleep-0":
+                    await asyncio.sleep(0)  # one step into the instant
+                    put1.cancel()
+
+            async def woken_by_event() -> None:
+                await got.wait()
+                put1.cancel()
+
+            async def zero_delay_timer() -> None:
+                await sim.timeout(1)
+                loop.call_soon(put1.cancel)
+
+            if canceller == "call-at-set-earlier":
+                loop.call_at(1, put1.cancel)
+            sim.spawn(getter())
+            if canceller == "woken-by-event":
+                sim.spawn(woken_by_event())
+            elif canceller == "zero-delay-call-soon":
+                sim.spawn(zero_delay_timer())
+            await sim.timeout(2)
             log.append(("final", c.level))
 
         desyncio.run(main())
         return log
 
-    assert run(False) == [
-        ("put 2", "served", 1),
-        ("put 1", "served", 1),
-        ("final", 10),
-    ]
-    assert run(True) == [
-        ("put 2", "served", 1),
-        ("put 1", "cancelled", 1),
-        ("final", 9),
-    ]
+    assert run(False) == old
+    assert run(True) == new
 
 
 def test_d076_exception_amounts_that_do_not_add_up_exactly() -> None:

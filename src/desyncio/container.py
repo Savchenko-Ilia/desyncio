@@ -81,12 +81,15 @@ code), but only when both of these hold:
   level is rounded after every change, and a different order of puts and gets
   within an instant can round differently, so a request may fit, or not, at
   another instant than before;
-* cancellations come from timers (``asyncio.timeout()``, a task that sleeps
-  until the cancel time and then cancels). A task that cancels a waiter
-  partway through an instant, after some ``await asyncio.sleep(0)`` steps, can
-  now reach a waiter that the old code had already served by that step (a
-  waiter behind a head is served a step later than before), so that waiter
-  is cancelled instead of served.
+* every cancel is issued at the start of its instant: by a timer set at an
+  earlier instant (``asyncio.timeout()``, ``wait_for``, ``loop.call_at``), or
+  by a task resuming from a sleep until that instant, before it suspends
+  again. A cancel issued later in the instant (after ``await
+  asyncio.sleep(0)`` steps, after waking on an ``Event``, a ``Queue`` or
+  another ``Container``'s put or get, or from a zero-delay
+  ``loop.call_soon``/``loop.call_later(0, ...)``) can reach a waiter that the
+  old code had already served by then (a waiter behind a head is served a
+  step later than before), so that waiter is cancelled instead of served.
 
 Both exceptions are pinned in ``tests/test_scaling_container.py``. And a task
 that resumes a step earlier or later may make its next request in a different

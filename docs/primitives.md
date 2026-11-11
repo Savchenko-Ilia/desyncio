@@ -711,11 +711,14 @@ strict FIFO, so only a line's head can be served, and only the heads need to wak
   - amounts that do not add up exactly in floating point (0.1, 0.3, ...; integers and fractions
     such as 0.5 or 0.25 are exact): a different order of puts and gets within an instant can
     round the level differently, so a request may be served at another instant, or not at all;
-  - a cancel issued partway through an instant (by a task that has run some
-    `await asyncio.sleep(0)` steps first) can hit a waiter the old code had already served by
-    then (a waiter behind a head is served a step later than before), so it is cancelled
-    instead of served. Cancels from timers (`asyncio.timeout()`, a task that sleeps
-    until the cancel time) are unaffected.
+  - a cancel issued later in an instant than its very start. Results are unchanged when every
+    cancel is issued at the start of its instant: by a timer set at an earlier instant
+    (`asyncio.timeout()`, `wait_for`, `loop.call_at`), or by a task resuming from a sleep until
+    that instant, before it suspends again. A cancel issued later in the instant (after
+    `await asyncio.sleep(0)` steps, after waking on an `Event`, a `Queue` or another
+    `Container`'s put or get, or from a zero-delay `loop.call_soon`/`loop.call_later(0, ...)`)
+    can hit a waiter the old code had already served by then (a waiter behind a head is
+    served a step later than before), so it is cancelled instead of served.
 
   And a task that resumes a step earlier or later may make its next request in a different
   order relative to other tasks, so a model can give different results for the same seed than
