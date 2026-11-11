@@ -1428,3 +1428,14 @@ Branch: feat/PERF-03 + fix/PERF-03-1 + fix/PERF-03-2  ·  Merged: 3c6f97a
 **Gotchas.** Teardown order is address-dependent, so a teardown test with capacity 1 catches `deque.remove` only sometimes; the test uses capacity 0 (no shifts) so nothing is granted and every cancel scans.
 
 **Follow-ups (SHOULD).** The counting containers don't count O(n) work through dict views, `copy()`, `rotate`/`reverse` (none is a revert of the bug); the holders ratio check is vacuous (counts 0/0), the absolute bound does the work.
+
+## PERF-02 — Stores scale (2026-11-11, batch 34)
+Branch: feat/PERF-02 + fix/PERF-02-1  ·  Merged: 6897dce
+
+**Approach.** The quadratic cost was inside asyncio (D077): `Queue.get`/`put` remove a cancelled waiter with `deque.remove`, and FilterStore's `Condition.wait` rescans dead futures in `_notify` and removes itself with `deque.remove`. Now all stores park waiters in a private `_Waiters` FIFO of futures: `discard()` is O(1) (lazy deletion), `wake(n)` pops from the head skipping done futures, and the deque is rebuilt once more than half may be dead and at least 32 cancellations piled up. Store/PriorityStore keep their items in `asyncio.Queue`/`PriorityQueue` through the public non-blocking API; `_WaitingQueue.put`/`get` adapt `Queue.put`/`get`. FilterStore keeps the `asyncio.Lock` and adapts `Condition.wait`/`wait_for`. Adapted code is PSF-marked and listed in `LICENSES/PSF.txt`. Teardown at 50k: Store ~9 s → ~1 s, FilterStore ~60 s → ~1.4 s.
+
+**Review findings.** Behaviour unchanged (1,500-seed differential fuzz per store, sensitive to every semantic mutant; the fix round changed only comments and docstrings, checked by AST). Round 1 MUSTs: the scaling test only cancelled everything at one instant, so a compaction on every cancel was invisible — added a newest-first reneging case and a counting `deque` patched into `desyncio.store`; a FilterStore docstring gave a reason for no `shutdown()` that is gone (D031 amended in D078); two adaptations lacked PSF marking. The round also updated the Store/PriorityStore/FilterStore sections of `docs/primitives.md` and the `tests/test_store.py` docstring (D078).
+
+**Gotchas.** Loop binding still raises "bound to a different event loop", as Queue and Condition did.
+
+**Follow-ups (SHOULD).** The FilterStore paragraph in `docs/primitives.md` names only `deque.remove` as the cause, not `Condition._notify`'s rescans. An oldest-first reneging case would cover FilterStore's bounded memory directly (it is covered through the shared `_Waiters` today). `_LoopBinding.get`'s "changes" note should say it raises where the original returned None. A synchronous `FilterStore.shutdown()` is now possible (D078).
