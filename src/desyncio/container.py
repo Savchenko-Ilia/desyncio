@@ -42,7 +42,9 @@ Ours (no code is copied from CPython):
   is empty and the amount fits. A head that was woken but has not run yet is
   still in the line, so a newcomer queues behind it, as before;
 * wake-ups: every level change wakes the parked head of each line (the oldest
-  park first, the order ``Condition.notify_all`` used). A head that leaves
+  park first, where a head that re-parks after a wake-up counts as parking
+  anew: the order ``Condition.notify_all`` used, pinned by
+  ``test_heads_are_woken_oldest_park_first``). A head that leaves
   with an exception (a cancel, a timeout, an interrupt) wakes the next head of
   its own line, so a cancelled big request never blocks the line and a
   wake-up is never lost. Nothing else wakes anyone: a parked head that does
@@ -180,12 +182,12 @@ class Container:
     not block each other's queues.
 
     ``monitor``, if given, is called as ``monitor(container)`` after every level
-    change (not on blocked or cancelled requests), once the state is fully
-    settled: the served request has left its line and the heads it may have
-    unblocked have been woken. It is called synchronously in the task that
-    changed the level, with no ``await`` in between, so ``level`` cannot change
-    under it. It reads public properties (``level``, ``capacity``) and must not
-    block or call ``put``/``get`` (D023).
+    change (not on blocked or cancelled requests), once the served request has
+    left its line. It is called synchronously in the task that changed the
+    level, with no ``await`` in between: the tasks the change wakes have not
+    run yet, so ``level`` cannot change under it. It reads public properties
+    (``level``, ``capacity``) and must not block or call ``put``/``get``
+    (D023).
 
     A monitor that raises an ``Exception`` does not affect the model (D023 v2):
     the ``put``/``get`` still completes normally and the error goes to
@@ -288,13 +290,15 @@ class Container:
         self._level_changed()
 
     def _level_changed(self) -> None:
-        """Wake the parked head of each line (oldest park first), then monitor.
+        """Wake the parked head of each line (oldest park first); call the monitor.
 
         A level change is the only thing that can make a waiting head fit, so
         both heads re-check; a head that was already woken and has not run yet
-        will see the new level when it runs. ``set_result`` only schedules the
-        woken tasks: they run after this task's current step, so the monitor
-        below sees the settled level.
+        will see the new level when it runs. The order of the wake-ups is
+        observable: the woken tasks run in that order, later. Whether the
+        monitor is called before or after them is not: ``set_result`` only
+        schedules a woken task, which runs after this task's current step, so
+        the monitor sees the same level either way.
         """
         heads = [w for w in (self._putters.head(), self._getters.head()) if w]
         heads.sort(key=lambda w: w.parked)

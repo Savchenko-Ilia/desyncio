@@ -495,6 +495,49 @@ def test_d076_same_instant_order_changed() -> None:
     ]
 
 
+def test_heads_are_woken_oldest_park_first() -> None:
+    # The documented wake order: a level change wakes the parked head of each
+    # line, the one that parked (or re-parked) first runs first, as
+    # Condition.notify_all woke its waiters. Capacity 10, empty, all at t=0:
+    #   "get 3" parks (park 0); "put 7" is served (level 7) and wakes it;
+    #   "get 5" parks behind "get 3" (1); "put 5" parks (2); "put 1" (3).
+    #   "get 3" runs: level 4, wakes both heads: "get 5" (1), then "put 5" (2).
+    #   "get 5" does not fit (4 < 5) and re-parks (4); "put 5" fits: level 9,
+    #   wakes "put 1" (3) before "get 5" (4). "put 1": level 10; "get 5": 5.
+    # Newest park first, or putters before getters (no sort), run "put 5"
+    # before "get 5" after "get 3" and serve "get 5" before "put 1"; without
+    # the new number on re-park, "get 5" (still 1) runs before "put 1" (3).
+    def run(ours: bool) -> Log:
+        log: Log = []
+
+        async def request(c: Any, op: str, amount: float) -> None:
+            await getattr(c, op)(amount)
+            log.append((f"{op} {amount}", c.level))
+
+        async def main() -> None:
+            c: Any
+            if ours:
+                c = Container(10)
+            else:
+                c = _ConditionContainer(10, 0, lambda c: None)
+            for op, amount in [
+                ("get", 3),
+                ("put", 7),
+                ("get", 5),
+                ("put", 5),
+                ("put", 1),
+            ]:
+                sim.spawn(request(c, op, amount))
+            await sim.timeout(1)
+
+        desyncio.run(main())
+        return log
+
+    expected = [("put 7", 7), ("get 3", 4), ("put 5", 9), ("put 1", 10), ("get 5", 5)]
+    assert run(True) == expected
+    assert run(False) == expected  # the Condition's order, too
+
+
 def test_d076_exception_cancel_partway_through_an_instant() -> None:
     # D076, first documented exception: a cancel issued after one
     # asyncio.sleep(0) step, not by a timer. Same setup as above: "put 2"
