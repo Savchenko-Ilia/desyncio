@@ -685,7 +685,7 @@ itself, one FIFO line per direction, and cancelling n waiters is O(n).
 | Parking a task on a future, waking it (`set_result`), cancellation, timeouts and interrupts arriving as `CancelledError` at the `await` | asyncio |
 | One FIFO line of waiters per direction; only the head of a line is ever woken, and it re-checks its amount when it runs (strict FIFO with head-of-line blocking, D021) | desyncio |
 | Wake-ups: a level change wakes the parked head of each line, oldest park first; a head that leaves (cancel, timeout, interrupt) wakes the next head of its line | desyncio |
-| Lazy deletion: a waiter leaving from the middle of a line is only marked, and the line is rebuilt once departed records outnumber live ones, so memory stays bounded | desyncio |
+| Lazy deletion: a waiter leaving from the middle of a line is only marked, and the line is rebuilt whenever it holds more than twice its live waiters plus a small slack, so memory stays bounded by the live waiters | desyncio |
 | No lock: every check and change of the level happens in one synchronous step (no `await` in between) | desyncio |
 | Amount validation, `level`/`capacity`, the monitor | desyncio |
 

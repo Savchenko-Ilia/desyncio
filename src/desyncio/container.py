@@ -51,9 +51,10 @@ Ours (no code is copied from CPython):
   not fit stays unfit until the level changes;
 * lazy deletion: a waiter that leaves from the middle of its line is only
   marked; marked records are popped when they reach the head, and the deque
-  is rebuilt without them once they outnumber the live ones by more than
-  ``_SLACK`` (O(1) amortised per cancellation, memory bounded by about twice
-  the live waiters);
+  is rebuilt without them whenever, after a waiter leaves (served or
+  cancelled, from the head or the middle), it holds more than twice the live
+  waiters plus ``_SLACK`` (O(1) amortised per departure; at any time a line
+  holds at most ``2 * live + _SLACK`` records);
 * no lock: the level and both lines are read and changed only in synchronous
   code (no ``await`` between the check and the change), so two tasks can never
   interleave inside one operation. The old ``Condition`` lock was never
@@ -158,16 +159,20 @@ class _Line:
         """Take ``waiter`` out of the line; return True if it was the head.
 
         The head is popped. Any other waiter is only marked (no search, unlike
-        ``deque.remove``); the deque is rebuilt once departed records outnumber
-        live ones by more than ``_SLACK``, which costs O(len) at most once per
-        about len/2 departures.
+        ``deque.remove``). After either, the deque is rebuilt if it holds more
+        than twice the live waiters plus ``_SLACK``, so the departed records
+        behind the head never pile up, whichever end the waiters leave from.
+        A rebuild leaves ``m`` records, all live. The next one waits until the
+        gap ``len - 2 * live`` has climbed from ``-m`` past ``_SLACK``, at most
+        2 per departure, so after at least ``m / 2`` departures, and it costs
+        ``m`` plus the joins since: O(1) amortised per operation.
         """
         was_head = self.head() is waiter
         waiter.queued = False
         self.live -= 1
         if was_head:
             self._waiters.popleft()
-        elif len(self._waiters) > 2 * self.live + _SLACK:
+        if len(self._waiters) > 2 * self.live + _SLACK:
             self._waiters = deque(w for w in self._waiters if w.queued)
         return was_head
 

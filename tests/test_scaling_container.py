@@ -281,6 +281,42 @@ def test_teardown_work_is_bounded_per_waiter(side: str) -> None:
             assert count <= PER_WAITER * n, f"teardown {side}: {what} {count} for {n}"
 
 
+@pytest.mark.parametrize("side", ["get", "put"])
+def test_memory_is_bounded_by_the_live_waiters(side: str) -> None:
+    # The PERF-04 reviewer's pattern: n waiters park; the newest half (plus a
+    # few) are cancelled, which marks them in place without a rebuild (still
+    # at most twice the live ones); then the live ones are served one by one
+    # from the head. Departed records must not pile up behind the last live
+    # waiter: the bound holds after every change, not only after a departure
+    # from the middle. (Read through the private line on purpose: departed
+    # records are invisible in the public API.)
+    n = 1000
+    keep = n // 2 - 8  # cancelling the rest leaves 2 * keep + _SLACK records
+
+    def check(line: Any) -> None:
+        kept = deque.__len__(line._waiters)
+        assert kept <= 2 * line.live + desyncio.container._SLACK, (
+            f"{kept} records kept for {line.live} live waiters"
+        )
+
+    async def main() -> None:
+        c, request = _blocked(side)
+        tasks = [sim.spawn(request()) for _ in range(n)]
+        await sim.timeout(1)
+        line = _line(c, side)
+        for task in reversed(tasks[keep:]):
+            task.cancel()
+        await sim.timeout(1)
+        check(line)
+        for _ in range(keep - 1):  # serve all but the last one
+            await (c.put(1) if side == "get" else c.get(1))
+            await sim.timeout(1)
+            check(line)
+        assert line.live == 1
+
+    desyncio.run(main())
+
+
 # --- behaviour: what must still agree with the Condition-based original ------
 
 
